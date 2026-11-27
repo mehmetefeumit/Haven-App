@@ -577,7 +577,15 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'يشارك Haven موقعك مع دوائرك كلما كان التطبيق مفتوحًا. وإن فعّلت هذا الخيار، ظلّت دوائرك ترى موقعك بينما يعمل Haven في الخلفية. وإذا أغلق النظام Haven، توقّفت مشاركتك أنت: قد يستيقظ Haven لجلب مواقع دوائرك، لكنه لا يستيقظ أبدًا لإرسال موقعك. وعلى Android، تستمر المشاركة حتى بعد إزاحة Haven من مبدّل التطبيقات، وتعود من تلقاء نفسها بعد إعادة تشغيل الجهاز. أما على iPhone فتبقى المشاركة متوقفة إلى أن تفتح Haven.';
+      'يشارك Haven موقعك مع دوائرك كلما كان التطبيق مفتوحًا. وعند تفعيل هذا الخيار، تظل دوائرك ترى موقعك بينما يعمل Haven في الخلفية. وإزاحة Haven من مبدّل التطبيقات لا تُعطّل هذا الإعداد؛ فلا يعطّله إلا المفتاح أدناه.';
+
+  @override
+  String get locationSettingsIntroAndroid =>
+      'تستمر المشاركة بعد إزاحة Haven من مبدّل التطبيقات. وبعد إعادة تشغيل الهاتف أو تحديث Haven، تعود المشاركة من تلقاء نفسها إذا كان مسموحًا لتطبيق Haven باستخدام موقعك طوال الوقت (وعلى Android 10 أو الإصدارات الأقدم، إذا كان مسموحًا له باستخدام موقعك أصلًا). وإلا فسيعرض Haven إشعارًا يمكن النقر عليه لاستئناف المشاركة. وإذا فُرض إيقاف Haven، تظل المشاركة متوقفة إلى حين فتحه.';
+
+  @override
+  String get locationSettingsIntroIos =>
+      'عند ضبط الموقع على «دائمًا»، تعود المشاركة من تلقاء نفسها بعد إغلاق Haven، وذلك بعد التنقّل بضع مئات من الأمتار وحين يسمح iOS بذلك. وبعد إعادة تشغيل الهاتف، لا يحدث هذا إلا بعد فتح قفله أيضًا. ويقرّر iOS توقيت ذلك، فهو غير مضمون. ومع «أثناء استخدام التطبيق»، تتوقف المشاركة عند إغلاق Haven وتعود عند فتحه.';
 
   @override
   String get locationSettingsToggleTitle => 'المشاركة في الخلفية';
@@ -588,7 +596,25 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'تظل المشاركة تعمل في الخلفية بإذنك الحالي، ويعرض iOS خلال ذلك شريط الموقع الأزرق في أعلى الشاشة. اختر «دائمًا» لتطبيق Haven في الإعدادات ليتمكّن أيضًا من تدارك ما فاته من مواقع دوائرك بعد أن يُغلق iOS التطبيق. ومع «دائمًا»، قد يعرض iOS سهم الموقع في شريط الحالة بدلًا من ذلك الشريط. أما مشاركة موقعك أنت فتُستأنف عندما تفتح Haven من جديد.';
+      'تظل المشاركة تعمل في الخلفية بإذنك الحالي، ويعرض iOS خلال ذلك شريط الموقع الأزرق في أعلى الشاشة. وإذا أُغلق Haven، تتوقف المشاركة إلى حين فتحه من جديد. وباختيار «دائمًا» لتطبيق Haven في الإعدادات، يمكن للمشاركة أن تعود من تلقاء نفسها بعد إغلاق Haven، وذلك بعد التنقّل بضع مئات من الأمتار وحين يسمح iOS بذلك. ومع «دائمًا»، قد يعرض iOS سهم الموقع في شريط الحالة بدلًا من ذلك الشريط.';
+
+  @override
+  String get locationSettingsResumeConsentNote =>
+      'المشاركة في الخلفية مفعّلة. وإذا توقفت، عند إعادة تشغيل الهاتف مثلًا، فلن يعيد Haven تشغيلها من تلقاء نفسه إلى حين الموافقة على بيان المشاركة في الخلفية المحدَّث.';
+
+  @override
+  String get locationSettingsResumeConsentAction => 'مراجعة البيان';
+
+  @override
+  String locationSettingsAndroidAllTimeNote(String optionLabel) {
+    return 'إذن الموقع لتطبيق Haven ليس مضبوطًا على «$optionLabel»، لذا لن تعود المشاركة من تلقاء نفسها بعد إعادة تشغيل الهاتف أو تحديث Haven. وبدلًا من ذلك، سيعرض Haven إشعارًا يمكن النقر عليه لاستئناف المشاركة.';
+  }
+
+  @override
+  String get locationSettingsAndroidAllTimeAction => 'تغيير الإذن';
+
+  @override
+  String get locationBackgroundAllTimeOptionFallback => 'السماح طوال الوقت';
 
   @override
   String get locationSettingsAndroidHeader => 'إعدادات النظام للموثوقية';
@@ -599,7 +625,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get locationSettingsAndroidBattery =>
-      'للمشاركة الموثوقة في الخلفية، استثنِ Haven أيضًا من تحسين البطارية. انتقل إلى الإعدادات ← التطبيقات ← Haven ← البطارية ← السماح طوال الوقت.';
+      'لضمان موثوقية المشاركة في الخلفية، يُستحسن أيضًا استثناء Haven من تحسين البطارية عبر: الإعدادات ← التطبيقات ← Haven ← البطارية ← الاستخدام غير المحدّد بقيود.';
 
   @override
   String get locationSettingsAndroidVendors =>
@@ -638,7 +664,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get locationDisclosureBackgroundIos =>
-      'يستخدم هذا التطبيق بيانات الموقع لتمكين المشاركة مع دوائرك حتى عندما يعمل Haven في الخلفية ولا تستخدمه أنت. وإذا أغلق iOS تطبيق Haven، توقّفت مشاركتك إلى أن تفتحه من جديد: قد يستيقظ Haven لجلب مواقع دوائرك، لكنه لا يستيقظ أبدًا لإرسال موقعك.';
+      'يستخدم هذا التطبيق بيانات الموقع لتمكين المشاركة مع دوائرك حتى عندما يعمل Haven في الخلفية وليس قيد الاستخدام. وإذا كان الموقع مضبوطًا على «دائمًا» وأُغلق Haven، حتى لو كان الإغلاق منك، يستأنف Haven المشاركة من تلقاء نفسه بعد التنقّل بضع مئات من الأمتار وحين يسمح iOS بذلك. وبعد إعادة التشغيل، لا يحدث هذا إلا بعد فتح قفل الهاتف أيضًا. ويقرّر iOS توقيت ذلك، فهو غير مضمون. ومع «أثناء استخدام التطبيق»، تتوقف المشاركة عند إغلاق Haven وتبقى متوقفة إلى حين فتحه من جديد.';
 
   @override
   String get locationDisclosureManage =>
@@ -651,7 +677,26 @@ class AppLocalizationsAr extends AppLocalizations {
   String get locationDisclosureNotNow => 'ليس الآن';
 
   @override
+  String get locationDisclosureUpdateLead =>
+      'تغيّرت المشاركة في الخلفية منذ تفعيلها، إذ صار بإمكان Haven الآن استئناف المشاركة من تلقاء نفسه بعد أن تتوقف، كما يحدث عند إعادة تشغيل الهاتف مثلًا، وذلك في الحالات الموضّحة أدناه. وعند اختيار «ليس الآن»، تظل المشاركة في الخلفية تعمل كما كانت، لكنها إذا توقفت تبقى متوقفة إلى حين فتح Haven.';
+
+  @override
+  String locationBackgroundAllTimeStep(String optionLabel) {
+    return 'بعد ذلك، في الشاشة التي يفتحها Android، يُرجى ضبط إذن الموقع لتطبيق Haven على «$optionLabel» كي تعود المشاركة من تلقاء نفسها بعد إعادة تشغيل الهاتف أو تحديث Haven. ومن دون ذلك، تظل المشاركة تعمل إلى حين إعادة تشغيل الهاتف أو تحديث Haven، ثم يعرض Haven إشعارًا يمكن النقر عليه لاستئناف المشاركة.';
+  }
+
+  @override
   String get fgsNotificationSharing => 'يُرسل Haven معلومات الموقع ويستقبلها';
+
+  @override
+  String get androidResumeNoticeTitle => 'توقّفت مشاركة الموقع';
+
+  @override
+  String get androidResumeNoticeBody =>
+      'يمكنك النقر لفتح Haven واستئناف مشاركة موقعك مع دوائرك.';
+
+  @override
+  String get androidResumeNoticeChannelName => 'تذكيرات المشاركة';
 
   @override
   String get fgsNotificationPaused =>

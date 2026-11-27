@@ -343,6 +343,12 @@ final backgroundSharingProvider =
       );
     });
 
+/// Completes once [BackgroundSharingNotifier.loaded] has: until then the
+/// toggle reads its initial `false`, which is not the user's answer.
+final backgroundSharingLoadedProvider = FutureProvider<void>(
+  (ref) => ref.watch(backgroundSharingProvider.notifier).loaded,
+);
+
 /// Test seam: exposes [Platform.isAndroid] as an overridable provider so that
 /// [backgroundServiceLifecycleProvider] can be exercised on non-Android
 /// test runners by overriding this provider in a [ProviderScope].
@@ -442,17 +448,22 @@ final backgroundServiceLifecycleProvider = Provider<void>((ref) {
   final isAndroid = ref.watch(platformIsAndroidProvider);
   if (!isAndroid) return;
 
+  // Nothing acts on the toggle before the persisted consent is read: its
+  // initial `false` would stop a service a boot, an update or a swipe-away
+  // left running, and that stop is what the next boot obeys.
+  if (!ref.watch(backgroundSharingLoadedProvider).hasValue) return;
+
   final enabled = ref.watch(backgroundSharingProvider);
   final identityAsync = ref.watch(identityProvider);
 
   // Resolve the injectable service functions (start/stop).
   final fns = ref.watch(backgroundServiceFunctionsProvider);
 
-  // Tear down the service when the provider is disposed (app shut
-  // down, identity removed, toggle flipped off, etc.).
-  ref.onDispose(() {
-    unawaited(fns.stop());
-  });
+  // No stop on dispose: Riverpod disposes before EVERY rebuild, so a stop
+  // here killed the service on each identity reload and, in the build where
+  // sharing and identity first both hold, ran right behind this build's own
+  // start. Toggle-off and no-identity stop below; app shutdown must not stop
+  // the service at all.
 
   // Fix 5: Do not change service state during a transient identity reload.
   // ref.invalidate(identityProvider) briefly produces AsyncLoading before

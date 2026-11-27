@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Text Android shows with no Flutter engine running (BootResume.kt,
+     ResumeNotice.kt). Each entry mirrors the ARB key its name spells in
+     camelCase (fgs_notification_sharing = fgsNotificationSharing), and each
+     values-<lang>/strings.xml mirrors that locale's ARB;
+     test/l10n/android_notice_strings_test.dart holds every entry equal to its
+     ARB value. Edit the ARB first, then copy the text here. -->
+<resources>
+    <string name="fgs_notification_sharing">Haven envoie et reçoit des mises à jour de position</string>
+    <string name="android_resume_notice_title">Le partage de position s\'est arrêté</string>
+    <string name="android_resume_notice_body">Appuyez pour ouvrir Haven et reprendre le partage de votre position avec vos cercles.</string>
+    <string name="android_resume_notice_channel_name">Rappels de partage</string>
+</resources>

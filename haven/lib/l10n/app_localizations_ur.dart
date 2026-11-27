@@ -562,7 +562,15 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'جب بھی ایپ کھلی ہو، Haven آپ کا مقام آپ کے حلقوں کے ساتھ شیئر کرتا ہے۔ اسے آن کریں تو Haven کے پس منظر میں ہوتے ہوئے بھی آپ کے حلقے اسے دیکھتے رہیں گے۔ اگر سسٹم نے Haven کو بند کر دیا تو آپ کی اپنی شیئرنگ رک جاتی ہے: Haven پھر بھی آپ کے حلقوں کے مقامات لانے کے لیے جاگ سکتا ہے، مگر آپ کا اپنا مقام بھیجنے کے لیے کبھی نہیں۔ Android پر شیئرنگ Haven کو ایپ سوئچر سے ہٹا دینے کے بعد بھی جاری رہتی ہے اور فون دوبارہ چالو ہونے پر خود ہی پھر شروع ہو جاتی ہے۔ iPhone پر شیئرنگ اُس وقت تک رکی رہتی ہے جب تک آپ Haven نہ کھولیں۔';
+      'جب بھی ایپ کھلی ہو، Haven آپ کا مقام آپ کے حلقوں کے ساتھ شیئر کرتا ہے۔ اسے آن کریں تو Haven کے پس منظر میں ہوتے ہوئے بھی آپ کے حلقے اسے دیکھتے رہیں گے۔ Haven کو ایپ سوئچر سے ہٹا دینے سے یہ ترتیب بند نہیں ہوتی؛ اسے صرف نیچے دیا گیا سوئچ ہی بند کرتا ہے۔';
+
+  @override
+  String get locationSettingsIntroAndroid =>
+      'Haven کو ایپ سوئچر سے ہٹا دینے پر بھی شیئرنگ جاری رہتی ہے۔ فون دوبارہ چالو ہونے یا Haven کے اپ ڈیٹ ہونے کے بعد شیئرنگ خود ہی پھر شروع ہو جاتی ہے، بشرطیکہ Haven کو ہر وقت آپ کا مقام استعمال کرنے کی اجازت ہو (Android 10 یا اس سے پرانے ورژن پر، بشرطیکہ Haven کو آپ کا مقام استعمال کرنے کی کوئی بھی اجازت ہو)۔ ورنہ Haven ایک اطلاع دکھاتا ہے جس پر ٹیپ کر کے شیئرنگ دوبارہ شروع کی جا سکتی ہے۔ اگر Haven کو زبردستی روک دیا جائے تو شیئرنگ اُس وقت تک رکی رہتی ہے جب تک آپ اسے نہ کھولیں۔';
+
+  @override
+  String get locationSettingsIntroIos =>
+      'مقام کی اجازت \'Always\' پر ہو تو Haven کے بند ہونے کے بعد شیئرنگ خود ہی پھر شروع ہو جاتی ہے، مگر صرف تب جب آپ چند سو میٹر کا فاصلہ طے کر لیں اور iOS اس کی اجازت دے۔ فون دوبارہ چالو ہونے کے بعد ایسا تبھی ہوتا ہے جب آپ اسے اَن لاک بھی کر لیں۔ یہ کب ہو، اس کا فیصلہ iOS کرتا ہے، اس لیے اس کی کوئی ضمانت نہیں۔ \'While Using the App\' پر Haven بند ہوتے ہی شیئرنگ رک جاتی ہے اور آپ کے اسے کھولنے پر دوبارہ شروع ہوتی ہے۔';
 
   @override
   String get locationSettingsToggleTitle => 'پس منظر میں شیئر کریں';
@@ -573,7 +581,25 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'آپ کی موجودہ اجازت کے ساتھ شیئرنگ پس منظر میں کام کرتی رہتی ہے، اور اس دوران iOS آپ کی اسکرین کے اوپری حصے میں اپنی نیلی مقام پٹی دکھاتا ہے۔ ترتیبات میں Haven کے لیے \'Always\' منتخب کریں تاکہ iOS کے ایپ بند کر دینے کے بعد Haven آپ کے حلقوں کے مقامات کی تازہ صورت حال بھی حاصل کر سکے۔ \'Always\' کے تحت iOS خود اُس پٹی کے بجائے اسٹیٹس بار میں مقام کا تیر دکھا سکتا ہے۔ آپ کی اپنی شیئرنگ تو Haven دوبارہ کھولنے پر ہی بحال ہوتی ہے۔';
+      'آپ کی موجودہ اجازت کے ساتھ شیئرنگ پس منظر میں کام کرتی رہتی ہے، اور اس دوران iOS آپ کی اسکرین کے اوپری حصے میں اپنی نیلی مقام پٹی دکھاتا ہے۔ اگر Haven بند ہو جائے تو شیئرنگ اُس وقت تک رکی رہتی ہے جب تک آپ اسے دوبارہ نہ کھولیں۔ ترتیبات میں Haven کے لیے \'Always\' منتخب کریں تاکہ Haven کے بند ہونے کے بعد بھی شیئرنگ خود ہی پھر شروع ہو سکے، مگر صرف تب جب آپ چند سو میٹر کا فاصلہ طے کر لیں اور iOS اس کی اجازت دے۔ \'Always\' کے تحت iOS اُس پٹی کے بجائے اسٹیٹس بار میں مقام کا تیر دکھا سکتا ہے۔';
+
+  @override
+  String get locationSettingsResumeConsentNote =>
+      'پس منظر میں شیئرنگ آن ہے۔ اگر یہ رک جائے، مثلاً فون دوبارہ چالو ہونے پر، تو Haven اسے اُس وقت تک خود دوبارہ شروع نہیں کرے گا جب تک آپ پس منظر میں شیئرنگ کے اپ ڈیٹ شدہ نوٹس سے متفق نہ ہوں۔';
+
+  @override
+  String get locationSettingsResumeConsentAction => 'نوٹس دیکھیں';
+
+  @override
+  String locationSettingsAndroidAllTimeNote(String optionLabel) {
+    return 'Haven کی مقام کی اجازت \'$optionLabel\' پر سیٹ نہیں ہے، اس لیے فون دوبارہ چالو ہونے یا Haven کے اپ ڈیٹ ہونے کے بعد شیئرنگ خود ہی دوبارہ شروع نہیں ہو گی۔ اس کے بجائے Haven ایک اطلاع دکھائے گا جس پر ٹیپ کر کے شیئرنگ دوبارہ شروع کی جا سکتی ہے۔';
+  }
+
+  @override
+  String get locationSettingsAndroidAllTimeAction => 'اجازت تبدیل کریں';
+
+  @override
+  String get locationBackgroundAllTimeOptionFallback => 'ہر وقت اجازت دیں';
 
   @override
   String get locationSettingsAndroidHeader => 'بھروسے کے لیے OS ترتیبات';
@@ -584,7 +610,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get locationSettingsAndroidBattery =>
-      'بھروسے مند پس منظر شیئرنگ کے لیے Haven کو بیٹری بہتری سے بھی مستثنیٰ کریں۔ Settings → Apps → Haven → Battery → Allow all the time پر جائیں۔';
+      'بھروسے مند پس منظر شیئرنگ کے لیے Haven کو بیٹری بہتری سے بھی مستثنیٰ کریں۔ یہاں جائیں: ترتیبات ← ایپس ← Haven ← بیٹری ← پابندی کے بغیر۔';
 
   @override
   String get locationSettingsAndroidVendors =>
@@ -623,7 +649,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get locationDisclosureBackgroundIos =>
-      'یہ ایپ مقام کا ڈیٹا استعمال کرتی ہے تاکہ Haven کے پس منظر میں ہوتے ہوئے اور آپ کے اسے استعمال نہ کرتے ہوئے بھی آپ کے حلقوں کے ساتھ شیئرنگ ممکن ہو سکے۔ اگر iOS نے Haven کو بند کر دیا تو آپ کی اپنی شیئرنگ اُس وقت تک رکی رہے گی جب تک آپ اسے دوبارہ نہ کھولیں: Haven پھر بھی آپ کے حلقوں کے مقامات لانے کے لیے جاگ سکتا ہے، مگر آپ کا اپنا مقام بھیجنے کے لیے کبھی نہیں۔';
+      'یہ ایپ مقام کا ڈیٹا استعمال کرتی ہے تاکہ Haven کے پس منظر میں ہوتے ہوئے اور آپ کے اسے استعمال نہ کرتے ہوئے بھی آپ کے حلقوں کے ساتھ شیئرنگ ممکن ہو سکے۔ اگر مقام کی اجازت \'Always\' پر ہو اور Haven بند ہو جائے، چاہے آپ خود اسے بند کریں، تو Haven شیئرنگ خود ہی دوبارہ شروع کر دیتا ہے، مگر صرف تب جب آپ چند سو میٹر کا فاصلہ طے کر لیں اور iOS اس کی اجازت دے۔ فون دوبارہ چالو ہونے کے بعد ایسا تبھی ہوتا ہے جب آپ اپنا فون اَن لاک بھی کر لیں۔ یہ کب ہو، اس کا فیصلہ iOS کرتا ہے، اس لیے اس کی کوئی ضمانت نہیں۔ \'While Using the App\' پر Haven بند ہوتے ہی شیئرنگ رک جاتی ہے اور اُس وقت تک رکی رہتی ہے جب تک آپ اسے دوبارہ نہ کھولیں۔';
 
   @override
   String get locationDisclosureManage =>
@@ -636,8 +662,27 @@ class AppLocalizationsUr extends AppLocalizations {
   String get locationDisclosureNotNow => 'ابھی نہیں';
 
   @override
+  String get locationDisclosureUpdateLead =>
+      'جب سے آپ نے پس منظر میں شیئرنگ آن کی ہے، اس میں تبدیلی آئی ہے۔ اب شیئرنگ رک جانے کے بعد، مثلاً فون دوبارہ چالو ہونے پر، Haven نیچے بیان کی گئی صورتوں میں اسے خود ہی دوبارہ شروع کر سکتا ہے۔ اگر آپ \'ابھی نہیں\' منتخب کریں تو پس منظر میں شیئرنگ پہلے کی طرح کام کرتی رہے گی، لیکن ایک بار رک جانے کے بعد وہ اُس وقت تک رکی رہے گی جب تک آپ Haven نہ کھولیں۔';
+
+  @override
+  String locationBackgroundAllTimeStep(String optionLabel) {
+    return 'اس کے بعد Android جو اسکرین کھولے، اس پر Haven کی مقام کی اجازت \'$optionLabel\' پر سیٹ کریں تاکہ فون دوبارہ چالو ہونے یا Haven کے اپ ڈیٹ ہونے کے بعد شیئرنگ خود ہی دوبارہ شروع ہو جائے۔ اگر آپ ایسا نہ کریں تو شیئرنگ فون دوبارہ چالو ہونے یا Haven کے اپ ڈیٹ ہونے تک کام کرتی رہے گی، اور پھر Haven ایک اطلاع دکھائے گا جس پر ٹیپ کر کے شیئرنگ دوبارہ شروع کی جا سکتی ہے۔';
+  }
+
+  @override
   String get fgsNotificationSharing =>
       'Haven مقام کی معلومات بھیج اور وصول کر رہا ہے';
+
+  @override
+  String get androidResumeNoticeTitle => 'مقام کی شیئرنگ رک گئی ہے';
+
+  @override
+  String get androidResumeNoticeBody =>
+      'Haven کھولنے اور اپنے حلقوں کے ساتھ اپنا مقام دوبارہ شیئر کرنا شروع کرنے کے لیے ٹیپ کریں۔';
+
+  @override
+  String get androidResumeNoticeChannelName => 'شیئرنگ کی یاد دہانیاں';
 
   @override
   String get fgsNotificationPaused =>

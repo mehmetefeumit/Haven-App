@@ -102,6 +102,10 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:1.6.2")
     implementation("androidx.camera:camera-view:1.6.2")
     implementation("io.github.zxing-cpp:android:3.1.1")
+    // JVM unit tests of the boot/update resume rule (BootResumeTest.kt), run
+    // by build-check.yml. Test-only: nothing of it reaches the APK, and JUnit
+    // 4 with its one dependency (hamcrest-core) carries no Google class.
+    testImplementation("junit:junit:4.13.2")
 }
 
 kotlin {

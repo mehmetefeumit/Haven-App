@@ -19,7 +19,6 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/rust/frb_generated.dart';
@@ -28,6 +27,7 @@ import 'package:haven/src/utils/log_alias.dart'
     show LogAliasClass, logAliasHandle;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'location_disclosure_seed.dart';
 import 'test_relay.dart' show locationRelayUrl;
 
 /// Convenience: lowercase hex encoding of [bytes].
@@ -471,8 +471,10 @@ class TestUser {
     // foreground flag would silently block every background-publish scenario —
     // including `e2e-fgs-publish`, whose entire job is to reproduce P0-1, which
     // it could no longer reach.
-    await prefs.setBool(kLocationDisclosureAcceptedKey, true);
-    await prefs.setBool(kLocationDisclosureBackgroundAcceptedKey, true);
+    //
+    // At the current version: an older one re-shows the updated disclosure at
+    // MapShell's first foreground, over whatever the scenario drives.
+    await seedLocationDisclosuresAccepted(prefs);
   }
 
   /// Removes the seeded identity + clears onboarding flags. Call from
@@ -488,8 +490,7 @@ class TestUser {
     await prefs.remove(kOnboardingIntroSeenKey);
     await prefs.remove(kOnboardingDisplayNameSetKey);
     await prefs.remove(kOnboardingCompletedKey);
-    await prefs.remove(kLocationDisclosureAcceptedKey);
-    await prefs.remove(kLocationDisclosureBackgroundAcceptedKey);
+    await clearLocationDisclosures(prefs);
   }
 
   /// Short identifier used in logs and temp-dir names ("alice", "bob").

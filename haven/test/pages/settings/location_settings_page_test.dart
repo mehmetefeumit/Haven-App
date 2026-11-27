@@ -35,13 +35,18 @@ import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/pages/settings/location_settings_page.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/location_disclosure_provider.dart';
+import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/services/android_background_location.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/ios_background_session_service.dart';
 import 'package:haven/src/services/ios_location_auth_service.dart';
 import 'package:haven/src/test_keys.dart';
+import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/common/long_message_snack_bar.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../helpers/log_capture.dart';
 
 // =============================================================================
 // Fake disclosure controller
@@ -61,14 +66,102 @@ class _FakeDisclosureController extends LocationDisclosureController {
   /// if `ensureDisclosed` was never called.
   bool? lastIncludeBackground;
 
+  /// The all-time step [ensureDisclosed] was last asked to carry.
+  BackgroundLocationStatus? lastAllTimeStep;
+
+  /// Records an acceptance as the real controller does, so the page reads
+  /// the state an Agree leaves behind.
   @override
   Future<bool> ensureDisclosed(
     BuildContext context, {
     required bool includeBackground,
+    BackgroundLocationStatus? allTimeStep,
   }) async {
     lastIncludeBackground = includeBackground;
+    lastAllTimeStep = allTimeStep;
+    if (_result) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(kLocationDisclosureAcceptedKey, true);
+      if (includeBackground) {
+        await prefs.setBool(kLocationDisclosureBackgroundAcceptedKey, true);
+        await prefs.setInt(
+          kLocationDisclosureBackgroundVersionKey,
+          kBackgroundDisclosureVersion,
+        );
+      }
+    }
     return _result;
   }
+}
+
+// =============================================================================
+// Fake Android background-location permission
+// =============================================================================
+
+/// The `haven.app/background_location` channel, as the state the page reads.
+class _FakeAllTime implements AndroidBackgroundLocation {
+  _FakeAllTime(this.current, {this.grantOnRequest = false});
+
+  /// Android 11+ with "Allow all the time" held: nothing to ask.
+  _FakeAllTime.granted()
+    : this(const BackgroundLocationStatus(required: true, granted: true));
+
+  /// Android 11+ without it; [foregroundGranted] false is a user who has
+  /// not let Haven use location at all.
+  _FakeAllTime.missing({
+    bool grantOnRequest = false,
+    bool foregroundGranted = true,
+  }) : this(
+         BackgroundLocationStatus(
+           required: true,
+           granted: false,
+           optionLabel: 'Allow all the time',
+           foregroundGranted: foregroundGranted,
+         ),
+         grantOnRequest: grantOnRequest,
+       );
+
+  /// Mutable: a grant made in system settings while the page is away.
+  BackgroundLocationStatus current;
+  final bool grantOnRequest;
+  int requests = 0;
+  int statusReads = 0;
+
+  /// Called on every [request], before it answers: a test's probe of what
+  /// had already happened by then.
+  void Function()? onRequest;
+
+  /// While non-null, [status] answers only once it completes: a platform
+  /// channel's round trip, during which the user can tap again.
+  Completer<void>? statusGate;
+
+  /// When non-null, the NEXT [status] read throws it once.
+  Object? statusError;
+
+  @override
+  Future<BackgroundLocationStatus> status() async {
+    statusReads++;
+    await statusGate?.future;
+    final error = statusError;
+    if (error != null) {
+      statusError = null;
+      throw error;
+    }
+    return current;
+  }
+
+  @override
+  Future<bool> request() async {
+    requests++;
+    onRequest?.call();
+    if (grantOnRequest) {
+      current = const BackgroundLocationStatus(required: true, granted: true);
+    }
+    return true;
+  }
+
+  @override
+  Future<void> openAppSettings() async {}
 }
 
 // =============================================================================
@@ -181,8 +274,7 @@ class _FakeIosBackgroundSession implements IosBackgroundSessionService {
     return Future.value(
       IosBackgroundSessionStatus(
         supported: supported,
-        backgroundActivitySessionHeld:
-            _armed && supported && !_alwaysConfirmed,
+        backgroundActivitySessionHeld: _armed && supported && !_alwaysConfirmed,
         serviceSessionHeld: _armed,
         alwaysConfirmed: _alwaysConfirmed,
         armed: _armed,
@@ -228,6 +320,8 @@ Widget _buildApp({
   BatteryOptimizationProbeFn? batteryOptProbe,
   OpenBatteryOptimizationSettingsFn? openBatteryOptSettings,
   TextScaler textScaler = TextScaler.noScaling,
+  AndroidBackgroundLocation? allTime,
+  bool? isIOS,
 }) {
   final auth = iosAuth ?? _FakeIosLocationAuth(iosAuthStatus);
   return ProviderScope(
@@ -253,6 +347,17 @@ Widget _buildApp({
       if (iosSession != null)
         iosBackgroundSessionServiceProvider.overrideWithValue(iosSession),
       platformIsAndroidProvider.overrideWithValue(isAndroid),
+      // The page's intro picks its platform sentences from this; a session
+      // double means the test is about iOS.
+      isIOSProvider.overrideWithValue(isIOS ?? iosSession != null),
+      // Android 11+ with "Allow all the time" held unless a test says
+      // otherwise: the all-time step is its own tests' subject.
+      androidBackgroundLocationProvider.overrideWithValue(
+        allTime ??
+            (isAndroid
+                ? _FakeAllTime.granted()
+                : const NotRequiredBackgroundLocation()),
+      ),
       if (batteryOptProbe != null)
         batteryOptimizationProbeProvider.overrideWithValue(batteryOptProbe),
       if (openBatteryOptSettings != null)
@@ -339,8 +444,11 @@ void main() {
       '2. renders toggle ON when kBackgroundSharingKey is pre-seeded to true '
       '(no E2EE reassurance row — it was removed)',
       (tester) async {
-        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true,
-        kLocationDisclosureBackgroundAcceptedKey: true});
+        SharedPreferences.setMockInitialValues({
+          kBackgroundSharingKey: true,
+          kLocationDisclosureBackgroundAcceptedKey: true,
+          kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
+        });
 
         final fakeDisclosure = _FakeDisclosureController(false);
 
@@ -473,8 +581,15 @@ void main() {
 
       await tester.pump();
 
-      // SnackBar text contains 'notification'
-      expect(find.textContaining('notification'), findsOneWidget);
+      // SnackBar text contains 'notification' (the intro above mentions the
+      // Android resume notification, so the snackbar is matched where it is).
+      expect(
+        find.descendant(
+          of: find.byType(SnackBar),
+          matching: find.textContaining('notification'),
+        ),
+        findsOneWidget,
+      );
 
       // SnackBarAction labelled 'Open settings' must be present.
       // We assert existence only — do NOT tap it (would hit Geolocator
@@ -527,8 +642,11 @@ void main() {
     testWidgets('7. disable from ON: provider becomes false, SnackBar '
         '"Background sharing disabled" (no disclosure gate)', (tester) async {
       // Pre-seed to ON.
-      SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true,
-        kLocationDisclosureBackgroundAcceptedKey: true});
+      SharedPreferences.setMockInitialValues({
+        kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true,
+        kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
+      });
 
       // When disabling, the disclosure and permissions gates must NOT fire.
       final fakeDisclosure = _FakeDisclosureController(false);
@@ -609,8 +727,11 @@ void main() {
       '9. iOS while-in-use authorization + sharing ON shows the "Always" '
       'note with an Open settings action',
       (tester) async {
-        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true,
-        kLocationDisclosureBackgroundAcceptedKey: true});
+        SharedPreferences.setMockInitialValues({
+          kBackgroundSharingKey: true,
+          kLocationDisclosureBackgroundAcceptedKey: true,
+          kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
+        });
 
         await tester.pumpWidget(
           _buildApp(
@@ -636,8 +757,11 @@ void main() {
     testWidgets('10. iOS Always authorization hides the limited note', (
       tester,
     ) async {
-      SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true,
-        kLocationDisclosureBackgroundAcceptedKey: true});
+      SharedPreferences.setMockInitialValues({
+        kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true,
+        kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
+      });
 
       await tester.pumpWidget(
         // iosAuthStatus defaults to IosAuthStatus.always (not limited).
@@ -706,6 +830,7 @@ void main() {
         SharedPreferences.setMockInitialValues({
           kBackgroundSharingKey: true,
           kLocationDisclosureBackgroundAcceptedKey: true,
+          kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
         });
 
         await tester.pumpWidget(
@@ -732,6 +857,7 @@ void main() {
         SharedPreferences.setMockInitialValues({
           kBackgroundSharingKey: true,
           kLocationDisclosureBackgroundAcceptedKey: true,
+          kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
         });
 
         // Exemption granted on Android → nothing to advise about.
@@ -769,30 +895,29 @@ void main() {
       },
     );
 
-    testWidgets(
-      '14. the advisory is hidden while background sharing is off',
-      (tester) async {
-        SharedPreferences.setMockInitialValues({});
+    testWidgets('14. the advisory is hidden while background sharing is off', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
 
-        await tester.pumpWidget(
-          _buildApp(
-            ensurePermissions: _stubThatThrows(),
-            fakeDisclosure: _FakeDisclosureController(false),
-            isAndroid: true,
-            batteryOptProbe: () async => true,
-          ),
-        );
-        await tester.pumpAndSettle();
+      await tester.pumpWidget(
+        _buildApp(
+          ensurePermissions: _stubThatThrows(),
+          fakeDisclosure: _FakeDisclosureController(false),
+          isAndroid: true,
+          batteryOptProbe: () async => true,
+        ),
+      );
+      await tester.pumpAndSettle();
 
-        expect(
-          find.textContaining('Battery optimization is still on'),
-          findsNothing,
-          reason:
-              'no foreground service exists to be killed while sharing is '
-              'off; advising about it there is noise',
-        );
-      },
-    );
+      expect(
+        find.textContaining('Battery optimization is still on'),
+        findsNothing,
+        reason:
+            'no foreground service exists to be killed while sharing is '
+            'off; advising about it there is noise',
+      );
+    });
 
     testWidgets(
       '15. the advisory action opens the system screen and clears once the '
@@ -801,6 +926,7 @@ void main() {
         SharedPreferences.setMockInitialValues({
           kBackgroundSharingKey: true,
           kLocationDisclosureBackgroundAcceptedKey: true,
+          kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
         });
 
         var opened = 0;
@@ -826,6 +952,9 @@ void main() {
           findsOneWidget,
         );
 
+        // The intro is long enough to push the note below the test viewport.
+        await tester.ensureVisible(find.text('Open settings'));
+        await tester.pump();
         await tester.tap(find.text('Open settings'));
         await tester.pumpAndSettle();
 
@@ -854,6 +983,7 @@ void main() {
         SharedPreferences.setMockInitialValues({
           kBackgroundSharingKey: true,
           kLocationDisclosureBackgroundAcceptedKey: true,
+          kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
           // The persisted flag says "denied" and is deliberately WRONG here:
           // if the page read it instead of probing, this test would show the
           // advisory and fail on the first expectation.
@@ -916,6 +1046,7 @@ void main() {
         SharedPreferences.setMockInitialValues({
           kBackgroundSharingKey: true,
           kLocationDisclosureBackgroundAcceptedKey: true,
+          kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
         });
 
         await tester.pumpWidget(
@@ -933,8 +1064,9 @@ void main() {
         // the fold and is not built until scrolled to — which is the correct
         // behaviour, and is why this scrolls rather than asserting it is
         // already on screen.
-        final advisory =
-            find.textContaining('Battery optimization is still on');
+        final advisory = find.textContaining(
+          'Battery optimization is still on',
+        );
         await tester.scrollUntilVisible(advisory, 120);
         await tester.pumpAndSettle();
 
@@ -965,6 +1097,7 @@ void main() {
         SharedPreferences.setMockInitialValues({
           kBackgroundSharingKey: true,
           kLocationDisclosureBackgroundAcceptedKey: true,
+          kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
         });
 
         await tester.pumpWidget(
@@ -1032,7 +1165,8 @@ void main() {
       expect(
         matches,
         hasLength(1),
-        reason: 'the card is ONE Text, so VoiceOver reads one paragraph '
+        reason:
+            'the card is ONE Text, so VoiceOver reads one paragraph '
             'instead of one swipe per sentence',
       );
       return tester.widget<Text>(finder).data;
@@ -1045,6 +1179,7 @@ void main() {
         SharedPreferences.setMockInitialValues({
           kBackgroundSharingKey: true,
           kLocationDisclosureBackgroundAcceptedKey: true,
+          kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
         });
 
         await tester.pumpWidget(
@@ -1076,6 +1211,7 @@ void main() {
         SharedPreferences.setMockInitialValues({
           kBackgroundSharingKey: true,
           kLocationDisclosureBackgroundAcceptedKey: true,
+          kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
         });
 
         await tester.pumpWidget(
@@ -1116,6 +1252,8 @@ void main() {
           SharedPreferences.setMockInitialValues({
             kBackgroundSharingKey: true,
             kLocationDisclosureBackgroundAcceptedKey: true,
+            kLocationDisclosureBackgroundVersionKey:
+                kBackgroundDisclosureVersion,
           });
 
           await tester.pumpWidget(
@@ -1131,7 +1269,8 @@ void main() {
           expect(
             iosCardParagraph(tester),
             isNull,
-            reason: 'the card claims things that are only true under Always, '
+            reason:
+                'the card claims things that are only true under Always, '
                 'and $tier is not Always',
           );
         }
@@ -1148,6 +1287,7 @@ void main() {
         SharedPreferences.setMockInitialValues({
           kBackgroundSharingKey: true,
           kLocationDisclosureBackgroundAcceptedKey: true,
+          kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
         });
         final auth = _FakeIosLocationAuth(IosAuthStatus.always);
         final session = _FakeIosBackgroundSession(armed: true);
@@ -1173,11 +1313,13 @@ void main() {
         // — the only way this transition happens on a device.
         session.confirmAlways();
 
-        tester.binding
-            .handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.inactive,
+        );
         tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
-        tester.binding
-            .handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        );
         await tester.pumpAndSettle();
 
         expect(
@@ -1198,6 +1340,7 @@ void main() {
         SharedPreferences.setMockInitialValues({
           kBackgroundSharingKey: true,
           kLocationDisclosureBackgroundAcceptedKey: true,
+          kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
         });
 
         await tester.pumpWidget(
@@ -1211,10 +1354,7 @@ void main() {
 
         final l10n = l10nOf(tester);
         final text = iosCardParagraph(tester)!;
-        expect(
-          text.indexOf(l10n.locationSettingsIosGuidance),
-          isNonNegative,
-        );
+        expect(text.indexOf(l10n.locationSettingsIosGuidance), isNonNegative);
         expect(
           text.indexOf(l10n.locationSettingsIosGuidance),
           lessThan(text.indexOf(l10n.locationSettingsIosIndicatorBar)),
@@ -1238,6 +1378,7 @@ void main() {
         SharedPreferences.setMockInitialValues({
           kBackgroundSharingKey: true,
           kLocationDisclosureBackgroundAcceptedKey: true,
+          kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
         });
 
         await tester.pumpWidget(
@@ -1271,6 +1412,7 @@ void main() {
         SharedPreferences.setMockInitialValues({
           kBackgroundSharingKey: true,
           kLocationDisclosureBackgroundAcceptedKey: true,
+          kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
         });
 
         await tester.pumpWidget(
@@ -1324,7 +1466,8 @@ void main() {
         expect(
           iosCardParagraph(tester),
           isNull,
-          reason: 'no indicator sentence is known to be true of a reader '
+          reason:
+              'no indicator sentence is known to be true of a reader '
               'whose handler is not running',
         );
       },
@@ -1340,6 +1483,7 @@ void main() {
         SharedPreferences.setMockInitialValues({
           kBackgroundSharingKey: true,
           kLocationDisclosureBackgroundAcceptedKey: true,
+          kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
         });
         final session = _FakeIosBackgroundSession(armed: true);
 
@@ -1414,6 +1558,7 @@ void main() {
         SharedPreferences.setMockInitialValues({
           kBackgroundSharingKey: true,
           kLocationDisclosureBackgroundAcceptedKey: true,
+          kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
         });
 
         await tester.pumpWidget(
@@ -1427,13 +1572,17 @@ void main() {
 
         final l10n = l10nOf(tester);
         final intro = tester
-            .widget<Text>(find.text(l10n.locationSettingsIntro))
+            .widget<Text>(find.textContaining(l10n.locationSettingsIntro))
             .style
             ?.fontSize;
+        // The list builds lazily, and the intro is long enough to push the
+        // card below the test viewport.
+        await tester.scrollUntilVisible(
+          find.textContaining(l10n.locationSettingsIosGuidance),
+          200,
+        );
         final card = tester
-            .widget<Text>(
-              find.textContaining(l10n.locationSettingsIosGuidance),
-            )
+            .widget<Text>(find.textContaining(l10n.locationSettingsIosGuidance))
             .style
             ?.fontSize;
         expect(intro, isNotNull);
@@ -1454,6 +1603,7 @@ void main() {
         SharedPreferences.setMockInitialValues({
           kBackgroundSharingKey: true,
           kLocationDisclosureBackgroundAcceptedKey: true,
+          kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
         });
 
         await tester.pumpWidget(
@@ -1488,6 +1638,7 @@ void main() {
         SharedPreferences.setMockInitialValues({
           kBackgroundSharingKey: true,
           kLocationDisclosureBackgroundAcceptedKey: true,
+          kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
         });
         final session = _FakeIosBackgroundSession(
           armed: true,
@@ -1531,8 +1682,7 @@ void main() {
     // -------------------------------------------------------------------------
     group('_FakeIosBackgroundSession models the native handler', () {
       test('disarming clears the Always confirmation', () async {
-        final session = _FakeIosBackgroundSession(armed: true)
-          ..confirmAlways();
+        final session = _FakeIosBackgroundSession(armed: true)..confirmAlways();
         expect((await session.status()).alwaysConfirmed, isTrue);
 
         await session.disarm();
@@ -1547,8 +1697,7 @@ void main() {
       });
 
       test('re-arming does not restore the confirmation', () async {
-        final session = _FakeIosBackgroundSession(armed: true)
-          ..confirmAlways();
+        final session = _FakeIosBackgroundSession(armed: true)..confirmAlways();
         await session.disarm();
         await session.arm();
 
@@ -1557,17 +1706,15 @@ void main() {
         expect(
           status.alwaysConfirmed,
           isFalse,
-          reason: 'only a fresh diagnostic on the new session can confirm '
+          reason:
+              'only a fresh diagnostic on the new session can confirm '
               'again — until then the blue bar is what the user sees',
         );
       });
 
       test('a confirmation cannot arrive on a handler that holds no '
           'session', () {
-        expect(
-          _FakeIosBackgroundSession().confirmAlways,
-          throwsStateError,
-        );
+        expect(_FakeIosBackgroundSession().confirmAlways, throwsStateError);
       });
 
       test('it asks for the indicator exactly where the native predicate '
@@ -1684,19 +1831,14 @@ void main() {
       // diagnostic found. Answering "bar" from it is a claim about a session
       // that does not exist — and the one the page made to every reader with
       // sharing off.
-      expect(
-        await sentenceFor(_FakeIosBackgroundSession()),
-        isNull,
-      );
+      expect(await sentenceFor(_FakeIosBackgroundSession()), isNull);
     });
 
     test('a handler that never answered yields no sentence either', () async {
       // The channel fallback reports every field false, `armed` included, so
       // a missing native handler cannot be read as a measurement.
       expect(
-        await sentenceFor(
-          _FakeIosBackgroundSession(supported: false),
-        ),
+        await sentenceFor(_FakeIosBackgroundSession(supported: false)),
         isNull,
       );
     });
@@ -1709,6 +1851,7 @@ void main() {
         SharedPreferences.setMockInitialValues({
           kBackgroundSharingKey: true,
           kLocationDisclosureBackgroundAcceptedKey: true,
+          kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
         });
         await tester.pumpWidget(
           _buildApp(
@@ -1746,59 +1889,57 @@ void main() {
       },
     );
 
-    testWidgets(
-      'behind a snackbar from elsewhere, toggling twice queues one '
-      'confirmation: the latest',
-      (tester) async {
-        SharedPreferences.setMockInitialValues({
-          kBackgroundSharingKey: true,
-          kLocationDisclosureBackgroundAcceptedKey: true,
-        });
-        await tester.pumpWidget(
-          _buildApp(
-            ensurePermissions: _stubReturning(const EnsurePermissionsGranted()),
-            fakeDisclosure: _FakeDisclosureController(true),
-            isAndroid: true,
-          ),
-        );
-        await tester.pump(Duration.zero);
-        final page = tester.element(find.byType(LocationSettingsPage));
-        ScaffoldMessenger.of(page).showSnackBar(
-          longMessageSnackBar(
-            page,
-            'An answer still owed',
-            action: SnackBarAction(label: 'Act', onPressed: () {}),
-          ),
-        );
-        await tester.pumpAndSettle();
+    testWidgets('behind a snackbar from elsewhere, toggling twice queues one '
+        'confirmation: the latest', (tester) async {
+      SharedPreferences.setMockInitialValues({
+        kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true,
+        kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
+      });
+      await tester.pumpWidget(
+        _buildApp(
+          ensurePermissions: _stubReturning(const EnsurePermissionsGranted()),
+          fakeDisclosure: _FakeDisclosureController(true),
+          isAndroid: true,
+        ),
+      );
+      await tester.pump(Duration.zero);
+      final page = tester.element(find.byType(LocationSettingsPage));
+      ScaffoldMessenger.of(page).showSnackBar(
+        longMessageSnackBar(
+          page,
+          'An answer still owed',
+          action: SnackBarAction(label: 'Act', onPressed: () {}),
+        ),
+      );
+      await tester.pumpAndSettle();
 
-        await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
-        await tester.pumpAndSettle();
-        await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
-        await tester.pumpAndSettle();
-        await tester.tap(find.byIcon(Icons.close));
-        await tester.pumpAndSettle();
+      await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.close));
+      await tester.pumpAndSettle();
 
-        expect(find.text('Background sharing enabled'), findsOneWidget);
-        expect(
-          find.text('Background sharing disabled'),
-          findsNothing,
-          reason: 'the outdated outcome is never said',
-        );
-        expect(
-          tester.widget<SnackBar>(find.byType(SnackBar)).duration,
-          const Duration(seconds: 8),
-          reason: 'a waiting plain outcome may say the longest of them',
-        );
-        await tester.pump(const Duration(seconds: 9));
-        await tester.pumpAndSettle();
-        expect(
-          find.byType(SnackBar),
-          findsNothing,
-          reason: 'one confirmation queued, not one per toggle',
-        );
-      },
-    );
+      expect(find.text('Background sharing enabled'), findsOneWidget);
+      expect(
+        find.text('Background sharing disabled'),
+        findsNothing,
+        reason: 'the outdated outcome is never said',
+      );
+      expect(
+        tester.widget<SnackBar>(find.byType(SnackBar)).duration,
+        const Duration(seconds: 8),
+        reason: 'a waiting plain outcome may say the longest of them',
+      );
+      await tester.pump(const Duration(seconds: 9));
+      await tester.pumpAndSettle();
+      expect(
+        find.byType(SnackBar),
+        findsNothing,
+        reason: 'one confirmation queued, not one per toggle',
+      );
+    });
 
     Future<BuildContext> pumpBehindForeign(
       WidgetTester tester,
@@ -1808,6 +1949,7 @@ void main() {
       SharedPreferences.setMockInitialValues({
         if (startOn) kBackgroundSharingKey: true,
         kLocationDisclosureBackgroundAcceptedKey: true,
+        kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
       });
       await tester.pumpWidget(
         _buildApp(
@@ -1925,6 +2067,552 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Background sharing enabled'), findsNothing);
       expect(find.text('Background sharing disabled'), findsOneWidget);
+    });
+  });
+
+  // The intro states what happens after Haven is closed, which differs by
+  // platform: each reader gets the common sentences and their own platform's,
+  // never the other phone's.
+  group('the intro', () {
+    for (final ios in [false, true]) {
+      testWidgets(
+        ios
+            ? 'on iPhone: the iPhone sentences only'
+            : 'on Android: '
+                  'the Android sentences only',
+        (tester) async {
+          SharedPreferences.setMockInitialValues({});
+          await tester.pumpWidget(
+            _buildApp(
+              ensurePermissions: _stubThatThrows(),
+              fakeDisclosure: _FakeDisclosureController(false),
+              isIOS: ios,
+            ),
+          );
+          await tester.pumpAndSettle();
+          final l10n = AppLocalizations.of(
+            tester.element(find.byType(LocationSettingsPage)),
+          );
+          final own = ios
+              ? l10n.locationSettingsIntroIos
+              : l10n.locationSettingsIntroAndroid;
+          final other = ios
+              ? l10n.locationSettingsIntroAndroid
+              : l10n.locationSettingsIntroIos;
+          expect(
+            find.text('${l10n.locationSettingsIntro} $own'),
+            findsOneWidget,
+            reason: 'one paragraph, so a screen reader reads it as one',
+          );
+          expect(find.textContaining(other), findsNothing);
+        },
+      );
+    }
+  });
+
+  // OD-R3: a user with background sharing on whose acceptance predates
+  // sharing that starts again by itself is told so, and can agree here.
+  group('the resume-consent advisory', () {
+    final v1SharingOn = <String, Object>{
+      kBackgroundSharingKey: true,
+      kLocationDisclosureAcceptedKey: true,
+      kLocationDisclosureBackgroundAcceptedKey: true,
+    };
+
+    Finder note() => find.byKey(WidgetKeys.locationResumeConsentNote);
+    Finder action(Finder within) =>
+        find.descendant(of: within, matching: find.byType(TextButton));
+
+    Future<void> openNotice(WidgetTester tester) async {
+      await tester.ensureVisible(action(note()));
+      await tester.pump();
+      await tester.tap(action(note()));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('sharing on with an older acceptance shows it; Review, Agree '
+        'clears it and records the current version', (tester) async {
+      SharedPreferences.setMockInitialValues(v1SharingOn);
+      await tester.pumpWidget(
+        _buildApp(
+          ensurePermissions: _stubThatThrows(),
+          fakeDisclosure: _FakeDisclosureController(false),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(note(), findsOneWidget);
+      expect(
+        find.text(
+          'Background sharing is on. If it stops, for example when your '
+          'phone restarts, Haven will not start it again by itself until you '
+          'agree to the updated background-sharing notice.',
+        ),
+        findsOneWidget,
+      );
+
+      await openNotice(tester);
+      expect(
+        find.textContaining('Background sharing has changed since you'),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await tester.pumpAndSettle();
+
+      expect(note(), findsNothing, reason: 'a solved problem still warned');
+      final prefs = await SharedPreferences.getInstance();
+      expect(
+        prefs.getInt(kLocationDisclosureBackgroundVersionKey),
+        kBackgroundDisclosureVersion,
+      );
+    });
+
+    testWidgets('Not now keeps it, and keeps sharing on', (tester) async {
+      SharedPreferences.setMockInitialValues({
+        ...v1SharingOn,
+        // Already answered once at a foreground: the advisory re-asks.
+        kLocationDisclosureBackgroundPromptedVersionKey:
+            kBackgroundDisclosureVersion,
+      });
+      await tester.pumpWidget(
+        _buildApp(
+          ensurePermissions: _stubThatThrows(),
+          fakeDisclosure: _FakeDisclosureController(false),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await openNotice(tester);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureNotNow));
+      await tester.pumpAndSettle();
+
+      expect(note(), findsOneWidget);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(LocationSettingsPage)),
+      );
+      expect(container.read(backgroundSharingProvider), isTrue);
+    });
+
+    testWidgets('a double tap on Review notice shows ONE dialog', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues(v1SharingOn);
+      final allTime = _FakeAllTime(BackgroundLocationStatus.notRequired);
+      await tester.pumpWidget(
+        _buildApp(
+          ensurePermissions: _stubThatThrows(),
+          fakeDisclosure: _FakeDisclosureController(false),
+          allTime: allTime,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(action(note()));
+      await tester.pump();
+      // The second tap lands while the first still waits on the channel.
+      final gate = allTime.statusGate = Completer<void>();
+      await tester.tap(action(note()));
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(action(note()), warnIfMissed: false);
+      await tester.pump(const Duration(milliseconds: 100));
+      gate.complete();
+      allTime.statusGate = null;
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsOneWidget);
+
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureNotNow));
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing, reason: 'a second one');
+    });
+
+    testWidgets('its icon is informational, not the warning colour', (
+      tester,
+    ) async {
+      // Sharing works as before for this reader; a warning colour beside the
+      // real warnings would misstate that.
+      SharedPreferences.setMockInitialValues(v1SharingOn);
+      await tester.pumpWidget(
+        _buildApp(
+          ensurePermissions: _stubThatThrows(),
+          fakeDisclosure: _FakeDisclosureController(false),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final icon = tester.widget<Icon>(
+        find.descendant(of: note(), matching: find.byType(Icon)),
+      );
+      expect(icon.color, isNot(HavenSecurityColors.warning));
+      expect(icon.color, Theme.of(tester.element(note())).colorScheme.primary);
+    });
+
+    for (final (label, seed) in <(String, Map<String, Object>)>[
+      (
+        'a current acceptance',
+        {
+          ...v1SharingOn,
+          kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
+        },
+      ),
+      ('sharing off', {...v1SharingOn, kBackgroundSharingKey: false}),
+    ]) {
+      testWidgets('absent with $label', (tester) async {
+        SharedPreferences.setMockInitialValues(seed);
+        await tester.pumpWidget(
+          _buildApp(
+            ensurePermissions: _stubThatThrows(),
+            fakeDisclosure: _FakeDisclosureController(false),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(note(), findsNothing);
+      });
+    }
+
+    testWidgets('on Android 11+ without "Allow all the time" it is the only '
+        'advisory, and its notice carries that step: Agree requests it', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues(v1SharingOn);
+      final allTime = _FakeAllTime.missing();
+      await tester.pumpWidget(
+        _buildApp(
+          ensurePermissions: _stubThatThrows(),
+          fakeDisclosure: _FakeDisclosureController(false),
+          isAndroid: true,
+          allTime: allTime,
+          batteryOptProbe: () async => false,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(note(), findsOneWidget);
+      expect(
+        find.byKey(WidgetKeys.locationAllTimeNote),
+        findsNothing,
+        reason:
+            'an older acceptance is asked for "all the time" only through '
+            'the notice',
+      );
+
+      await openNotice(tester);
+      expect(
+        find.textContaining('Next, on the screen Android opens'),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await tester.pumpAndSettle();
+      expect(allTime.requests, 1);
+    });
+  });
+
+  // OD-R2: on Android 11+ a restart or update restarts sharing only with
+  // "Allow all the time"; without it the page says so and offers the step.
+  group('the Android all-time advisory', () {
+    final v2SharingOn = <String, Object>{
+      kBackgroundSharingKey: true,
+      kLocationDisclosureAcceptedKey: true,
+      kLocationDisclosureBackgroundAcceptedKey: true,
+      kLocationDisclosureBackgroundVersionKey: kBackgroundDisclosureVersion,
+    };
+
+    Finder note() => find.byKey(WidgetKeys.locationAllTimeNote);
+
+    Future<void> pumpPage(
+      WidgetTester tester, {
+      required Map<String, Object> seed,
+      required AndroidBackgroundLocation allTime,
+      EnsurePermissionsFn? ensurePermissions,
+      _FakeDisclosureController? disclosure,
+    }) async {
+      SharedPreferences.setMockInitialValues(seed);
+      await tester.pumpWidget(
+        _buildApp(
+          ensurePermissions: ensurePermissions ?? _stubThatThrows(),
+          fakeDisclosure: disclosure ?? _FakeDisclosureController(false),
+          isAndroid: true,
+          allTime: allTime,
+          batteryOptProbe: () async => false,
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> tapAction(WidgetTester tester) async {
+      final button = find.descendant(
+        of: note(),
+        matching: find.byType(TextButton),
+      );
+      await tester.ensureVisible(button);
+      await tester.pump();
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+    }
+
+    for (final (label, seed, allTime, shown)
+        in <(String, Map<String, Object>, AndroidBackgroundLocation, bool)>[
+          ('sharing on, missing', v2SharingOn, _FakeAllTime.missing(), true),
+          ('sharing on, granted', v2SharingOn, _FakeAllTime.granted(), false),
+          (
+            'sharing off, missing',
+            {...v2SharingOn, kBackgroundSharingKey: false},
+            _FakeAllTime.missing(),
+            false,
+          ),
+          (
+            'Android 10 (not required)',
+            v2SharingOn,
+            _FakeAllTime(BackgroundLocationStatus.notRequired),
+            false,
+          ),
+        ]) {
+      testWidgets('$label: ${shown ? 'shown' : 'absent'}', (tester) async {
+        await pumpPage(tester, seed: seed, allTime: allTime);
+        expect(note(), shown ? findsOneWidget : findsNothing);
+      });
+    }
+
+    testWidgets("it names Android's own label", (tester) async {
+      await pumpPage(
+        tester,
+        seed: v2SharingOn,
+        allTime: _FakeAllTime.missing(),
+      );
+      expect(
+        find.text(
+          "Haven's location permission is not set to 'Allow all the time', "
+          'so sharing will not start again by itself after your phone '
+          'restarts or Haven updates. Instead, Haven will show a notification '
+          'you can tap to resume.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('its action shows the disclosure, then requests once on Agree '
+        'and clears', (tester) async {
+      final allTime = _FakeAllTime.missing(grantOnRequest: true);
+      await pumpPage(tester, seed: v2SharingOn, allTime: allTime);
+      await tapAction(tester);
+      expect(
+        find.textContaining('Next, on the screen Android opens'),
+        findsOneWidget,
+      );
+      expect(allTime.requests, 0, reason: 'a request before the disclosure');
+
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await tester.pumpAndSettle();
+      expect(allTime.requests, 1);
+      expect(note(), findsNothing);
+    });
+
+    testWidgets('Not now requests nothing and keeps it', (tester) async {
+      final allTime = _FakeAllTime.missing();
+      await pumpPage(tester, seed: v2SharingOn, allTime: allTime);
+      await tapAction(tester);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureNotNow));
+      await tester.pumpAndSettle();
+      expect(allTime.requests, 0);
+      expect(note(), findsOneWidget);
+      final prefs = await SharedPreferences.getInstance();
+      expect(
+        prefs.getBool(kAndroidBackgroundLocationPromptedKey),
+        isTrue,
+        reason: 'a decline is never asked again automatically',
+      );
+    });
+
+    testWidgets('a grant made in system settings clears it on return', (
+      tester,
+    ) async {
+      final allTime = _FakeAllTime.missing();
+      await pumpPage(tester, seed: v2SharingOn, allTime: allTime);
+      expect(note(), findsOneWidget);
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      allTime.current = const BackgroundLocationStatus(
+        required: true,
+        granted: true,
+      );
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
+
+      expect(note(), findsNothing, reason: 'stale after a grant');
+    });
+
+    testWidgets('a first enable shows ONE dialog carrying the step, then '
+        'requests before any other prompt', (tester) async {
+      final allTime = _FakeAllTime.missing(grantOnRequest: true);
+      final disclosure = _FakeDisclosureController(true);
+      final order = <String>[];
+      allTime.onRequest = () => order.add('background location');
+      await pumpPage(
+        tester,
+        seed: {},
+        allTime: allTime,
+        disclosure: disclosure,
+        ensurePermissions: () async {
+          order.add('notification + battery');
+          return const EnsurePermissionsGranted();
+        },
+      );
+      await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
+      await tester.pumpAndSettle();
+
+      expect(disclosure.lastAllTimeStep?.missing, isTrue);
+      expect(
+        order,
+        ['background location', 'notification + battery'],
+        reason:
+            'Play: the request must immediately follow the disclosure '
+            "that explains it, and the step's 'Next' must be true",
+      );
+      final prefs = await SharedPreferences.getInstance();
+      expect(
+        prefs.getBool(kAndroidBackgroundLocationPromptedKey),
+        isTrue,
+        reason: "MapShell's consent step would show the step a second time",
+      );
+      expect(
+        find.byType(AlertDialog),
+        findsNothing,
+        reason: 'a second disclosure right behind the first',
+      );
+      expect(allTime.requests, 1);
+    });
+
+    testWidgets('an enable over a current disclosure shows the step alone; a '
+        'decline leaves sharing on and the advisory shown', (tester) async {
+      final allTime = _FakeAllTime.missing();
+      await pumpPage(
+        tester,
+        seed: {...v2SharingOn, kBackgroundSharingKey: false},
+        allTime: allTime,
+        disclosure: _FakeDisclosureController(true),
+        ensurePermissions: _stubReturning(const EnsurePermissionsGranted()),
+      );
+      await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('Next, on the screen Android opens'),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureNotNow));
+      await tester.pumpAndSettle();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(LocationSettingsPage)),
+      );
+      expect(container.read(backgroundSharingProvider), isTrue);
+      expect(allTime.requests, 0);
+      expect(note(), findsOneWidget);
+    });
+
+    testWidgets('a first enable without a foreground location grant carries '
+        'no step and asks for nothing more', (tester) async {
+      // Android shows its background page only over a foreground grant; the
+      // step would promise a screen that does not open.
+      final allTime = _FakeAllTime.missing(foregroundGranted: false);
+      final disclosure = _FakeDisclosureController(true);
+      await pumpPage(
+        tester,
+        seed: {},
+        allTime: allTime,
+        disclosure: disclosure,
+        ensurePermissions: _stubReturning(const EnsurePermissionsGranted()),
+      );
+      await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
+      await tester.pumpAndSettle();
+      expect(disclosure.lastIncludeBackground, isTrue);
+      expect(disclosure.lastAllTimeStep, isNull);
+      expect(allTime.requests, 0);
+    });
+
+    testWidgets('a notification refusal after Agree leaves the background '
+        'request made and sharing off', (tester) async {
+      final allTime = _FakeAllTime.missing(grantOnRequest: true);
+      await pumpPage(
+        tester,
+        seed: {},
+        allTime: allTime,
+        disclosure: _FakeDisclosureController(true),
+        ensurePermissions: _stubReturning(
+          const EnsurePermissionsNotificationDenied(),
+        ),
+      );
+      await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
+      await tester.pumpAndSettle();
+      expect(allTime.requests, 1);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(LocationSettingsPage)),
+      );
+      expect(container.read(backgroundSharingProvider), isFalse);
+      expect(note(), findsNothing);
+    });
+
+    testWidgets('its action is named for what it does, not "Open settings"', (
+      tester,
+    ) async {
+      await pumpPage(
+        tester,
+        seed: v2SharingOn,
+        allTime: _FakeAllTime.missing(),
+      );
+      expect(
+        find.descendant(of: note(), matching: find.text('Change permission')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: note(), matching: find.text('Open settings')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('a failure under its action logs the type only, and frees the '
+        'page', (tester) async {
+      // Rule 15: an exception's text may carry anything; the line names the
+      // type alone. The latch must not stay set, or every control stays off.
+      const planted = 'npub1plantedplantedplanted wss://planted.example';
+      final allTime = _FakeAllTime.missing();
+      await pumpPage(tester, seed: v2SharingOn, allTime: allTime);
+      allTime.statusError = StateError(planted);
+      final logs = LogCapture();
+      await tapAction(tester);
+      logs.restore();
+      logs
+        ..assertContains('[LocationSettings] StateError')
+        ..assertNoNeedles(['npub1planted', 'planted.example']);
+      expect(
+        tester
+            .widget<SwitchListTile>(
+              find.byKey(WidgetKeys.backgroundSharingTile),
+            )
+            .onChanged,
+        isNotNull,
+      );
+    });
+
+    testWidgets('a double tap on its action shows ONE dialog and asks once', (
+      tester,
+    ) async {
+      final allTime = _FakeAllTime.missing();
+      await pumpPage(tester, seed: v2SharingOn, allTime: allTime);
+      final button = find.descendant(
+        of: note(),
+        matching: find.byType(TextButton),
+      );
+      await tester.ensureVisible(button);
+      await tester.pump();
+      // The second tap lands while the first still waits on the channel.
+      final gate = allTime.statusGate = Completer<void>();
+      await tester.tap(button);
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(button, warnIfMissed: false);
+      await tester.pump(const Duration(milliseconds: 100));
+      gate.complete();
+      allTime.statusGate = null;
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsOneWidget);
+
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(allTime.requests, 1);
     });
   });
 }

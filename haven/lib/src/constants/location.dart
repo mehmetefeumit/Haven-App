@@ -643,6 +643,38 @@ const String kLocationDisclosureAcceptedKey =
 const String kLocationDisclosureBackgroundAcceptedKey =
     'haven.location.disclosure_background_accepted';
 
+/// SharedPreferences key (int) recording which version of the background
+/// disclosure the user last accepted.
+///
+/// Absent is version 1: every acceptance recorded before versioning was the
+/// bool [kLocationDisclosureBackgroundAcceptedKey] alone. Written last, after
+/// both bools, so a torn write reads as the older version (fail closed).
+const String kLocationDisclosureBackgroundVersionKey =
+    'haven.location.disclosure_background_version';
+
+/// SharedPreferences key (int) recording the background-disclosure version
+/// last shown in re-confirm mode, whatever the answer, so "Not now" is asked
+/// once and never again for that version.
+const String kLocationDisclosureBackgroundPromptedVersionKey =
+    'haven.location.disclosure_background_prompted_version';
+
+/// The background-disclosure version whose acceptance lets sharing start
+/// again without the user opening Haven (an iOS location relaunch; an Android
+/// reboot, update or system restart of the foreground service).
+///
+/// Bump it on any change that widens what background sharing does while the
+/// user is not using Haven, and bump `kBgDisclosureResumeVersion` in
+/// `HavenBackgroundSessionHandler.swift` (and the Android reader) in the same
+/// commit: `scripts/ci/check_ios_background_publish.sh` check 20 holds the
+/// Swift pair equal.
+const int kBackgroundDisclosureVersion = 2;
+
+/// SharedPreferences key recording that the Android "Allow all the time" step
+/// was shown, whatever the answer, so a decline is never asked again
+/// automatically. The settings advisory stays available.
+const String kAndroidBackgroundLocationPromptedKey =
+    'haven.android.background_location_prompted';
+
 /// SharedPreferences key storing the millisecond timestamp of the last MLS
 /// session-reclaim attempt by the background isolate.
 ///

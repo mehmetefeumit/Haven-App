@@ -120,7 +120,10 @@ external crates are the pinned versions in `haven-core/Cargo.toml` / `haven/pubs
   publish tick IS the background healer, at 72-168 s rather than 15 min.)*
   The self-heal timer (`LiveSyncHealBackstop` since 2026-10-11; `_liveSyncHealTimer` before) is
   CANCELLED for the whole background period (`map_shell.dart` `_onPaused`) — unchanged.
-  SLC relaunch + `BGAppRefreshTask` are receive-only catch-ups.
+  SLC relaunch + `BGAppRefreshTask` are receive-only catch-ups. *(AMENDED 2026-11-26, owner-directed
+  OD-R1: the wake handlers still are; a LOCATION relaunch under Always with the current background
+  disclosure also resumes this device's own sharing, through MapShell's background-launch pause and
+  the burst plane — §4's "CLOSED by P3" entry carries the reversal.)*
 - **MLS facts:** epochs advance only on membership changes (`enablePeriodicSelfUpdate = false`,
   M5). OpenMLS `SenderRatchetConfiguration::default()` = `(out_of_order_tolerance 5,
   maximum_forward_distance 1000)`; MDK does not override it (grepped: zero matches).
@@ -793,6 +796,18 @@ eleven independent diagnosticians, not a reconstruction of the owner's phone.
   therefore catch up on what peers sent; it cannot resume this device's own publishing until the
   user reopens the app. The remaining wake paths (SLC, region, `BGAppRefreshTask`) carry no
   publish call site at all, which is the other half of the same invariant.
+  **REVERSED ON PURPOSE 2026-11-26 (owner-directed, OD-R1).** The owner chose to have a location
+  relaunch resume this device's own sharing, so the receive-only promise is gone and
+  `INV-L-IOS-WAKES-RECEIVE-ONLY` is replaced by
+  `INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT`. What P3 built is kept and
+  narrowed rather than undone: the relaunch publishes only from Haven's own native session —
+  started by MapShell's background-launch pause (`startBackgroundLaunchSession`), which the
+  native `onListen` admits only for `launchedForLocation` AND Always AND the current (v2)
+  background disclosure (`backgroundStartPermitted`) — and only through the burst plane; the
+  cold-cache shortcut still reads the native lifecycle and still never reaches the plugin one-shot
+  (it may now wait up to `kOneShotLocationTimeout` for that session's next Best fix); and the wake
+  handlers still carry no publish call site. The `_foregroundActive` hole described above stays
+  closed.
 
 ## 5. Mapping to the field evidence, and how to distinguish the causes
 
@@ -1807,7 +1822,8 @@ F above; the Android and clock halves are untouched.**
   activity session and the bar like every other tier.
 - **The relaunch region lives inside `HavenSLCHandler`, not a new file** — no hand-built pbxproj
   ids, and the SLC gates (enable predicate + `authorizedAlways`), the `stopSLC` teardown and the
-  receive-only `runCatchup` channel are reused verbatim. One ~500 m `CLCircularRegion`, exit-only,
+  receive-only `runCatchup` channel are reused verbatim. One ~500 m (200 m since 2026-11-26, OD-R1, for a user whose relaunch resumes sharing)
+  `CLCircularRegion`, exit-only,
   re-centred on every SLC delivery and on its own exit; `stopMonitoring()` iterates
   `monitoredRegions` so an OS-restored region (after a relaunch, where this class holds no
   reference) is released too. No coordinate is logged. **Nothing in CI can prove it fires** —

@@ -1,0 +1,362 @@
+# Reusable workflow: Android resume lane (owner-directed 2026-11-26, OD-R2/OD-R3).
+#
+# Proves on a device that background sharing comes back with NO UI launch after
+# an app update, a reboot and a process kill — and that, when the resume rule
+# refuses (no "Allow all the time" on Android 11+), Haven posts the one resume
+# notice instead of a silently broken service. The legs (U1 U2 B1 B2 U3 K) and
+# what each asserts are in tooling/e2e/ci/run-android-resume.sh's header.
+#
+# # Why a SEPARATE workflow
+#
+# The M7 worker lane's wakes skip while the foreground service is alive, so a
+# lane that keeps the service running would cross-contaminate its receive-only
+# phases; and the integration lane force-stops and uninstalls between targets,
+# which is exactly the state this lane must keep. Same single-AVD,
+# build-before-boot design as e2e-background-catchup.yml: the one target APK is
+# built before the emulator boots, and the restarts power the guest off and
+# boot the same AVD again.
+
+name: E2E Android Resume
+
+on:
+  workflow_call:
+
+jobs:
+  e2e_android_resume:
+    name: e2e_android_resume
+    runs-on: ubuntu-latest
+    # The job cap must clear the SUM of the step caps (e2e-android.yml states
+    # the rule): Build the runtime log scanner 10 + Restore Gradle dependency
+    # cache 2 + Build the resume test APK 30 + Provision the Android SDK 11 +
+    # Create AVD snapshot 15 + the emulator step 105 (derived there) + the
+    # uncapped work below = 176.6 -> 177. That 3.6 is e2e-background-catchup's
+    # measured worst, which runs the same uncapped steps; re-derive it from
+    # this lane's own runs once it has them.
+    # job-uncapped-minutes: 3.6 (52 runs, worst 34488512808)
+    timeout-minutes: 177
+    env:
+      HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      # Receive path, DECLARED — not inherited. `liveSyncEnabled` defaults to
+      # true when the define is absent, so an omitted flag compiles the engine
+      # ON while reading as "nobody decided" (CI_HARDENING_BACKLOG.md A7). The
+      # resume rule this lane proves is flag-INDEPENDENT, so the value that
+      # matters here is the production one — engine ON.
+      # build-integration-apks.sh REQUIRES this env, so a future omission fails
+      # loudly.
+      HAVEN_LIVE_SYNC: "true"
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+      # The runtime log scanner (tooling/logscan) is wired into this lane. The
+      # runner reads the flag: it seals the run's needle manifest and runs every
+      # captured log through tooling/e2e/ci/scan-logs.sh before echoing or
+      # keeping any of it. No recording proxy runs here, so the needles are the
+      # host-known constants of tooling/e2e/ci/host-needles.sh (the `host`
+      # profile): the fixed role seeds, the role and canary coordinates and the
+      # canary name stems.
+      HAVEN_LOGSCAN: "true"
+      HAVEN_LOGSCAN_PROFILE: host
+
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v6
+
+      # Reclaim runner disk BEFORE the Gradle/Rust build (multi-GB debug build +
+      # NDK strip). Runs after checkout because the script lives in the repo.
+      - name: Free disk space
+        run: bash tooling/e2e/ci/free-disk-space.sh
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            haven-core
+            tooling/logscan
+          # Distinct cache key from the other E2E jobs so they don't race on one
+          # entry; all build the same x86_64-linux-android target.
+          key: e2e-android-resume-x64
+
+      # The runtime log scanner, release-built ONCE, before Flutter and the
+      # emulator are resident (same reasoning as the APK build below). Capped
+      # so a cargo stall fails fast; the cap is a term of the job cap's sum
+      # above.
+      - name: Build the runtime log scanner
+        timeout-minutes: 10
+        run: cargo build --release --manifest-path tooling/logscan/Cargo.toml
+
+      # The needle directory is rotated BEFORE any drive: a manifest left by an
+      # earlier run on a reused runner would be reused as this run's (the
+      # host-profile gate reuses the manifest already at its out path).
+      # Owner-only, because what lands there is every identifier the run
+      # declares, verbatim.
+      - name: Rotate the needle directory
+        run: |
+          mkdir -m 0700 -p /tmp/haven-soak/needles
+          rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      # Gradle resolves the buildscript classpath over the network BEFORE it
+      # compiles anything, so a cold ~/.gradle makes this lane fetch hundreds of
+      # POMs — and hosted runners share egress IPs, so Maven Central rate-limits
+      # a runner nobody here provoked. CI run 35622556197 job 106414462454 lost
+      # a whole lane to HTTP 429 on the classpath, with NO test run, while twelve
+      # sibling Android lanes built the same commit with zero 429s. A warm
+      # dependency cache REMOVES those requests; the classified retry in
+      # scripts/ci/build_apk_with_retry.sh is only the backstop for what is left.
+      #
+      # Restore-only. build-check.yml is the single writer of this key, so a lane
+      # that deletes or half-fills ~/.gradle cannot publish a cache the other
+      # lanes would then restore. The `restore-keys` prefix means a changed
+      # dependency set still starts from the last good cache instead of cold.
+      #
+      # `continue-on-error` because a cache is an optimisation, and a step that
+      # overruns its own `timeout-minutes` FAILS the job: without this, a slow
+      # or unavailable cache service reddens a lane that would otherwise have
+      # built cold and run every test.
+      - name: Restore Gradle dependency cache
+        uses: actions/cache/restore@v4
+        timeout-minutes: 2
+        continue-on-error: true
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+          key: gradle-deps-${{ runner.os }}-${{ hashFiles('haven/android/**/*.gradle*', 'haven/rust_builder/**/*.gradle*', 'haven/android/gradle/wrapper/gradle-wrapper.properties', 'haven/pubspec.lock') }}
+          restore-keys: |
+            gradle-deps-${{ runner.os }}-
+
+      # Build the resume target APK BEFORE the emulator boots (same
+      # build-before-boot discipline as e2e-integration.yml). The relay URL is
+      # baked into the APK; the drive does not re-pass it.
+      - name: Build the resume test APK
+        working-directory: haven
+        timeout-minutes: 30
+        run: |
+          bash ../tooling/e2e/ci/build-integration-apks.sh \
+            integration_test/android_resume_setup_test.dart
+          bash ../tooling/e2e/ci/release-apk-build-outputs.sh /tmp/integration-apks
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # Install and VERIFY every SDK package the emulator action needs, before
+      # its FIRST use below. The action installs them itself, with bare
+      # `sdkmanager --install` calls tried once and checked by nothing: in CI
+      # run 35524002720 the emulator's download failed, the action stopped,
+      # and the last thing it printed was its teardown's "could not connect to
+      # TCP port 5554" — a message about the emulator, from a job that ran no
+      # test.
+      # Unconditional, deliberately — the AVD cache holds `~/.android/avd/*`
+      # only, so a cache HIT still needs the emulator binary and the system
+      # image. The arguments MUST equal the api-level/target/arch of every
+      # emulator step in this job (check_android_sdk_provisioned.sh). Once the
+      # packages are present the action's own installs are no-ops (5 s).
+      # The cap is the script's worst case, 9.5 min (its 360 s budget + the one
+      # 180 s attempt that can start inside it + that attempt's 30 s emulator
+      # probe), plus the step's own startup, rounded up.
+      - name: Provision the Android SDK
+        timeout-minutes: 11
+        run: bash tooling/e2e/ci/provision-android-sdk.sh 34 google_apis x86_64
+
+      - name: AVD cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          # Shared with the other Android E2E lanes: the AVD snapshot is
+          # byte-identical (same api/arch/target/profile), so this restores the
+          # snapshot they created instead of rebuilding it.
+          key: avd-api34-x86_64-google_apis-single-v1
+
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        # This step's entire job is booting an emulator, and until 2026-08-03 it
+        # had no bound of any kind — a wedged boot here ran to the JOB cap,
+        # which SIGKILLs the runner before any if: failure() step, so the lane
+        # died slow and with no artifacts. Measured across 23 successful runs
+        # (ci.yml, 2026-07/08) the snapshot takes 91-130 s; 15 min is ~7x the
+        # observed max, so it can only ever fire on a genuine wedge. The
+        # emulator-boot-timeout below is the action's own inner bound (7 min,
+        # matching the drive steps) and fires first with the action's message.
+        timeout-minutes: 15
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          # Bound the boot itself (the only thing this step does) so a wedged
+          # emulator fails inside the step rather than at the step cap above.
+          emulator-boot-timeout: 420
+          script: echo "Generated AVD snapshot for caching."
+
+      - name: Start strfry relay
+        env:
+          # Same immutable digest pin as the other lanes; STRFRY_IMAGE repo var
+          # wins when set. It runs for the whole lane (the runner never
+          # restarts it), and starting it before the emulator boots surfaces
+          # an image-pull/startup failure as a clean step failure.
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        run: bash tooling/e2e/ci/start-strfry.sh
+
+      # Run the resume legs. All real logic is in the checked-in runner (one
+      # bash invocation: the action runs each line of a multi-line script in
+      # its own sh -c). The restarts power the guest off and boot the same AVD
+      # again with RESUME_EMULATOR_OPTIONS, which must equal emulator-options
+      # below verbatim (the runner's --self-test compares them).
+      # BOUNDS, innermost first: the drive's own timeout and every poll's
+      # (run-android-resume.sh's constants); the DEADLINE below, which
+      # check_e2e_lane_budget.sh holds to the sum of every wait the runner can
+      # reach — 5643 s with its 180 s allowance (`--explain`), so 95m (5700 s);
+      # it was 89m until B2 began waiting for its revoke to reach the
+      # permission store (adbd's restart as root, the store's write, the
+      # post-boot grant read and the refused-before-reboot branch: 325 s); and
+      # this step's cap = DEADLINE + 1 (kill grace) + 7 (emulator-boot-timeout)
+      # + 2 (the action's own setup and teardown, as the M7 lane measured).
+      - name: Run the resume legs on the emulator
+        timeout-minutes: 105
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          RESUME_EMULATOR_OPTIONS: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          emulator-boot-timeout: 420
+          script: bash tooling/e2e/ci/run-with-deadline.sh 95m "e2e-android-resume legs" -- bash tooling/e2e/ci/run-android-resume.sh /tmp/integration-apks/android_resume_setup_test.apk
+
+      # `if: always()` and `.log`, not `.txt`: the scan step below runs on every
+      # outcome short of a cancellation and refuses an absent file, and the
+      # scanner's directory walk only ever picks up `*.log` — a `.txt` here
+      # would be the one uploaded path the guard cannot see.
+      - name: Capture host + emulator diagnostics
+        if: always()
+        run: |
+          mkdir -p /tmp/resume-logs
+          # A dropped adb transport (a guest restart) leaves the device
+          # 'offline'. Re-handshake FIRST so the slices below reflect the
+          # guest's REAL state.
+          # `adb` reaches PATH only through the emulator action's
+          # core.addPath(<sdk>/platform-tools); when that action never ran —
+          # the pre-action failure this capture exists for — every adb line
+          # below was `command not found`, and `|| true` kept it silent (run
+          # 35536892150). Resolve it from the SDK instead, and say in fixed
+          # words which case this diag is.
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -n "${sdk}" ]; then PATH="${sdk}/platform-tools:${PATH}"; fi
+          if command -v adb >/dev/null 2>&1; then adb_state=resolved; else adb_state=absent; fi
+          devices=""
+          if [ "${adb_state}" = resolved ]; then
+            adb reconnect offline || true
+            # Materialised: `adb devices | grep -q` reports the producer's
+            # SIGPIPE under pipefail, not the match.
+            devices="$(adb devices 2>/dev/null || true)"
+          fi
+          if grep -qE '^[^[:space:]]+[[:space:]]+[a-z]+$' <<<"${devices}"; then
+            device_state=present
+            # Nothing to wait for when no emulator was ever started.
+            timeout 60 adb wait-for-device || true
+          else
+            device_state=none
+          fi
+          {
+            echo "adb: ${adb_state}"
+            echo "device: ${device_state}"
+            echo
+            echo "=== df -h ==="
+            df -h || true
+            echo
+            echo "=== free -h ==="
+            free -h || true
+            echo
+            echo "=== adb devices -l (after reconnect attempt) ==="
+            adb devices -l || true
+            echo
+            echo "=== dumpsys activity services (app slice) ==="
+            adb shell dumpsys activity services com.oblivioustech.haven | grep -E 'ServiceRecord|isForeground' || true
+          } > /tmp/resume-logs/diag.log 2>&1 || true
+
+      # The rest of /tmp/resume-logs/ was gated by run-android-resume.sh
+      # (HAVEN_LOGSCAN above: each drive log before it is echoed, and the whole
+      # directory typed by name in its EXIT trap, through tooling/e2e/ci/
+      # scan-logs.sh — the key-material floor AND the identifier scanner,
+      # against the manifest sealed from the host needles — deleting on a leak)
+      # before this file is written; the diag is the one uploaded log it never
+      # sees, scanned HERE against the SAME manifest as a `diag` sink (a
+      # one-line floor, no plant requirement). Scan-before-upload, as its OWN
+      # step on every outcome short of a cancellation: a leak (rc 1) deletes
+      # the scanned file and fails the lane even on an otherwise green run, so
+      # the upload finds nothing to publish; an unscannable log (rc 3), a
+      # broken guard (rc 2) or an unmet floor (rc 4) fails it and leaves the
+      # file as it is. The standard guard condition (not `always()`) is what
+      # lets docs/privacy/privacy_invariants.json cite this step as the
+      # runtime scanner's enforcing run.
+      - name: Scan captured logs for secrets before upload
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: |
+          rc=0
+          bash tooling/e2e/ci/scan-logs.sh \
+            --manifest-dir /tmp/haven-soak/needles \
+            --sink diag=/tmp/resume-logs/diag.log \
+            --report /tmp/logscan-report-upload.ndjson || rc=$?
+          exit "${rc}"
+
+      # Upload all per-leg evidence (logcat, the drive log, diag).
+      # (The /tmp/resume-logs path is owned by run-android-resume.sh.)
+      - name: Upload resume lane artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-android-resume-${{ github.run_id }}
+          path: |
+            /tmp/resume-logs/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # The sealed manifest holds the run's identifiers verbatim. It is never
+      # uploaded (check_wire_proxy_test_only.sh) and does not outlive the job
+      # either: removed on EVERY outcome, after every upload step, so a reused
+      # runner never starts the next run holding the last run's needles.
+      - name: Discard needle manifests
+        if: always()
+        run: rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
+
+      # Relay teardown — runs LAST and if: always() so the strfry container + its
+      # host data dir are removed on every outcome. Best-effort (always exits 0).
+      - name: Tear down strfry relay
+        if: always()
+        run: bash tooling/e2e/ci/stop-strfry.sh
