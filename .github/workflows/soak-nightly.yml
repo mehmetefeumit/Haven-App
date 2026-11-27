@@ -89,7 +89,7 @@ jobs:
       slot_list: ${{ steps.seeds.outputs.slot_list }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # A pinned seed skips the API entirely; otherwise a failed read is exit 2,
       # never a fallback to the runner's clock. On a schedule both inputs are
@@ -177,7 +177,7 @@ jobs:
       actions: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable

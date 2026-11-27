@@ -70,7 +70,7 @@ jobs:
       HAVEN_LOGSCAN: "true"
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Same Xcode as release-build.yml's TestFlight build.
       - name: Select Xcode

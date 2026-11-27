@@ -91,7 +91,7 @@ jobs:
     steps:
       - name: Checkout
         id: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Reclaim runner disk BEFORE the Gradle/Rust build (multi-GB debug build +
       # NDK strip). Runs after checkout because the script lives in the repo.

@@ -129,7 +129,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Free disk space
         run: bash tooling/e2e/ci/free-disk-space.sh

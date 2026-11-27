@@ -85,7 +85,7 @@ jobs:
           sudo rm -rf /usr/local/lib/android/sdk/system-images
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Must match toolchainVersion in haven/android/gradle/gradle-daemon-jvm.properties.
       # If they diverge, Gradle re-downloads JDK 21 (~200 MB) on every CI run.
@@ -187,7 +187,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable

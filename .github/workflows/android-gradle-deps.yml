@@ -45,7 +45,7 @@ jobs:
     timeout-minutes: 80
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # gradle-daemon-jvm.properties asks for an Adoptium 21; this is it, so
       # Gradle downloads no JDK, here or in the offline lanes.

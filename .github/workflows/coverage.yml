@@ -55,7 +55,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # The pin lives in a checked-in file rather than inline here so the local
       # gate reads the same value; a version duplicated across a workflow and a
@@ -264,7 +264,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Read pinned coverage toolchains
         id: toolchain

@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # channel: stable matches coverage.yml and the E2E lanes. gen-l10n output
       # is stable across stable minors; the parity script's drift check compares
