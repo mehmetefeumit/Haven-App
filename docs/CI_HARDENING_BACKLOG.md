@@ -4837,6 +4837,25 @@ which assert the composed paragraph by EQUALITY in both indicator states and
 therefore fail on ANY third sentence, inducement or not. That reasoning was
 moved into the group header so the next reader does not re-derive it.
 
+**Superseded 2026-11-26 (owner-directed, OD-R1).** `INV-L-IOS-WAKES-RECEIVE-ONLY`
+is deleted, under a `ratchet_override` naming exactly
+`INV-L-IOS-WAKES-RECEIVE-ONLY.deleted`, because an iOS location relaunch under
+Always with the current background disclosure now resumes the user's own
+sharing. Its assertion keys (`locationDisclosureBackgroundIos`,
+`locationSettingsIosLimitedNote`), its disclosure (`locationSettingsIntro`) and
+its Info.plist claim moved whole to
+`INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT`, beside a new
+cross-platform `INV-L-RESUME-NEEDS-CURRENT-DISCLOSURE`. The note's localized pin
+is renamed *'the While-In-Use note says what 'Always' resumes and what it
+needs'*: every locale must still name "Always" and say Haven is closed, and now
+must also name its unit for metres and must no longer carry its words for the
+retired "catch up on your circles" clause, so a translation left on the old
+note is red. The consent/intro tie in
+`test/lints/background_claim_accuracy_test.dart` now compares the resume claim
+(Always, movement, not guaranteed, the first unlock, the While-Using limit) over
+the intro's iPhone sentences, and its self-tests catch the old receive-only
+sentences as now false.
+
 ## Owner decisions from the CI-harness hardening round — 2026-09-22
 
 The round (commits 548d4f5 and 12fce46 plus the follow-up staged the same day)

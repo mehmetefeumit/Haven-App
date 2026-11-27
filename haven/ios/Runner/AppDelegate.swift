@@ -155,24 +155,22 @@ private let HAVEN_RUNNER_LOG = OSLog(subsystem: "haven_ios", category: "runner")
     // so they no-op here and are re-armed by applicationDidEnterBackground
     // below once Dart has written the mirror (A3).
     //
-    // SLC relaunch detection: when the OS relaunches Haven due to a
-    // Significant-Location-Change event, launchOptions[.location] is non-nil
-    // AND applicationState is .background. In that case we re-start SLC
-    // monitoring to ensure CLLocationManager redelivers the event to our
-    // delegate (SLC delivery semantics require the manager to be running).
-    let isRelaunchedForSLC = launchOptions?[.location] != nil
+    // Location relaunch: iOS relaunches a terminated Haven into the background
+    // for a significant-change, region or visit event with
+    // launchOptions[.location] set. Monitoring restarts on every launch, so the
+    // OS redelivers the pending event to the SLC delegate (which triggers the
+    // Dart catch-up), and the BGTask floor stays scheduled on a relaunch too.
+    // Both are no-ops while either UserDefaults flag is false.
+    let launchedForLocation = launchOptions?[.location] != nil
       && application.applicationState == .background
-    if isRelaunchedForSLC {
-      // Re-start SLC monitoring so the OS delivers the pending location event
-      // to our delegate, which then triggers the Dart catch-up. The enable
-      // predicate inside startMonitoring() still guards against running when
-      // either UserDefaults flag is false.
-      slcHandler.startMonitoring()
-    } else {
-      // Normal foreground launch: start monitoring + schedule the BGTask floor.
-      // Both are no-ops while either UserDefaults flag is false.
-      slcHandler.startMonitoring()
-      bgTaskHandler.scheduleNextCatchup()
+    slcHandler.startMonitoring()
+    bgTaskHandler.scheduleNextCatchup()
+    if launchedForLocation {
+      // The one fact that lets the stream handler start a background-capable
+      // session from the background (OD-R1, owner-directed 2026-11-26); its
+      // own predicate still needs Always and the current disclosure.
+      locationStreamHandler.launchedForLocation = true
+      locationStreamHandler.beginLaunchWindow()
     }
 
     // Arm the CoreLocation background sessions SYNCHRONOUSLY, on BOTH launch
@@ -188,6 +186,9 @@ private let HAVEN_RUNNER_LOG = OSLog(subsystem: "haven_ios", category: "runner")
 
   override func applicationWillEnterForeground(_ application: UIApplication) {
     super.applicationWillEnterForeground(application)
+    // The user is in front: this is no longer a background launch.
+    locationStreamHandler.launchedForLocation = false
+    locationStreamHandler.endLaunchWindow()
     // Re-arm on every foreground return: covers a toggle-enable whose Dart
     // arm call raced engine teardown, and drops a held .always service
     // session if authorization was downgraded in Settings while backgrounded

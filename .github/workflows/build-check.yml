@@ -1,8 +1,9 @@
 # Reusable workflow: debug-build verification.
 #
 # Proves the app builds end-to-end with the Rust core on every mobile target.
-# These are build proofs only (no tests): they catch Gradle/Xcode/cargokit/FFI
-# wiring breaks that the unit-test lanes cannot see.
+# These are build proofs (plus, on the arm64 leg, the Android JVM unit tests,
+# which need this Gradle build): they catch Gradle/Xcode/cargokit/FFI wiring
+# breaks that the unit-test lanes cannot see.
 #
 #   - Android: one job per ABI (arm64, arm, x64). Each architecture gets its
 #     own runner because a combined multi-ABI build has exhausted a default
@@ -144,6 +145,22 @@ jobs:
         env:
           HAVEN_GRADLE_OFFLINE: "1"
         run: ../scripts/ci/build_apk_with_retry.sh ${{ matrix.flutter-platform }}
+
+      # The JVM unit tests of the Android boot/update resume rule
+      # (app/src/test/.../BootResumeTest.kt, JUnit 4, test-only): the one check
+      # that runs ResumeRule.kt's decision and its preference reads. JVM code,
+      # so one ABI is enough. The build above generated gradlew and compiled
+      # the Kotlin; the same target platform (`--gradle-task` passes it as
+      # `-Ptarget-platform`) keeps Flutter's tasks up to date, and cargokit's
+      # Rust build hangs off native-lib merging, which a unit test does not
+      # reach. Offline like the build: JUnit is in the run's set, because
+      # havenResolveAll resolves the unit-test classpaths with the rest.
+      - name: Android JVM unit tests
+        if: matrix.arch == 'arm64'
+        timeout-minutes: 15
+        env:
+          HAVEN_GRADLE_OFFLINE: "1"
+        run: ../scripts/ci/build_apk_with_retry.sh --gradle-task ${{ matrix.flutter-platform }} :app:testDebugUnitTest
 
       # Security Rule 15: SQLCipher's native logger is compiled out of what we
       # build, whatever directory cargokit ran cargo from.

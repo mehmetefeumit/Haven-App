@@ -1256,7 +1256,9 @@ void main() {
         profileService: svc,
       );
 
-      // The provider catches the error and returns null → initials shown.
+      // A failed first read is an error with no value → initials, and no
+      // error reaches the widget tree.
+      expect(tester.takeException(), isNull);
       expect(find.byType(CircleAvatar), findsOneWidget);
       expect(find.byType(HavenAvatar), findsNothing);
     });
@@ -2267,4 +2269,250 @@ void main() {
       );
     }
   });
+
+  // ---------------------------------------------------------------------------
+  // A member with a name or photo never falls back to the npub (owner-directed
+  // 2026-11-26): not before the first read lands, not while reads fail, and
+  // not when the row remounts.
+  // ---------------------------------------------------------------------------
+
+  group('CircleMemberTile — last-known name', () {
+    final photo = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]);
+    final npub = shortNpub(otherNpub);
+
+    /// What the row's title says — a resolved name puts the npub in the
+    /// subtitle, so the title is read directly.
+    String? title(WidgetTester tester) =>
+        (tester.widget<ListTile>(find.byType(ListTile)).title! as Text).data;
+
+    /// The row's own label, which leads with the name it shows.
+    Finder rowLabelled(String name) =>
+        find.bySemanticsLabel(RegExp('^${RegExp.escape(name)}, '));
+
+    /// Pumps the row under [profiles]; [shown] mounts and unmounts it.
+    Future<void> pumpRow(
+      WidgetTester tester, {
+      required _ScriptedMemberProfiles profiles,
+      CircleMember? member,
+      ValueNotifier<bool>? shown,
+    }) async {
+      final visible = shown ?? ValueNotifier(true);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            identityProvider.overrideWith((_) async => null),
+            displayNameProvider.overrideWith((_) async => null),
+            profileServiceProvider.overrideWithValue(profiles),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: ValueListenableBuilder<bool>(
+                valueListenable: visible,
+                builder: (_, show, _) => show
+                    ? CircleMemberTile(
+                        member: member ?? buildMember(pubkey: otherPubkey),
+                      )
+                    : const SizedBox.shrink(),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    ProviderContainer containerOf(WidgetTester tester) =>
+        ProviderScope.containerOf(tester.element(find.byType(Scaffold)));
+
+    testWidgets('first load shows no npub as the title before the read '
+        'settles, then the name, and the row is always labelled', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      final profiles = _ScriptedMemberProfiles()..next = Completer();
+      await pumpRow(tester, profiles: profiles);
+
+      expect(title(tester), isEmpty);
+      expect(
+        find.text(npub),
+        findsOneWidget,
+        reason: 'the npub holds its subtitle place, never the title',
+      );
+      expect(
+        rowLabelled(npub),
+        findsOneWidget,
+        reason: 'a screen reader still hears who the row is',
+      );
+      final pendingHeight = tester.getSize(find.byType(ListTile)).height;
+
+      profiles.next!.complete(
+        const Profile(pubkeyHex: otherPubkey, displayName: 'Bo'),
+      );
+      await tester.pumpAndSettle();
+
+      expect(title(tester), 'Bo');
+      expect(rowLabelled('Bo'), findsOneWidget);
+      expect(
+        tester.getSize(find.byType(ListTile)).height,
+        pendingHeight,
+        reason: 'the pending row has the named geometry, so nothing reflows',
+      );
+      handle.dispose();
+    });
+
+    testWidgets('a member with no profile shows the npub once the read '
+        'settles', (tester) async {
+      final profiles = _ScriptedMemberProfiles()..next = Completer();
+      await pumpRow(tester, profiles: profiles);
+      expect(title(tester), isEmpty);
+
+      profiles.next!.complete(null);
+      await tester.pumpAndSettle();
+
+      expect(title(tester), npub);
+    });
+
+    testWidgets('a member with no profile keeps the npub through a refresh', (
+      tester,
+    ) async {
+      final profiles = _ScriptedMemberProfiles();
+      await pumpRow(tester, profiles: profiles);
+      await tester.pumpAndSettle();
+      expect(title(tester), npub);
+
+      containerOf(tester).invalidate(memberProfileProvider);
+      for (var frame = 0; frame < 4; frame++) {
+        await tester.pump();
+        expect(title(tester), npub, reason: 'a refresh is not a first load');
+      }
+      expect(profiles.reads, 2, reason: 'premise: the refresh read again');
+    });
+
+    testWidgets('a failed first read shows the npub, with no error UI', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      final profiles = _ScriptedMemberProfiles()..fail = true;
+      await pumpRow(tester, profiles: profiles);
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(title(tester), npub);
+      expect(rowLabelled(npub), findsOneWidget);
+      handle.dispose();
+    });
+
+    testWidgets('a petname shows before any read settles', (tester) async {
+      final profiles = _ScriptedMemberProfiles()..next = Completer();
+      await pumpRow(
+        tester,
+        profiles: profiles,
+        member: buildMember(pubkey: otherPubkey, displayName: 'Nick'),
+      );
+
+      expect(title(tester), 'Nick');
+    });
+
+    testWidgets('a cached name and photo stay on every frame of an Android '
+        'handoff', (tester) async {
+      final handle = tester.ensureSemantics();
+      final profiles = _ScriptedMemberProfiles(
+        memberProfiles: {
+          otherPubkey: Profile(
+            pubkeyHex: otherPubkey,
+            displayName: 'Bo',
+            pictureBytes: photo,
+            pictureHash: 'hash',
+          ),
+        },
+      );
+      await pumpRow(tester, profiles: profiles);
+      await tester.pumpAndSettle();
+      expect(title(tester), 'Bo');
+      final readsBefore = profiles.reads;
+
+      // Every read fails while the foreground service holds the session, and
+      // each batch refresh invalidates the family in its `finally`.
+      profiles.fail = true;
+      for (var refresh = 0; refresh < 3; refresh++) {
+        containerOf(tester).invalidate(memberProfileProvider);
+        for (var frame = 0; frame < 4; frame++) {
+          await tester.pump();
+          expect(title(tester), 'Bo', reason: 'refresh $refresh');
+          expect(rowLabelled('Bo'), findsOneWidget);
+          expect(
+            tester.widget<HavenAvatar>(find.byType(HavenAvatar)).imageBytes,
+            photo,
+          );
+        }
+      }
+      expect(
+        profiles.reads,
+        readsBefore + 3,
+        reason: 'premise: every refresh read again, and failed',
+      );
+      handle.dispose();
+    });
+
+    testWidgets('a row remounted while reads fail shows the last-known name '
+        'and photo on its first frame', (tester) async {
+      final shown = ValueNotifier(true);
+      addTearDown(shown.dispose);
+      final profiles = _ScriptedMemberProfiles(
+        memberProfiles: {
+          otherPubkey: Profile(
+            pubkeyHex: otherPubkey,
+            displayName: 'Bo',
+            pictureBytes: photo,
+            pictureHash: 'hash',
+          ),
+        },
+      );
+      await pumpRow(tester, profiles: profiles, shown: shown);
+      await tester.pumpAndSettle();
+
+      shown.value = false;
+      await tester.pumpAndSettle();
+      profiles.fail = true;
+      containerOf(tester).invalidate(memberProfileProvider);
+      await tester.pumpAndSettle();
+      expect(profiles.reads, 2, reason: 'premise: the refresh read and failed');
+
+      shown.value = true;
+      await tester.pump();
+
+      expect(title(tester), 'Bo');
+      expect(
+        tester.widget<HavenAvatar>(find.byType(HavenAvatar)).imageBytes,
+        photo,
+      );
+    });
+  });
+}
+
+/// A member-profile store scripted per read: a read waits on [next] when
+/// set, fails while [fail] holds, and otherwise answers from
+/// `memberProfiles`.
+class _ScriptedMemberProfiles extends MockProfileService {
+  _ScriptedMemberProfiles({super.memberProfiles});
+
+  Completer<Profile?>? next;
+  bool fail = false;
+  int reads = 0;
+
+  @override
+  Future<Profile?> getMemberProfile(
+    String pubkeyHex, {
+    bool forceRefresh = false,
+  }) async {
+    reads++;
+    final pending = next;
+    if (pending != null) return pending.future;
+    if (fail) {
+      throw const ProfileServiceException('Failed to load member profile');
+    }
+    return memberProfiles[pubkeyHex];
+  }
 }

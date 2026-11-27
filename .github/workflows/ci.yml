@@ -223,6 +223,16 @@ jobs:
     needs: [rust, gradle-deps]
     uses: ./.github/workflows/e2e-background-catchup.yml
 
+  # Runtime proof that Android background sharing comes back with no UI launch
+  # after an app update, a reboot and a process kill, and posts the resume
+  # notice instead when the resume rule refuses (owner-directed 2026-11-26,
+  # OD-R2). Separate from the catch-up lane above, whose wakes skip while the
+  # foreground service is alive.
+  e2e-android-resume:
+    name: E2E Android Resume
+    needs: [rust, gradle-deps]
+    uses: ./.github/workflows/e2e-android-resume.yml
+
   # Runtime proof that the Android foreground service actually PUBLISHES while
   # the UI is hidden and the foreground MLS session is still live (backlog B1).
   # Distinct from the catch-up lane above, which is receive-only, runs in a
@@ -458,6 +468,7 @@ jobs:
       - e2e-integration
       - e2e-relay-management
       - e2e-background-catchup
+      - e2e-android-resume
       - e2e-fgs-publish
       - e2e-real-gps
       - e2e-clock-skew

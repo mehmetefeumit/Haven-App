@@ -231,7 +231,11 @@
 #
 # A simulator has no jetsam, no Significant-Location-Change relaunch and no
 # BGTaskScheduler, so a background-execution bug only those surface will not
-# show up here. What the lane does prove is that the production background
+# show up here. Since 2026-11-26 (owner-directed, OD-R1) a location relaunch
+# under Always with the current background disclosure resumes publishing, so
+# "no relaunch" also means that publish is device-only
+# (docs/M7_BACKGROUND_SHARING.md §6 items 2-2l); this lane's 5 m drip never
+# leaves the 200 m relaunch region either. What the lane does prove is that the production background
 # stack — plist mode, HavenLocationStreamHandler's updates session, the native
 # session handler's tier posture, the Dart publish pipeline and whichever
 # receive plane the leg was built with — survives a genuinely fired

@@ -15,8 +15,9 @@
 #            (locations>=1 && relayErrors==0) — see "cold-process relay
 #            reachability" below.
 #   Phase B  reboot re-arm: reboot the guest, wait for boot, BOUNDED-poll that
-#            WorkManager re-scheduled the job (A6), assert the RebootReceiver is
-#            runtime-resolvable for BOOT_COMPLETED, then force-run again.
+#            WorkManager re-scheduled the job (A6), assert BootResumeReceiver is
+#            runtime-resolvable for BOOT_COMPLETED and MY_PACKAGE_REPLACED (the
+#            plugin RebootReceiver absent), then force-run again.
 #   Phase C1 pending-wipe no-op: install the wipe APK, drive, go cold, force-run,
 #            assert the gate-2 marker AND strfry silence (zero relay activity).
 #   Phase C2 leaked-wake no-op: install the disable APK, drive, go cold,
@@ -159,8 +160,10 @@ readonly JOB_NAMESPACE="androidx.work.systemjobscheduler"
 # WorkManager's SystemJobService component — the discriminator for OUR job among
 # any WorkManager-internal jobs in the dumpsys.
 readonly SYSTEMJOB_MATCH="${PKG}/androidx.work"
-# The flutter_foreground_task boot receiver (manifest flip #2; guard 14c).
-readonly REBOOT_RECEIVER="com.pravera.flutter_foreground_task.service.RebootReceiver"
+# Haven's boot/update receiver (guard 14c), and the plugin receiver it replaces,
+# which the manifest removes (owner-directed 2026-11-26, OD-R2).
+readonly BOOT_RECEIVER="BootResumeReceiver"
+readonly PLUGIN_REBOOT_RECEIVER="com.pravera.flutter_foreground_task.service.RebootReceiver"
 
 readonly DRIVE_TIMEOUT="${HAVEN_DRIVE_TIMEOUT:-10m}"
 # How long SIGKILL follows a drive's SIGTERM at DRIVE_TIMEOUT.
@@ -1228,27 +1231,34 @@ phase_b() {
     echo "[phase-b] WorkManager re-scheduled work after boot (RescheduleReceiver path observed)."
   else
     echo "[phase-b] NOTE: no WorkManager re-schedule log within ${JOB_REARM_TIMEOUT}s" \
-         "(non-fatal — RebootReceiver resolvability above is the load-bearing proof)." >&2
+         "(non-fatal — the receiver resolvability above is the load-bearing proof)." >&2
   fi
-  echo "[phase-b] PASS: reboot re-arm wiring verified (RebootReceiver resolvable for BOOT_COMPLETED)."
+  echo "[phase-b] PASS: reboot re-arm wiring verified (BootResumeReceiver resolvable, plugin RebootReceiver absent)."
 }
 
 assert_reboot_receiver_resolvable() {
-  local out
-  out="$(adb -s "${DEVICE}" shell cmd package query-receivers --components -a android.intent.action.BOOT_COMPLETED 2>/dev/null || true)"
+  local action out dump
   # Here-strings, as in run_one_job: piped from printf, a whole receiver list or
   # package dump SIGPIPEs on an early match and reads as "not resolvable".
-  if grep -qF "${REBOOT_RECEIVER}" <<<"${out}"; then
-    echo "[phase-b] RebootReceiver resolvable for BOOT_COMPLETED (enabled=true + intent-filter intact)."
-    return 0
+  dump="$(adb -s "${DEVICE}" shell dumpsys package "${PKG}" 2>/dev/null || true)"
+  for action in android.intent.action.BOOT_COMPLETED android.intent.action.MY_PACKAGE_REPLACED; do
+    out="$(adb -s "${DEVICE}" shell cmd package query-receivers --components -a "${action}" 2>/dev/null || true)"
+    if grep -qF "${PKG}/" <<<"${out}" && grep -qF "${BOOT_RECEIVER}" <<<"${out}"; then
+      echo "[phase-b] ${BOOT_RECEIVER} resolvable for ${action##*.}."
+    # Fallback for images whose `cmd package query-receivers` syntax differs.
+    elif grep -qF "${BOOT_RECEIVER}" <<<"${dump}" && grep -qF "${action}" <<<"${dump}"; then
+      echo "[phase-b] ${BOOT_RECEIVER} and ${action##*.} present in dumpsys package (fallback resolution check)."
+    else
+      fail "${BOOT_RECEIVER} not resolvable for ${action##*.} — the manifest receiver or its intent-filter regressed (guard 14c)."
+    fi
+  done
+  # The plugin's receiver would start the service on options an old build
+  # stored, outside the resume rule: tools:node="remove" must keep it out of
+  # the merged manifest entirely.
+  if grep -qF "${PLUGIN_REBOOT_RECEIVER}" <<<"${dump}"; then
+    fail "the plugin RebootReceiver is in the installed package — tools:node=\"remove\" regressed (guard 14c)."
   fi
-  # Fallback for images whose `cmd package query-receivers` syntax differs.
-  out="$(adb -s "${DEVICE}" shell dumpsys package "${PKG}" 2>/dev/null || true)"
-  if grep -qF "${REBOOT_RECEIVER}" <<<"${out}"; then
-    echo "[phase-b] RebootReceiver present in dumpsys package (fallback resolution check)."
-    return 0
-  fi
-  fail "RebootReceiver not resolvable for BOOT_COMPLETED — manifest flip #2 (enabled=true) or the plugin intent-filter regressed."
+  echo "[phase-b] plugin RebootReceiver absent from the installed package."
 }
 
 # Restarts the guest the way a phone is restarted: powered off, then booted
@@ -1445,7 +1455,7 @@ main() {
   else
     echo "  A  cold isolate bootstrap + DB open + sweep (circles>=1) — delivery NOT asserted"
   fi
-  echo "  B  job survives reboot + RebootReceiver resolvable + post-boot wake"
+  echo "  B  job survives reboot + BootResumeReceiver resolvable + post-boot wake"
   echo "  C1 pending-wipe gate declines + strfry silence (relay was reachable)"
   echo "  C2 consent gate declines a leaked wake + strfry silence (relay was reachable)"
   echo "============================================================"

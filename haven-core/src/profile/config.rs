@@ -29,10 +29,10 @@ pub use crate::avatar::AVATAR_MIME;
 
 // Profile staleness tolerance is NOT configured here. `fetch_member_profiles`
 // takes a per-call `max_age_secs`, so each refresh trigger states its own tier
-// (interactive / periodic anti-entropy / forced). Those tiers live in Dart
-// (`haven/lib/src/constants/profile_refresh_tiers.dart`) next to the timer that
-// drives them — the same "Dart owns cadence, Rust owns logic" split the
-// maintenance scheduler already uses.
+// (foreground / interactive / periodic anti-entropy / forced). Those tiers live
+// in Dart (`haven/lib/src/constants/profile_refresh_tiers.dart`) next to the
+// timer that drives them — the same "Dart owns cadence, Rust owns logic" split
+// the maintenance scheduler already uses.
 //
 // For the record, because a previous constant here claimed otherwise: this is
 // NOT White Noise parity. White Noise has no TTL for real users at all — it

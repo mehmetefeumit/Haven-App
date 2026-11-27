@@ -572,7 +572,15 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get locationSettingsIntro =>
-      'O Haven compartilha sua localização com seus círculos sempre que o app está aberto. Ative esta opção e seus círculos continuam vendo a localização enquanto o Haven está em segundo plano. Se o sistema fechar o Haven, seu próprio compartilhamento é interrompido — o Haven ainda pode acordar para buscar a localização dos seus círculos, mas nunca para enviar a sua. No Android, o compartilhamento continua mesmo quando você desliza o Haven para fora da lista de apps recentes e volta a funcionar sozinho depois que o telefone é reiniciado. No iPhone, o compartilhamento continua interrompido até você abrir o Haven.';
+      'O Haven compartilha sua localização com seus círculos sempre que o app está aberto. Ative esta opção e seus círculos continuam vendo a localização enquanto o Haven está em segundo plano. Deslizar o Haven para fora da lista de apps recentes não desativa esta configuração; só o botão abaixo faz isso.';
+
+  @override
+  String get locationSettingsIntroAndroid =>
+      'O compartilhamento continua quando você desliza o Haven para fora da lista de apps recentes. Depois que o telefone reinicia ou o Haven é atualizado, o compartilhamento volta sozinho se o Haven puder usar sua localização o tempo todo (no Android 10 ou anterior, basta que o Haven possa usar sua localização). Caso contrário, o Haven mostra uma notificação que você pode tocar para retomar. Se o Haven for forçado a parar, o compartilhamento continua interrompido até você abrir o app.';
+
+  @override
+  String get locationSettingsIntroIos =>
+      'Com a localização definida como \"Sempre\", o compartilhamento volta sozinho depois que o Haven é fechado, assim que você tiver se deslocado algumas centenas de metros e o iOS permitir. Depois que o telefone reinicia, isso só acontece quando você também o desbloquear. É o iOS que decide quando isso acontece, então não é garantido. Com \"Durante o Uso do App\", o compartilhamento é interrompido quando o Haven é fechado e volta quando você abre o app.';
 
   @override
   String get locationSettingsToggleTitle => 'Compartilhar em segundo plano';
@@ -583,7 +591,25 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'O compartilhamento continua funcionando em segundo plano com sua permissão atual, e enquanto isso o iOS mostra a própria barra azul de localização no topo da tela. Escolha \"Sempre\" para o Haven nos Ajustes para que ele também possa recuperar as localizações dos seus círculos depois que o iOS fechar o app. Com \"Sempre\", o iOS pode mostrar a seta de localização na barra de status em vez dessa barra azul. Seu próprio compartilhamento é retomado quando você reabre o Haven.';
+      'O compartilhamento continua funcionando em segundo plano com sua permissão atual, e enquanto isso o iOS mostra a própria barra azul de localização no topo da tela. Se o Haven for fechado, o compartilhamento é interrompido até você abrir o app de novo. Escolha \"Sempre\" para o Haven nos Ajustes para que o compartilhamento possa voltar sozinho depois que o Haven for fechado, assim que você tiver se deslocado algumas centenas de metros e o iOS permitir. Com \"Sempre\", o iOS pode mostrar a seta de localização na barra de status em vez dessa barra.';
+
+  @override
+  String get locationSettingsResumeConsentNote =>
+      'O compartilhamento em segundo plano está ativado. Se ele parar, por exemplo quando o telefone reiniciar, o Haven não vai retomá-lo sozinho até você concordar com o aviso atualizado sobre o compartilhamento em segundo plano.';
+
+  @override
+  String get locationSettingsResumeConsentAction => 'Revisar aviso';
+
+  @override
+  String locationSettingsAndroidAllTimeNote(String optionLabel) {
+    return 'A permissão de localização do Haven não está definida como \"$optionLabel\", então o compartilhamento não vai voltar sozinho depois que o telefone reiniciar ou o Haven for atualizado. Em vez disso, o Haven vai mostrar uma notificação que você pode tocar para retomar.';
+  }
+
+  @override
+  String get locationSettingsAndroidAllTimeAction => 'Alterar permissão';
+
+  @override
+  String get locationBackgroundAllTimeOptionFallback => 'Permitir o tempo todo';
 
   @override
   String get locationSettingsAndroidHeader =>
@@ -595,7 +621,7 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get locationSettingsAndroidBattery =>
-      'Para um compartilhamento em segundo plano confiável, exclua também o Haven da otimização de bateria. Vá em Configurações → Apps → Haven → Bateria → Permitir o tempo todo.';
+      'Para um compartilhamento em segundo plano confiável, exclua também o Haven da otimização de bateria. Vá em Configurações → Apps → Haven → Bateria → Sem restrições.';
 
   @override
   String get locationSettingsAndroidVendors =>
@@ -634,7 +660,7 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get locationDisclosureBackgroundIos =>
-      'Este app usa dados de localização para permitir o compartilhamento com seus círculos mesmo quando o Haven está em segundo plano e você não está usando o app. Se o iOS fechar o Haven, o compartilhamento é interrompido até você abrir o app de novo — o Haven ainda pode acordar para buscar a localização dos seus círculos, mas nunca para enviar a sua.';
+      'Este app usa dados de localização para permitir o compartilhamento com seus círculos mesmo quando o Haven está em segundo plano e você não está usando o app. Se a localização estiver definida como \"Sempre\" e o Haven for fechado, mesmo por você, o Haven volta a compartilhar sozinho assim que você tiver se deslocado algumas centenas de metros e o iOS permitir. Depois de uma reinicialização, isso só acontece quando você também tiver desbloqueado o telefone. O iOS decide quando, então não é garantido. Com \"Durante o Uso do App\", o compartilhamento é interrompido quando o Haven é fechado e continua assim até você abrir o app de novo.';
 
   @override
   String get locationDisclosureManage =>
@@ -647,8 +673,28 @@ class AppLocalizationsPt extends AppLocalizations {
   String get locationDisclosureNotNow => 'Agora não';
 
   @override
+  String get locationDisclosureUpdateLead =>
+      'O compartilhamento em segundo plano mudou desde que você o ativou. Agora o Haven pode voltar a compartilhar sozinho depois de ter parado, por exemplo depois que o telefone reinicia, nos casos descritos abaixo. Se você escolher \"Agora não\", o compartilhamento em segundo plano continua funcionando como antes, mas, depois de parar, continua parado até você abrir o Haven.';
+
+  @override
+  String locationBackgroundAllTimeStep(String optionLabel) {
+    return 'Em seguida, na tela que o Android abrir, defina a permissão de localização do Haven como \"$optionLabel\" para que o compartilhamento volte sozinho depois que o telefone reiniciar ou o Haven for atualizado. Se você não fizer isso, o compartilhamento continua funcionando até o telefone reiniciar ou o Haven ser atualizado, e então o Haven mostra uma notificação que você pode tocar para retomar.';
+  }
+
+  @override
   String get fgsNotificationSharing =>
       'O Haven está enviando e recebendo informações de localização';
+
+  @override
+  String get androidResumeNoticeTitle =>
+      'O compartilhamento de localização parou';
+
+  @override
+  String get androidResumeNoticeBody =>
+      'Toque para abrir o Haven e voltar a compartilhar sua localização com seus círculos.';
+
+  @override
+  String get androidResumeNoticeChannelName => 'Lembretes de compartilhamento';
 
   @override
   String get fgsNotificationPaused =>

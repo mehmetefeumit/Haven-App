@@ -278,7 +278,7 @@ flutter|lib/src/services/subscription_service.dart|100      # measured 100.00% (
 # behavioural tests. What remains uncovered is `onStart`'s bridge-bound
 # prologue (RustLib init, keyring, data dir, identity load) and
 # `backgroundCallback`.
-flutter|lib/src/services/background_location_task.dart|86   # measured 88.30% (498/564)
+flutter|lib/src/services/background_location_task.dart|87   # measured 89.46% (509/569)
 # NO ROW YET for lib/src/services/background_burst_coordinator.dart either,
 # for the same reason and with the same instruction. It is P4's whole receive
 # plane on iOS — one bounded burst per publish tick, and the file whose ORDER
@@ -300,7 +300,7 @@ flutter|lib/src/services/background_location_task.dart|86   # measured 88.30% (4
 # (18/22) on Flutter 3.41.0, which would pin at 79 — recorded as an ORDER OF
 # MAGNITUDE, not as provenance. Add the row with `--repin flutter <lcov>` from
 # the next CI coverage artifact.
-flutter|lib/src/services/background_location_manager.dart|54 # measured 56.49% (74/131)
+flutter|lib/src/services/background_location_manager.dart|70 # measured 72.60% (106/146)
 flutter|lib/src/services/background_catchup_worker.dart|30  # measured 32.94% (28/85)
 
 # --- MLS / relay / identity / profile FFI seams -----------------------------
@@ -311,7 +311,7 @@ flutter|lib/src/services/background_catchup_worker.dart|30  # measured 32.94% (2
 # gate — and has since been fully covered, so it is pinned exactly at 100.
 flutter|lib/src/services/nostr_circle_service.dart|73       # measured 75.14% (411/547)
 flutter|lib/src/services/nostr_identity_service.dart|61     # measured 63.56% (75/118)
-flutter|lib/src/services/nostr_profile_service.dart|70      # measured 72.48% (108/149)
+flutter|lib/src/services/nostr_profile_service.dart|75      # measured 77.18% (115/149)
 flutter|lib/src/services/nostr_relay_service.dart|71        # measured 73.72% (230/312); was 0 (0.63%, 1/158)
                                                             # before classifyKeyPackageMaintenance was lifted
                                                             # out of the class. It decides whether a KeyPackage

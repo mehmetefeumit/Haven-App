@@ -19,11 +19,17 @@
 /// The staleness threshold is 2 * kBackgroundRepeatInterval = 144 seconds.
 library;
 
+import 'dart:async';
+
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/services/background_location_manager.dart';
+import 'package:haven/src/services/background_location_task.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../helpers/log_capture.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -121,31 +127,28 @@ void main() {
     // -------------------------------------------------------------------------
     // Case 6: timestamp in the FUTURE (backward clock jump) → false
     // -------------------------------------------------------------------------
-    test(
-      'returns false when the stored timestamp is in the future '
-      '(backward clock jump)',
-      () async {
-        // A backward clock jump — NTP correction, a manual date change, an
-        // RTC that comes up wrong at boot — leaves a timestamp the foreground
-        // wrote at a wall-clock time that is now in the future. The age is
-        // then NEGATIVE, which `age < threshold` alone reads as "the
-        // foreground just wrote this": the FGS mutes its own publish cycle
-        // for as long as the clock takes to catch up, silently, with the
-        // toggle still reading ON. Hours of a future stamp is entirely
-        // reachable (a device that briefly believed it was in another day).
-        final storedMs =
-            DateTime.now().millisecondsSinceEpoch + 6 * 60 * 60 * 1000;
-        final result = await check(storedMs);
-        expect(
-          result,
-          isFalse,
-          reason:
-              'an impossible (future) timestamp must read as stale, never as '
-              'a live foreground — otherwise a backward clock jump mutes the '
-              'background publisher until the clock catches up',
-        );
-      },
-    );
+    test('returns false when the stored timestamp is in the future '
+        '(backward clock jump)', () async {
+      // A backward clock jump — NTP correction, a manual date change, an
+      // RTC that comes up wrong at boot — leaves a timestamp the foreground
+      // wrote at a wall-clock time that is now in the future. The age is
+      // then NEGATIVE, which `age < threshold` alone reads as "the
+      // foreground just wrote this": the FGS mutes its own publish cycle
+      // for as long as the clock takes to catch up, silently, with the
+      // toggle still reading ON. Hours of a future stamp is entirely
+      // reachable (a device that briefly believed it was in another day).
+      final storedMs =
+          DateTime.now().millisecondsSinceEpoch + 6 * 60 * 60 * 1000;
+      final result = await check(storedMs);
+      expect(
+        result,
+        isFalse,
+        reason:
+            'an impossible (future) timestamp must read as stale, never as '
+            'a live foreground — otherwise a backward clock jump mutes the '
+            'background publisher until the clock catches up',
+      );
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -392,8 +395,10 @@ void main() {
     });
 
     test('returns true when kBackgroundSharingKey is set to true', () async {
-      SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true,
-        kLocationDisclosureBackgroundAcceptedKey: true});
+      SharedPreferences.setMockInitialValues({
+        kBackgroundSharingKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true,
+      });
 
       final result =
           await BackgroundLocationManager.isBackgroundSharingEnabled();
@@ -490,7 +495,8 @@ void main() {
       expect(
         calls.single.arguments,
         kForegroundPausedSignal,
-        reason: 'presence-only: the payload carries no identity, no '
+        reason:
+            'presence-only: the payload carries no identity, no '
             'coordinate, no circle and no timestamp — everything the task '
             'acts on it re-reads from its own gates',
       );
@@ -504,10 +510,163 @@ void main() {
       expect(
         calls.map((c) => c.arguments).toList(),
         [kForegroundPausedSignal, kForegroundResumedSignal],
-        reason: 'the task distinguishes the two by string alone, so a sender '
+        reason:
+            'the task distinguishes the two by string alone, so a sender '
             'that rewrote, coalesced or reordered them would silently invert '
             'which isolate owns the platform location request',
       );
+    });
+  });
+
+  group('BackgroundLocationManager — start/stop are serialized (D1)', () {
+    // The plugin's own channel, answered by a model of the real service: a
+    // start or stop takes effect on a LATER event-loop turn, as the service's
+    // onStartCommand does, so `isRunningService` still answers the old state
+    // when the request returns.
+    const channel = MethodChannel('flutter_foreground_task/methods');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    late bool running;
+    late List<String> sent;
+    late bool failNextRunningQuery;
+
+    setUp(() {
+      running = false;
+      sent = [];
+      failNextRunningQuery = false;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        switch (call.method) {
+          case 'isRunningService':
+            if (failNextRunningQuery) {
+              failNextRunningQuery = false;
+              throw PlatformException(code: 'boom');
+            }
+            return running;
+          case 'startService':
+            sent.add('start');
+            Timer(Duration.zero, () => running = true);
+            return null;
+          case 'stopService':
+            sent.add('stop');
+            Timer(Duration.zero, () => running = false);
+            return null;
+        }
+        return null;
+      });
+    });
+
+    tearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    Future<void> start() => BackgroundLocationManager.startService(
+      callback: backgroundCallback,
+      notificationText: 'sharing',
+    );
+
+    test('a start issued right behind a stop leaves the service running', () {
+      fakeAsync((async) {
+        running = true;
+        var done = 0;
+        unawaited(BackgroundLocationManager.stopService().then((_) => done++));
+        unawaited(start().then((_) => done++));
+        async.elapse(const Duration(seconds: 2));
+
+        expect(done, 2);
+        expect(
+          sent,
+          ['stop', 'start'],
+          reason:
+              'the start must wait for the stop to land; run '
+              'concurrently both read "running", the start returns '
+              '"already running" and the stop then kills the service',
+        );
+        expect(running, isTrue);
+      });
+    });
+
+    test('a stop issued right behind a start leaves the service stopped', () {
+      fakeAsync((async) {
+        unawaited(start());
+        unawaited(BackgroundLocationManager.stopService());
+        async.elapse(const Duration(seconds: 2));
+
+        expect(sent, ['start', 'stop']);
+        expect(running, isFalse);
+      });
+    });
+
+    group('a stop with no service running', () {
+      const haven = MethodChannel('haven.app/background_location');
+      late List<String> native;
+
+      setUp(() {
+        native = [];
+        messenger.setMockMethodCallHandler(haven, (call) async {
+          native.add(call.method);
+          return null;
+        });
+      });
+
+      tearDown(() => messenger.setMockMethodCallHandler(haven, null));
+
+      test('records the stop natively, so a later boot posts no notice', () {
+        // Identity deletion after the service died (location revoked): the
+        // plugin's stop throws for a dead service and writes nothing, and the
+        // boot receiver would read the last START as sharing Haven wants.
+        fakeAsync((async) {
+          unawaited(BackgroundLocationManager.stopService());
+          async.elapse(const Duration(seconds: 2));
+          expect(native, ['markStopped']);
+          expect(sent, isEmpty);
+        });
+      });
+
+      test('a native refusal logs its code only, never its text', () async {
+        // Rule 15: the plugin and the platform put arbitrary text in an
+        // error's message and details; the log line carries the code alone.
+        const planted = 'npub1plantedplantedplanted wss://planted.example';
+        messenger.setMockMethodCallHandler(haven, (call) async {
+          throw PlatformException(
+            code: 'unavailable',
+            message: planted,
+            details: planted,
+          );
+        });
+        final logs = LogCapture.install();
+        await BackgroundLocationManager.stopService();
+        logs
+          ..assertContains(
+            '[BackgroundManager] markStopped failed: unavailable',
+          )
+          ..assertNoNeedles(['npub1planted', 'planted.example']);
+      });
+
+      test('a running service is stopped by the plugin, which records it', () {
+        fakeAsync((async) {
+          running = true;
+          unawaited(BackgroundLocationManager.stopService());
+          async.elapse(const Duration(seconds: 2));
+          expect(sent, ['stop']);
+          expect(native, isEmpty);
+        });
+      });
+    });
+
+    test('a failed operation does not wedge the ones queued behind it', () {
+      fakeAsync((async) {
+        failNextRunningQuery = true;
+        Object? stopError;
+        unawaited(
+          BackgroundLocationManager.stopService().catchError(
+            (Object e) => stopError = e,
+          ),
+        );
+        unawaited(start());
+        async.elapse(const Duration(seconds: 2));
+
+        expect(stopError, isA<PlatformException>());
+        expect(sent, ['start']);
+        expect(running, isTrue);
+      });
     });
   });
 }

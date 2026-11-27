@@ -16,7 +16,11 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
-    <!-- Background location (Android 10+ / API 29+) -->
+    <!-- Background location (Android 10+ / API 29+). Requested at runtime on
+         Android 11+ only (BackgroundLocation.kt, owner-directed 2026-11-26,
+         OD-R2), after the background disclosure: without it a location
+         service started at boot or after an update gets no location (11-13)
+         or is refused (14+). Android 10 has no such restriction. -->
     <uses-permission
         android:name="android.permission.ACCESS_BACKGROUND_LOCATION"
         android:minSdkVersion="29" />
@@ -40,11 +44,10 @@
          lock — away with it. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
-    <!-- Receive-boot-completed permission required by the RebootReceiver so the
-         FGS can be restarted after a device reboot when background sharing is
-         enabled. LIVE since M7-E: the receiver below is enabled="true" and
-         autoRunOnBoot:true is set in ForegroundTaskOptions inside
-         BackgroundLocationManager.init(). -->
+    <!-- For BootResumeReceiver below, which resumes background sharing after
+         a reboot or an app update (or posts the resume notice when it may
+         not); BOOT_COMPLETED needs this permission, MY_PACKAGE_REPLACED does
+         not. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!-- Camera, for the QR scanner only (QrScanner.kt), asked for when the
@@ -125,22 +128,34 @@
                 android:name="androidx.emoji2.text.EmojiCompatInitializer"
                 tools:node="remove" />
         </provider>
-        <!-- RebootReceiver: ENABLED at M7-E (backgroundCatchupEnabled == true,
-             paired with autoRunOnBoot:true in ForegroundTaskOptions.init())
-             so the FGS restarts after a device reboot when background sharing
-             was enabled. Guard check 14c pins this state; the reboot re-arm
-             is runtime-proven by the e2e-background-catchup lane (Phase B).
-             History (M7-C fix, constraint 2b): tools:node="replace" was
-             removed from THIS receiver ONLY — that attribute was stripping
-             the plugin's BOOT_COMPLETED <intent-filter> from the merged
-             manifest, causing the receiver to never fire. Do not re-add it
-             here. -->
+        <!-- The plugin's RebootReceiver is REMOVED (owner-directed 2026-11-26,
+             OD-R2). It started the service on options the OLD build had
+             stored, so the first update shipping a fix could not take part,
+             and it could not see a location permission revoked while Haven
+             was not running. BootResumeReceiver decides at receive time from
+             Haven's own preferences, the plugin's status and the live grants
+             (BootResume.kt). Guard 14c pins both. -->
         <receiver
             android:name="com.pravera.flutter_foreground_task.service.RebootReceiver"
-            android:enabled="true" />
+            tools:node="remove" />
+        <!-- Not exported: only the system sends these two broadcasts. No
+             LOCKED_BOOT_COMPLETED (Haven is not direct-boot aware: its keys
+             and databases live in credential-encrypted storage) and no
+             QUICKBOOT_POWERON (unprotected, so any app could send it). -->
+        <receiver
+            android:name=".BootResumeReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
         <!-- RestartReceiver: keep tools:node="replace" to suppress the
-             plugin's auto-restart-on-ANR/kill behaviour — Haven manages the
-             FGS lifecycle explicitly. This receiver must remain disabled. -->
+             plugin's alarm-driven auto-restart after a task removal or an
+             unclean destroy — Haven manages the FGS lifecycle explicitly. This
+             receiver must remain disabled. (The service's START_STICKY return
+             is separate: a restart the system makes from it is gated in Dart,
+             `decideSystemResume`.) -->
         <receiver
             android:name="com.pravera.flutter_foreground_task.service.RestartReceiver"
             android:enabled="false"

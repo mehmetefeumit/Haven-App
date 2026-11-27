@@ -34,11 +34,11 @@ import 'package:haven/src/utils/member_display.dart';
 /// Riverpod providers are lazy, so gating the `ref.watch` call IS gating the
 /// network call; nothing inside this provider re-checks eligibility.
 ///
-/// Errors are swallowed (never propagated) — matches
-/// `memberProfileProvider`'s convention for the same reason: a row that
-/// cannot resolve a stranger's profile degrades to the npub-only fallback,
-/// never an error state, and never a raw FFI error string reaching a widget
-/// (Security Rule 8).
+/// Errors are swallowed (never propagated): a row that cannot resolve a
+/// stranger's profile degrades to the npub-only fallback, never an error
+/// state, and never a raw FFI error string reaching a widget (Security Rule
+/// 8). Unlike `memberProfileProvider`, there is no last-known value to keep:
+/// each typed npub is its own key.
 final AutoDisposeFutureProviderFamily<Profile?, String>
 strangerProfileResolveProvider = FutureProvider.autoDispose
     .family<Profile?, String>((ref, npub) async {

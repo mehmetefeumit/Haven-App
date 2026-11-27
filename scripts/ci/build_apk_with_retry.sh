@@ -125,9 +125,12 @@
 # `build-integration-apks.sh` builds up to seven APKs in ONE step, and a
 # per-invocation budget would let a throttled runner spend it seven times over.
 # The budget is therefore carried in a state file under `RUNNER_TEMP`, which is
-# per-JOB — and every lane has exactly ONE Gradle build step, so job-scoped and
-# step-scoped coincide here. That is what makes the worst case below a property
-# of the STEP that `check_e2e_step_timeout_ordering.sh` grades.
+# per-JOB — and every E2E lane has exactly ONE Gradle build step, so job-scoped
+# and step-scoped coincide there. That is what makes the worst case below a
+# property of the STEP that `check_e2e_step_timeout_ordering.sh` grades. The
+# one job with two (build-check.yml's arm64 leg: its build, then its unit tests
+# through --gradle-task) shares one budget across both, so neither step's worst
+# case can exceed it.
 #
 # EVERY attempt that fails retriably is charged to it, the FIRST one included,
 # and so is every pause. A failed attempt is time the step lost to a transient
@@ -217,9 +220,18 @@
 # offline pass after it was the first to need aapt2 and missed it. No NDK is
 # provisioned. Extra arguments go to Gradle.
 #
+# ## --gradle-task
+#
+# One Gradle task line run from haven/android through the same engine, offline
+# switch, provisioning and budget as the build, with `-Ptarget-platform` set as
+# `flutter build apk` sets it, so after a build of that platform Flutter's own
+# tasks stay up to date. build-check.yml runs the JVM unit tests this way; it
+# needs a gradlew, which a Flutter build of the tree generates.
+#
 # Usage:
 #   scripts/ci/build_apk_with_retry.sh <flutter-target-platform> [extra flutter args...]
 #   scripts/ci/build_apk_with_retry.sh --resolve-only [extra gradle args...]
+#   scripts/ci/build_apk_with_retry.sh --gradle-task <flutter-target-platform> <task> [extra gradle args...]
 #   scripts/ci/build_apk_with_retry.sh --provision-only   (CI: NDK and CMake)
 #   scripts/ci/build_apk_with_retry.sh --self-test
 #
@@ -232,7 +244,7 @@
 #                                  unset: online; anything else is refused
 #
 # Exit codes:
-#   0  the APK built (on some attempt)
+#   0  the APK built, or the --gradle-task task line passed (on some attempt)
 #   *  the build's own exit code, unchanged — a retry never rewrites it
 #   2  wrong arguments (HAVEN_GRADLE_OFFLINE included), the self-test failed,
 #      or (CI) the NDK cannot be provisioned for a reason that is this
@@ -818,7 +830,7 @@ provision_sdk() {
 # ---------------------------------------------------------------------------
 # Self-test: hermetic. A fake `flutter` on PATH, no network, no real waiting.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=36
+readonly SELF_TEST_FIXTURES=37
 
 # The verbatim Gradle output of CI run 35622556197 job 106414462454. Fixtures
 # assert against what the runner actually printed, not a paraphrase of it: a
@@ -1800,17 +1812,21 @@ java.io.IOException: No space left on device"
   for tf in build_apk_with_retry.sh gradle-resolve-all.init.gradle.kts maven-central-fallback.init.gradle.kts gradle-offline.init.gradle.kts; do
     cp "$(dirname "${BASH_SOURCE[0]}")/${tf}" "${tree}/scripts/ci/${tf}"
   done
-  _fake_gradlew() { # <mode: flaky|offlinemiss>
+  _fake_gradlew() { # <mode: flaky|offlinemiss|ok|testfail>
     rm -f "${tree}/haven/android/n" "${tree}/haven/android/argv.log"
     {
       printf '#!/usr/bin/env bash\n'
       printf 'printf "%%s|%%s\\n" "$PWD" "$*" >> "%s/argv.log"\n' "${tree}/haven/android"
       printf 'n=$(( $(cat "%s/n" 2>/dev/null || echo 0) + 1 )); echo "${n}" > "%s/n"\n' "${tree}/haven/android" "${tree}/haven/android"
+      printf '[[ -e "${GRADLE_USER_HOME}/init.d/haven-gradle-offline.init.gradle.kts" ]] && echo present >> "%s/offline.log" || echo absent >> "%s/offline.log"\n' "${tree}/haven/android" "${tree}/haven/android"
       case "$1" in
         flaky) printf 'if (( n == 1 )); then cat <<%s\n%s\n%s\nexit 1\nfi\necho "BUILD SUCCESSFUL"\n' "'GRADLE_EOF'" "${MEASURED_PLUGIN_MARKER_TEXT}" "GRADLE_EOF" ;;
         offlinemiss) printf 'cat <<%s\n%s\n%s\nexit 1\n' "'GRADLE_EOF'" "${MEASURED_PLUGIN_MARKER_TEXT}" "GRADLE_EOF" ;;
+        ok) printf 'echo "BUILD SUCCESSFUL"\n' ;;
+        testfail) printf 'echo "BootResumeTest > a_refused_resume_posts_the_notice FAILED"\necho "FAILURE: Build failed with an exception."\necho "There were failing tests."\nexit 1\n' ;;
       esac
     } > "${tree}/haven/android/gradlew"
+    rm -f "${tree}/haven/android/offline.log"
     chmod +x "${tree}/haven/android/gradlew"
   }
   _fake_gradlew flaky
@@ -1831,6 +1847,52 @@ java.io.IOException: No space left on device"
   if (( rc != 1 )) || [[ "$(cat "${tree}/haven/android/n")" != "1" ]] || [[ "${out}" != *"::error::Gradle built OFFLINE"* ]] \
      || [[ -e "${tmp}/q4-off-guh/init.d/haven-gradle-offline.init.gradle.kts" ]]; then
     _fail q4 "an offline --resolve-only that misses a marker must run once, say it is the set's gap and leave no offline init behind; got rc=${rc}, $(cat "${tree}/haven/android/n" 2>/dev/null) run(s): ${out}"
+  fi
+
+  # (q5) --gradle-task end to end (build-check.yml's JVM unit tests), in q4's
+  #      tree: on CI the NDK and CMake are provisioned and the Central fallback
+  #      installed first, then exactly `<task> <extra> -Ptarget-platform=<p>`
+  #      runs from haven/android, once;
+  #      offline the init script is there for the task and gone after it, and
+  #      a resolution failure is the set's gap, tried once; a failing test is
+  #      a genuine failure, tried once; a task line missing is refused.
+  ran=$(( ran + 1 ))
+  mkdir -p "${tree}/haven/android/app"
+  cp "$(dirname "${BASH_SOURCE[0]}")/../../haven/android/app/build.gradle.kts" "${tree}/haven/android/app/build.gradle.kts"
+  sdk="${tmp}/q5-sdk"; write_fake_sdkmanager "${sdk}" ok ok
+  _fake_gradlew ok
+  rc=0
+  out="$(GITHUB_ACTIONS=true FLUTTER_ROOT="${fr}" ANDROID_HOME="${sdk}" GRADLE_USER_HOME="${tmp}/q5-guh" \
+         HAVEN_BUILD_RETRY_STATE="${tmp}/q5.budget" HAVEN_GRADLE_OFFLINE= \
+         bash "${tree}/scripts/ci/build_apk_with_retry.sh" --gradle-task android-arm64 :app:testDebugUnitTest --info 2>&1)" || rc=$?
+  want_argv="${tree}/haven/android|:app:testDebugUnitTest --info -Ptarget-platform=android-arm64"
+  if (( rc != 0 )) || [[ "$(cat "${tree}/haven/android/n")" != "1" ]] \
+     || [[ "$(cat "${tree}/haven/android/argv.log")" != "${want_argv}" ]] || [[ "$(cat "${tree}/haven/android/offline.log")" != "absent" ]] \
+     || [[ "$(sdk_invocations "${sdk}")" != "1" || "$(sdk_invocations "${sdk}" cmake-invocations)" != "1" ]] \
+     || ! cmp -s "${tree}/scripts/ci/maven-central-fallback.init.gradle.kts" "${tmp}/q5-guh/init.d/haven-maven-central-fallback.init.gradle.kts"; then
+    _fail q5 "--gradle-task on CI must provision, install the Central fallback and run '${want_argv}' once, online; got rc=${rc}, argv '$(sort -u "${tree}/haven/android/argv.log" 2>/dev/null)', $(cat "${tree}/haven/android/n" 2>/dev/null) run(s), sdkmanager $(sdk_invocations "${sdk}")+$(sdk_invocations "${sdk}" cmake-invocations): ${out}"
+  fi
+  _fake_gradlew offlinemiss
+  rc=0
+  out="$(GITHUB_ACTIONS= GRADLE_USER_HOME="${tmp}/q5-off-guh" HAVEN_BUILD_RETRY_STATE="${tmp}/q5-off.budget" HAVEN_GRADLE_OFFLINE=1 \
+         bash "${tree}/scripts/ci/build_apk_with_retry.sh" --gradle-task android-arm64 :app:testDebugUnitTest 2>&1)" || rc=$?
+  if (( rc != 1 )) || [[ "$(cat "${tree}/haven/android/n")" != "1" ]] || [[ "$(cat "${tree}/haven/android/offline.log")" != "present" ]] \
+     || [[ "${out}" != *"::error::Gradle built OFFLINE"* ]] || [[ -e "${tmp}/q5-off-guh/init.d/haven-gradle-offline.init.gradle.kts" ]]; then
+    _fail q5 "an offline --gradle-task must run with the offline init script, try a gap once and remove the script; got rc=${rc}, $(cat "${tree}/haven/android/n" 2>/dev/null) run(s), offline '$(cat "${tree}/haven/android/offline.log" 2>/dev/null)': ${out}"
+  fi
+  _fake_gradlew testfail
+  rc=0
+  out="$(GITHUB_ACTIONS= GRADLE_USER_HOME="${tmp}/q5-t-guh" HAVEN_BUILD_RETRY_STATE="${tmp}/q5-t.budget" HAVEN_GRADLE_OFFLINE=1 \
+         bash "${tree}/scripts/ci/build_apk_with_retry.sh" --gradle-task android-arm64 :app:testDebugUnitTest 2>&1)" || rc=$?
+  if (( rc != 1 )) || [[ "$(cat "${tree}/haven/android/n")" != "1" ]] || [[ "${out}" == *"::error::"* || "${out}" != *"genuine build failure"* ]]; then
+    _fail q5 "a failing unit test must fail once with its own rc, judged genuine, with no infrastructure verdict; got rc=${rc}, $(cat "${tree}/haven/android/n" 2>/dev/null) run(s): ${out}"
+  fi
+  _fake_gradlew ok
+  rc=0
+  (GITHUB_ACTIONS= HAVEN_BUILD_RETRY_STATE="${tmp}/q5-u.budget" \
+     bash "${tree}/scripts/ci/build_apk_with_retry.sh" --gradle-task android-arm64 >/dev/null 2>&1) || rc=$?
+  if (( rc != RC_BROKEN )) || [[ -e "${tree}/haven/android/n" ]]; then
+    _fail q5 "--gradle-task without a task must be refused with rc ${RC_BROKEN} before Gradle; got rc=${rc}"
   fi
 
   # (h2) Past the ladder every pause is its last step, so a caller that asks
@@ -1861,7 +1923,7 @@ java.io.IOException: No space left on device"
     echo "${SCRIPT_NAME}: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${SELF_TEST_FIXTURES}; a fixture was added or removed without moving the pin" >&2
     return 1
   fi
-  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a transient 429 is ridden out on the second attempt after exactly one ladder pause, and so is the wrapper's 504 fetching the Gradle distribution, and the fake proves it refuses both a non-build argv and a build missing the flags this script adds; a compile error and a disk exhaustion each fail once with their own exit code, their original output and the right verdict; a persistent 429 stops at exactly ${MAX_ATTEMPTS} attempts with one ::error:: saying INFRASTRUCTURE and that no test ran, the Gradle error still shown; a budget spent by an earlier build in the step starts no further attempt, and a retried build charges the shared budget while a clean one charges nothing; an attempt long enough that repeating it would not fit the budget is never started, while a short one under the same injected clock still is; every retriable signature is load-bearing on its own, this repo's real wrapped 403 is retried while a bare status line decides nothing, a plugin marker Gradle reports missing is retried while a version-less plugin request is not, the wrapper's distribution download is retried on a 5xx but not on a 404, a checksum mismatch or another URL, and a capacity signature beats a resolution one; the annotation names a rate limit only where a 429 says so, names a failed distribution download with its status, names the missing-coordinate shape as the ambiguity it is without reprinting the coordinate, and otherwise admits the cause is not knowable; a spent budget left by another run is not read; the script itself issues the build argv the lanes depend on; on CI the NDK Flutter asks for is installed in one call when missing, left alone when present and complete and reinstalled when its package.xml is missing, a truncated install is graded failed despite its manifest, its download cache cleared and the charged retry installs it, another revision is replaced, a yes-machine sdkmanager fails closed at ${MAX_ATTEMPTS} calls with one INFRASTRUCTURE annotation, a hung one is killed at the attempt bound and not repeated past the budget, and every input this script owns fails as broken before any call; end to end the script installs the Maven Central fallback init script and provisions before it builds against the real app build file, stops before Gradle when the NDK cannot be had, and off CI never touches the SDK or GRADLE_USER_HOME; CMake, which an offline AGP cannot install, is provisioned too — installed when missing, left alone when present, refused when its cmake does not run, failing closed with one annotation naming it — and --provision-only provisions both on CI, builds nothing and touches nothing off CI, and build_release.sh turns its failure into its own rc 4; every sdkmanager call runs with ANDROID_USER_HOME=\$HOME/.android, so none creates the XDG folder AGP would keep its debug keystore in; offline, Gradle's offline wording is a gap and so is every Gradle resolution wording (a missing plugin marker says nothing about offline), while rustup's reset, cargo's curl timeout and curl's failed lookup stay retriable, capacity still wins and a compile error stays one, a gap is tried once and uncharged with one ::error:: naming the coordinate (or marker) as the deps job's and no URL, the offline init script is in init.d for exactly the build and gone after it on a red build as on a green one, absent without HAVEN_GRADLE_OFFLINE, and any value but 1 is refused before a build; --resolve-only runs havenResolveAll and the aapt2 witness from haven/android through the engine with the Central fallback installed, and offline tries a gap once; one backoff per pause, the ladder fits the budget, and more attempts than the ladder repeat its last pause)."
+  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a transient 429 is ridden out on the second attempt after exactly one ladder pause, and so is the wrapper's 504 fetching the Gradle distribution, and the fake proves it refuses both a non-build argv and a build missing the flags this script adds; a compile error and a disk exhaustion each fail once with their own exit code, their original output and the right verdict; a persistent 429 stops at exactly ${MAX_ATTEMPTS} attempts with one ::error:: saying INFRASTRUCTURE and that no test ran, the Gradle error still shown; a budget spent by an earlier build in the step starts no further attempt, and a retried build charges the shared budget while a clean one charges nothing; an attempt long enough that repeating it would not fit the budget is never started, while a short one under the same injected clock still is; every retriable signature is load-bearing on its own, this repo's real wrapped 403 is retried while a bare status line decides nothing, a plugin marker Gradle reports missing is retried while a version-less plugin request is not, the wrapper's distribution download is retried on a 5xx but not on a 404, a checksum mismatch or another URL, and a capacity signature beats a resolution one; the annotation names a rate limit only where a 429 says so, names a failed distribution download with its status, names the missing-coordinate shape as the ambiguity it is without reprinting the coordinate, and otherwise admits the cause is not knowable; a spent budget left by another run is not read; the script itself issues the build argv the lanes depend on; on CI the NDK Flutter asks for is installed in one call when missing, left alone when present and complete and reinstalled when its package.xml is missing, a truncated install is graded failed despite its manifest, its download cache cleared and the charged retry installs it, another revision is replaced, a yes-machine sdkmanager fails closed at ${MAX_ATTEMPTS} calls with one INFRASTRUCTURE annotation, a hung one is killed at the attempt bound and not repeated past the budget, and every input this script owns fails as broken before any call; end to end the script installs the Maven Central fallback init script and provisions before it builds against the real app build file, stops before Gradle when the NDK cannot be had, and off CI never touches the SDK or GRADLE_USER_HOME; CMake, which an offline AGP cannot install, is provisioned too — installed when missing, left alone when present, refused when its cmake does not run, failing closed with one annotation naming it — and --provision-only provisions both on CI, builds nothing and touches nothing off CI, and build_release.sh turns its failure into its own rc 4; every sdkmanager call runs with ANDROID_USER_HOME=\$HOME/.android, so none creates the XDG folder AGP would keep its debug keystore in; offline, Gradle's offline wording is a gap and so is every Gradle resolution wording (a missing plugin marker says nothing about offline), while rustup's reset, cargo's curl timeout and curl's failed lookup stay retriable, capacity still wins and a compile error stays one, a gap is tried once and uncharged with one ::error:: naming the coordinate (or marker) as the deps job's and no URL, the offline init script is in init.d for exactly the build and gone after it on a red build as on a green one, absent without HAVEN_GRADLE_OFFLINE, and any value but 1 is refused before a build; --resolve-only runs havenResolveAll and the aapt2 witness from haven/android through the engine with the Central fallback installed, and offline tries a gap once; --gradle-task provisions on CI and runs exactly its task line with -Ptarget-platform from haven/android through the engine, online without the offline init script, offline with the init script for exactly the task, a gap and a failing test each tried once, and a missing task line refused; one backoff per pause, the ladder fits the budget, and more attempts than the ladder repeat its last pause)."
   return 0
 }
 
@@ -1873,6 +1935,7 @@ fi
 if [[ $# -lt 1 ]]; then
   err "usage: ${SCRIPT_NAME} <flutter-target-platform> [extra flutter args...]"
   err "       ${SCRIPT_NAME} --resolve-only [extra gradle args...]"
+  err "       ${SCRIPT_NAME} --gradle-task <flutter-target-platform> <task> [extra gradle args...]"
   err "       ${SCRIPT_NAME} --provision-only"
   err "       ${SCRIPT_NAME} --self-test"
   exit "${RC_BROKEN}"
@@ -1908,6 +1971,16 @@ if [[ "$1" == "--resolve-only" ]]; then
   exit "${resolve_rc}"
 fi
 
+gradle_task=0
+if [[ "$1" == "--gradle-task" ]]; then
+  if [[ $# -lt 3 ]]; then
+    err "usage: ${SCRIPT_NAME} --gradle-task <flutter-target-platform> <task> [extra gradle args...]"
+    exit "${RC_BROKEN}"
+  fi
+  gradle_task=1
+  shift
+fi
+
 readonly TARGET_PLATFORM="$1"
 shift
 
@@ -1921,5 +1994,10 @@ if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
 fi
 
 build_rc=0
-build_with_retry flutter build apk --debug --target-platform "${TARGET_PLATFORM}" "$@" || build_rc=$?
+if (( gradle_task )); then
+  cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../haven/android" && pwd)"
+  build_with_retry ./gradlew "$@" "-Ptarget-platform=${TARGET_PLATFORM}" || build_rc=$?
+else
+  build_with_retry flutter build apk --debug --target-platform "${TARGET_PLATFORM}" "$@" || build_rc=$?
+fi
 exit "${build_rc}"

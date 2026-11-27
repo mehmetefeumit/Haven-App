@@ -10,8 +10,9 @@
 #            are captured as evidence (see the script header for why the cold
 #            worker cannot reach the plaintext CI relay).
 #   Phase B  the job survives a restart (WorkManager RescheduleReceiver +
-#            Room DB) and the RebootReceiver is runtime-resolvable for
-#            BOOT_COMPLETED, then a post-boot cold wake completes.
+#            Room DB) and BootResumeReceiver is runtime-resolvable for
+#            BOOT_COMPLETED and MY_PACKAGE_REPLACED (the plugin RebootReceiver
+#            absent), then a post-boot cold wake completes.
 #   Phase C1 the pending-wipe gate declines the wake with ZERO relay
 #            activity (strfry silence).
 #   Phase C2 the consent gate declines an OS-queued "leaked" wake after opt-out,
