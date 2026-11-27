@@ -25,6 +25,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/map_shell.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/identity_service.dart';
@@ -168,6 +169,19 @@ Widget _buildHeader(
     ),
   );
 }
+
+/// Holds the own profile as a surface outside the header does (a member
+/// avatar on the map), so a write is seen only if something invalidates it.
+ProviderSubscription<AsyncValue<Profile?>> _holdOwnProfile(
+  WidgetTester tester,
+) => ProviderScope.containerOf(
+  tester.element(find.byType(Scaffold)),
+).listen(ownProfileProvider, (_, _) {});
+
+/// The own profile those surfaces show.
+Future<Profile?> _ownProfile(WidgetTester tester) => ProviderScope.containerOf(
+  tester.element(find.byType(Scaffold)),
+).read(ownProfileProvider.future);
 
 /// Pumps [_buildHeader] and settles it, so callers can assert on
 /// `profileService.methodCalls`.
@@ -374,6 +388,8 @@ void main() {
       addTearDown(shown.dispose);
       await tester.pumpWidget(_buildHeader(svc, shown: shown));
       await tester.pumpAndSettle();
+      final held = _holdOwnProfile(tester);
+      addTearDown(held.close);
 
       await _tapEditPhoto(tester);
       expect(
@@ -393,6 +409,12 @@ void main() {
         1,
         reason: 'the local write succeeded, so the publish must not wait '
             'for the next resume',
+      );
+      expect(
+        (await _ownProfile(tester))?.pictureBytes,
+        isNotNull,
+        reason: 'the new photo shows everywhere, not only once the page is '
+            'back',
       );
     });
 
@@ -567,6 +589,8 @@ void main() {
         addTearDown(shown.dispose);
         await tester.pumpWidget(_buildHeader(svc, shown: shown));
         await tester.pumpAndSettle();
+        final held = _holdOwnProfile(tester);
+        addTearDown(held.close);
 
         await confirmRemove(tester);
         expect(
@@ -582,6 +606,12 @@ void main() {
         await tester.pump();
 
         expect(svc.syncOwnProfileCalls, 1);
+        expect(
+          (await _ownProfile(tester))?.pictureBytes,
+          isNull,
+          reason: 'the removed photo is gone everywhere, not only once the '
+              'page is back',
+        );
       },
     );
 

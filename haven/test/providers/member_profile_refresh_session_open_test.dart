@@ -61,12 +61,18 @@ class _ProfileManager extends FakeCircleManager {
 
   final List<({List<String> pubkeys, int maxAgeSecs})> fetches = [];
 
+  /// The own name the relays serve, and the one a fetch has cached in the
+  /// own profile row.
+  String? servedOwnName;
+  String? cachedOwnName;
+
   @override
   Future<List<ProfileMetadataFfi>> fetchMemberProfiles({
     required List<String> pubkeysHex,
     required int maxAgeSecs,
   }) async {
     fetches.add((pubkeys: List.of(pubkeysHex), maxAgeSecs: maxAgeSecs));
+    cachedOwnName = servedOwnName;
     return const [];
   }
 }
@@ -101,7 +107,9 @@ void main() {
       ..guardHeld = false
       ..refusals = 0
       ..manager.circles = [circle]
-      ..manager.fetches.clear();
+      ..manager.fetches.clear()
+      ..manager.servedOwnName = null
+      ..manager.cachedOwnName = null;
     // Profile fetches are foreground-only; most cases run in front.
     WidgetsBinding.instance.handleAppLifecycleStateChanged(
       AppLifecycleState.resumed,
@@ -122,6 +130,10 @@ void main() {
   ProviderContainer containerOver(NostrCircleService service) {
     final container = ProviderContainer(
       overrides: [
+        // The own profile row's name, as the real provider reads it.
+        displayNameProvider.overrideWith(
+          (ref) async => bridge.manager.cachedOwnName,
+        ),
         circleServiceProvider.overrideWithValue(service),
         profileServiceProvider.overrideWithValue(
           NostrProfileService(
@@ -174,6 +186,30 @@ void main() {
           'member is left out of the union',
     );
     expect(fetch.maxAgeSecs, profileForegroundMaxAge.inSeconds);
+  });
+
+  test('the own name the re-run caches is the name shown', () async {
+    bridge.guardHeld = true;
+    final service = circleService();
+    final container = containerOver(service);
+    final shown = container.listen(displayNameProvider, (_, _) {});
+    expect(await container.read(displayNameProvider.future), isNull);
+
+    await refresh(container, profileForegroundMaxAge);
+    // A rename made on another device, served once the session opens.
+    bridge.manager.servedOwnName = 'Renamed';
+    bridge.guardHeld = false;
+    await service.initialize();
+    await pumpEventQueue();
+
+    expect(bridge.manager.fetches, hasLength(1), reason: 'anti-vacuity');
+    expect(
+      shown.read().value,
+      'Renamed',
+      reason:
+          'the own profile row is the name on every surface, so the re-run '
+          'must invalidate the shown name as every other refresh does',
+    );
   });
 
   test('a fetch refused over circles already read runs once the session '

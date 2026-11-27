@@ -1798,9 +1798,6 @@ class AppLocalizationsEs extends AppLocalizations {
       'Tu nombre visible y tu foto son visibles para cualquiera en la red Nostr, no solo para los miembros de tus círculos. Comparte solo lo que no te importe hacer público.';
 
   @override
-  String get identityRefreshProfileTooltip => 'Actualizar perfil público';
-
-  @override
   String get identityAdvancedExportError =>
       'No se pudo exportar la clave secreta. Inténtalo de nuevo.';
 
@@ -1961,6 +1958,23 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get memberNicknameSheetClearedAnnouncement => 'Apodo borrado';
+
+  @override
+  String get memberNicknameSheetSavedLabel => 'Apodo guardado';
+
+  @override
+  String get memberNicknameSheetNoneLabel => 'Sin apodo';
+
+  @override
+  String get memberNicknameSheetSavingLabel => 'Guardando apodo';
+
+  @override
+  String get memberNicknameSheetRetryLabel =>
+      'No se guardó el apodo. Reintentar';
+
+  @override
+  String get memberNicknameSheetSaveFailedAnnouncement =>
+      'No se guardó el apodo, inténtalo de nuevo';
 
   @override
   String get npubQrScanLabel => 'Escanéame para añadirme';

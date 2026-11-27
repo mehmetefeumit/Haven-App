@@ -1746,9 +1746,6 @@ class AppLocalizationsUr extends AppLocalizations {
       'آپ کا ظاہری نام اور تصویر Nostr نیٹ ورک پر کسی کو بھی نظر آتے ہیں، صرف آپ کے حلقوں کے ارکان کو نہیں۔ صرف وہی شیئر کریں جسے عوامی کرنے میں آپ راحت محسوس کریں۔';
 
   @override
-  String get identityRefreshProfileTooltip => 'عوامی پروفائل تازہ کریں';
-
-  @override
   String get identityAdvancedExportError =>
       'خفیہ کلید برآمد کرنے میں ناکامی۔ براہِ کرم دوبارہ کوشش کریں۔';
 
@@ -1909,6 +1906,23 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get memberNicknameSheetClearedAnnouncement => 'عرفی نام صاف ہو گیا';
+
+  @override
+  String get memberNicknameSheetSavedLabel => 'عرفی نام محفوظ ہو گیا';
+
+  @override
+  String get memberNicknameSheetNoneLabel => 'کوئی عرفی نام مقرر نہیں';
+
+  @override
+  String get memberNicknameSheetSavingLabel => 'عرفی نام محفوظ ہو رہا ہے';
+
+  @override
+  String get memberNicknameSheetRetryLabel =>
+      'عرفی نام محفوظ نہیں ہوا۔ دوبارہ کوشش کریں';
+
+  @override
+  String get memberNicknameSheetSaveFailedAnnouncement =>
+      'عرفی نام محفوظ نہیں ہوا، دوبارہ کوشش کریں';
 
   @override
   String get npubQrScanLabel => 'مجھے شامل کرنے کے لیے اسکین کریں';

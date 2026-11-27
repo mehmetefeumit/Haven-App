@@ -1742,9 +1742,6 @@ class AppLocalizationsFa extends AppLocalizations {
       'نام نمایشی و عکس تو برای هر کسی روی شبکهٔ Nostr دیده می‌شوند، نه فقط اعضای حلقه‌هایت. فقط چیزهایی را به اشتراک بگذار که با عمومی‌شدنشان راحت هستی.';
 
   @override
-  String get identityRefreshProfileTooltip => 'تازه‌سازی نمایهٔ عمومی';
-
-  @override
   String get identityAdvancedExportError =>
       'استخراج کلید خصوصی ناموفق بود. لطفاً دوباره تلاش کن.';
 
@@ -1903,6 +1900,23 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get memberNicknameSheetClearedAnnouncement => 'نام مستعار پاک شد';
+
+  @override
+  String get memberNicknameSheetSavedLabel => 'نام مستعار ذخیره شد';
+
+  @override
+  String get memberNicknameSheetNoneLabel => 'نام مستعاری تنظیم نشده';
+
+  @override
+  String get memberNicknameSheetSavingLabel => 'در حال ذخیرهٔ نام مستعار';
+
+  @override
+  String get memberNicknameSheetRetryLabel =>
+      'نام مستعار ذخیره نشد. تلاش دوباره';
+
+  @override
+  String get memberNicknameSheetSaveFailedAnnouncement =>
+      'نام مستعار ذخیره نشد، دوباره تلاش کن';
 
   @override
   String get npubQrScanLabel => 'برای افزودن من اسکن کن';

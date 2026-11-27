@@ -27,6 +27,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/member_profile_provider.dart';
+import 'package:haven/src/providers/member_profile_refresh_provider.dart';
 import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
@@ -41,6 +42,7 @@ import 'package:haven/src/widgets/map/member_marker.dart'
     show kMemberAgePillThreshold;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../mocks/local_name_identity_service.dart';
 import '../../mocks/mock_profile_service.dart';
 
 /// Fixed "now" for the last-seen tests, so an age assertion is arithmetic
@@ -641,6 +643,61 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Bob'), findsOneWidget);
+      expect(find.text('Alice'), findsNothing);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // The self name is the own profile row (`displayNameProvider`, not
+  // overridden here): a local name it supersedes never shows, and a rename
+  // the profile refresh writes to the row reaches the tile.
+  // ---------------------------------------------------------------------------
+
+  group('CircleMemberTile — the self name is the own profile row', () {
+    testWidgets("the row's name shows over a stale local name, and a rename "
+        'from another device replaces it', (tester) async {
+      final profiles = MockProfileService(
+        ownProfile: const Profile(pubkeyHex: selfPubkey, displayName: 'Bob'),
+      );
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(
+            LocalNameIdentityService(
+              identity: buildIdentity(),
+              localName: 'Alice',
+            ),
+          ),
+          profileServiceProvider.overrideWithValue(profiles),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(body: CircleMemberTile(member: buildMember())),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Bob'), findsOneWidget);
+      expect(find.text('Alice'), findsNothing);
+
+      // Rust takes the newer kind-0 into the row during the profile refresh.
+      profiles.ownProfile = const Profile(
+        pubkeyHex: selfPubkey,
+        displayName: 'Carol',
+      );
+      container.read(memberProfileRefreshProvider.notifier).refreshRoster([
+        selfPubkey,
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Carol'), findsOneWidget);
+      expect(find.text('Bob'), findsNothing);
       expect(find.text('Alice'), findsNothing);
     });
   });

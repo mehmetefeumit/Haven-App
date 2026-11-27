@@ -138,6 +138,7 @@ Future<void> pickAndSetOwnAvatar(BuildContext context, WidgetRef ref) async {
   final syncController = ref.read(ownProfileSyncProvider.notifier);
   final profileService = ref.read(profileServiceProvider);
   final excursions = ref.read(systemActivityExcursionsProvider);
+  final container = ProviderScope.containerOf(context, listen: false);
 
   await excursions.run(() async {
     final raw = await pickAndCropAvatar(context);
@@ -145,12 +146,12 @@ Future<void> pickAndSetOwnAvatar(BuildContext context, WidgetRef ref) async {
 
     try {
       await excursions.save(() => profileService.setOwnAvatar(raw));
-      // The local write is done: publish even if the page is gone, since
-      // `ref` is unusable then and the next resume would otherwise be the
-      // first try.
+      // The local write is done: publish, and show the photo everywhere,
+      // even if the page is gone, since `ref` is unusable then and the next
+      // resume would otherwise be the first try.
       unawaited(syncController.sync());
+      container.invalidate(ownProfileProvider);
       if (!context.mounted) return;
-      ref.invalidate(ownProfileProvider);
       unawaited(
         SemanticsService.sendAnnouncement(
           view,
@@ -227,12 +228,14 @@ Future<void> removeOwnAvatar(BuildContext context, WidgetRef ref) async {
   final view = View.of(context);
   final textDirection = Directionality.of(context);
   final syncController = ref.read(ownProfileSyncProvider.notifier);
+  final container = ProviderScope.containerOf(context, listen: false);
   try {
     await ref.read(profileServiceProvider).removeOwnAvatar();
-    // Same as [pickAndSetOwnAvatar]: the publish must not wait on the widget.
+    // Same as [pickAndSetOwnAvatar]: neither the publish nor the refreshed
+    // photo waits on the widget.
     unawaited(syncController.sync());
+    container.invalidate(ownProfileProvider);
     if (!context.mounted) return;
-    ref.invalidate(ownProfileProvider);
     unawaited(
       SemanticsService.sendAnnouncement(
         view,
@@ -241,8 +244,8 @@ Future<void> removeOwnAvatar(BuildContext context, WidgetRef ref) async {
       ),
     );
   } on Object {
+    container.invalidate(ownProfileProvider);
     if (!context.mounted) return;
-    ref.invalidate(ownProfileProvider);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(l10n.avatarPickerRemoveError)),
     );

@@ -28,6 +28,7 @@ import 'package:haven/src/widgets/identity/avatar_fullscreen_viewer.dart';
 import 'package:haven/src/widgets/identity/identity_photo_header.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../mocks/local_name_identity_service.dart';
 import '../../mocks/mock_profile_service.dart';
 
 final _fakeIdentity = Identity(
@@ -130,6 +131,39 @@ void main() {
 
       // Fallback initial from the display name.
       expect(find.text('A'), findsOneWidget);
+    });
+
+    testWidgets("the initials are the own profile row's name, not a stale "
+        'local one', (tester) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            identityServiceProvider.overrideWithValue(
+              LocalNameIdentityService(
+                identity: _fakeIdentity,
+                localName: 'Alice',
+              ),
+            ),
+            profileServiceProvider.overrideWithValue(
+              MockProfileService(
+                ownProfile: Profile(
+                  pubkeyHex: _fakeIdentity.pubkeyHex,
+                  displayName: 'Bob',
+                ),
+              ),
+            ),
+          ],
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(body: IdentityPhotoHeader()),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('B'), findsOneWidget);
+      expect(find.text('A'), findsNothing);
     });
 
     testWidgets('"Remove" is hidden when no avatar is set', (tester) async {

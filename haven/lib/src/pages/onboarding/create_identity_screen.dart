@@ -15,6 +15,7 @@ import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/location_disclosure_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
+import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/own_reachability_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
@@ -157,7 +158,7 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
   }
 
   Future<void> _restoreExistingName() async {
-    final existing = await ref.read(identityServiceProvider).getDisplayName();
+    final existing = await ref.read(displayNameProvider.future);
     if (!mounted || _userEdited) return;
     if (existing != null && existing.trim().isNotEmpty) {
       _controller.text = existing.trim();
@@ -255,39 +256,20 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
       final name = await _resolveName();
       if (!mounted) return;
 
-      // (4)(5) Persist locally, then trigger the public kind-0 publish.
-      // Publishing is unconditional (public-by-default, owner-directed). The
-      // kind-0 publish itself is fire-and-forget (`triggerProfileSync`): an
-      // invitation does not need it.
+      // (4)(5) Save the public kind-0 profile locally, then trigger its
+      // publish. Publishing is unconditional (public-by-default,
+      // owner-directed); the publish itself is fire-and-forget
+      // (`triggerProfileSync`): an invitation does not need it.
+      //
+      // The name goes into the own profile row, in one SQLCipher transaction
+      // that also queues its publish: that is the save, and the name every
+      // surface shows. A save that fails keeps the user here to try again —
+      // a name only this device held would never reach a relay.
+      final profileService = ref.read(profileServiceProvider);
       try {
-        await ref.read(identityServiceProvider).setDisplayName(name);
-        if (!mounted) return;
-        ref.invalidate(displayNameProvider);
-        // Save the public kind-0 profile LOCALLY: the display name always,
-        // and the optional photo only if one was picked, in series (name ->
-        // photo) so (a) the two edits can't land out of order in the local
-        // merge and (b) the photo is gated on the name save SUCCEEDING — a
-        // picture-only kind-0 must never publish without the intended name.
-        // Both are fast, local-only SQLCipher writes (no relay/Blossom I/O),
-        // so they are awaited directly; a genuine local failure never blocks
-        // onboarding completion, but a picked photo it lost is reported.
-        final photo = _pickedPhoto;
-        final photoSaved = await _saveOnboardingProfileLocally(
-          ref.read(profileServiceProvider),
-          name,
-          photo,
-        );
-        if (!mounted) return;
-        if (!photoSaved) {
-          messenger.showSnackBar(
-            SnackBar(
-              content: Text(l10n.onboardingPhotoNotSaved),
-              backgroundColor: HavenSecurityColors.danger,
-            ),
-          );
-        }
-        triggerProfileSync(ref);
-      } on IdentityServiceException {
+        await profileService.updateOwnProfile(displayName: name);
+      } on Object catch (e) {
+        debugPrint('[Onboarding] profile name save failed: ${e.runtimeType}');
         if (!mounted) return;
         setState(() => _busy = false);
         messenger.showSnackBar(
@@ -298,6 +280,26 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
         );
         return;
       }
+      if (!mounted) return;
+      ref
+        ..invalidate(ownProfileProvider)
+        ..invalidate(displayNameProvider);
+      // After the name, so a picture-only kind-0 never publishes without
+      // it; a photo it loses never blocks onboarding, but is reported.
+      final photoSaved = await _saveOnboardingPhoto(
+        profileService,
+        _pickedPhoto,
+      );
+      if (!mounted) return;
+      if (!photoSaved) {
+        messenger.showSnackBar(
+          SnackBar(
+            content: Text(l10n.onboardingPhotoNotSaved),
+            backgroundColor: HavenSecurityColors.danger,
+          ),
+        );
+      }
+      triggerProfileSync(ref);
       _profileSaved = true;
     }
 
@@ -387,7 +389,7 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
   Future<String> _resolveName() async {
     final typed = _controller.text.trim();
     if (typed.isNotEmpty) return typed;
-    final existing = await ref.read(identityServiceProvider).getDisplayName();
+    final existing = await ref.read(displayNameProvider.future);
     final trimmed = existing?.trim() ?? '';
     return trimmed.isNotEmpty ? trimmed : generateAnonymousName();
   }
@@ -590,34 +592,15 @@ class _BusyLabel extends StatelessWidget {
   }
 }
 
-/// Saves the onboarding public kind-0 profile LOCALLY — display name then,
-/// if one was picked, the photo — gated so the photo save only runs if the
-/// name save SUCCEEDED.
+/// Saves the picked onboarding photo LOCALLY (`ProfileService.setOwnAvatar`
+/// touches no relay or Blossom; [triggerProfileSync] publishes it). Errors are
+/// logged by runtime type only, never surfaced raw (Security Rule 8).
 ///
-/// Both are now fast, local-only writes (`ProfileService.updateOwnProfile` /
-/// `ProfileService.setOwnAvatar` no longer touch a relay or Blossom), so this
-/// takes plain values (no `ref`/`context`) purely to stay testable in
-/// isolation — unlike before this migration, it no longer needs to survive a
-/// possibly-disposed widget, since [triggerProfileSync] (called by the
-/// caller once this returns) is what runs in the background. On any local
-/// failure the name is still saved by the caller
-/// ([IdentityService.setDisplayName]) and republishes on the next profile
-/// edit. Errors are logged by runtime type only, never surfaced raw
-/// (Security Rule 8).
-///
-/// Answers whether the picked photo was saved: `true` when none was picked,
-/// `false` when one was and either save failed — the name's gates it.
-Future<bool> _saveOnboardingProfileLocally(
+/// Answers whether the photo was saved: `true` when none was picked.
+Future<bool> _saveOnboardingPhoto(
   ProfileService service,
-  String name,
   Uint8List? photo,
 ) async {
-  try {
-    await service.updateOwnProfile(displayName: name);
-  } on Object catch (e) {
-    debugPrint('[Onboarding] profile name save failed: ${e.runtimeType}');
-    return photo == null;
-  }
   if (photo == null) return true;
   try {
     await service.setOwnAvatar(photo);

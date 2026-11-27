@@ -20,11 +20,12 @@
 /// **Freshness model.** Haven holds no standing kind-0 subscription
 /// (migration plan §1.6/D3), so profile updates arrive only when something
 /// pulls them. Several layers do: every transition to the foreground (each
-/// cold start and each resume, at a 1-min tolerance), circle select, roster
-/// change, a foreground anti-entropy timer, and an explicit refresh. Each
-/// states its own staleness tolerance via `maxAge`
-/// (`constants/profile_refresh_tiers.dart`), so a trigger firing moments
-/// after another is a cheap no-op rather than a duplicate relay round trip.
+/// cold start and each resume, at a 1-min tolerance), circle select, opening
+/// the Identity page, roster change, a foreground anti-entropy timer, and the
+/// Circles page's explicit refresh. Each states its own staleness tolerance
+/// via `maxAge` (`constants/profile_refresh_tiers.dart`), so a trigger firing
+/// moments after another is a cheap no-op rather than a duplicate relay round
+/// trip.
 /// A refresh that met a circle session it could not open — on Android, one
 /// the foreground service still held at a resume — runs once more when the
 /// session next opens, if the app is then in front, at no stricter than the
@@ -140,10 +141,10 @@ class MemberProfileRefreshNotifier extends Notifier<void> {
   }
 
   /// Batch-refreshes [pubkeyHexes] in a single relay fetch, then invalidates
-  /// the [memberProfileProvider] family, [ownProfileProvider] and
-  /// [memberDirectoryProvider] so names show without waiting for the picture
-  /// batch that follows, after which the profile providers are invalidated
-  /// again.
+  /// the [memberProfileProvider] family, [ownProfileProvider],
+  /// [displayNameProvider] and [memberDirectoryProvider] so names show
+  /// without waiting for the picture batch that follows, after which the
+  /// profile providers are invalidated again.
   ///
   /// Fire-and-forget: returns immediately: the caller (e.g. a circle-select
   /// handler) must not block the UI on a relay round trip. Best-effort —
@@ -275,7 +276,8 @@ class MemberProfileRefreshNotifier extends Notifier<void> {
   void _invalidateProfiles() {
     ref
       ..invalidate(memberProfileProvider)
-      ..invalidate(ownProfileProvider);
+      ..invalidate(ownProfileProvider)
+      ..invalidate(displayNameProvider);
   }
 
   /// Reads the current circle list, tolerating a not-yet-loaded/failed

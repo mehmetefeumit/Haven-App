@@ -68,6 +68,17 @@ class MockProfileService implements ProfileService {
   /// Set to make [getOwnProfile] throw.
   bool shouldThrowOnGetOwnProfile = false;
 
+  /// Set to make [getOwnProfileText] throw.
+  bool shouldThrowOnGetOwnProfileText = false;
+
+  /// Full-resolution pictures keyed by pubkeyHex, backing [getMemberPicture];
+  /// [memberProfiles] carries the thumbnails. Settable directly by tests.
+  final Map<String, Uint8List> memberPictures = {};
+
+  /// When set, [getMemberPicture] blocks on this until it completes — same
+  /// shape as [refreshGate].
+  Completer<void>? memberPictureGate;
+
   /// Set to make [updateOwnProfile] throw.
   bool shouldThrowOnUpdateOwnProfile = false;
 
@@ -201,6 +212,14 @@ class MockProfileService implements ProfileService {
   }
 
   @override
+  Future<Profile?> getOwnProfileText() async {
+    methodCalls.add((method: 'getOwnProfileText', args: const {}));
+    if (shouldThrowOnGetOwnProfileText) throw _genericError;
+    final profile = ownProfile;
+    return profile == null ? null : _withoutPictureBytes(profile);
+  }
+
+  @override
   Future<PublishedOwnProfile> fetchOwnPublishedProfile() async {
     methodCalls.add((method: 'fetchOwnPublishedProfile', args: const {}));
     return const PublishedOwnProfile.unanswered();
@@ -322,6 +341,17 @@ class MockProfileService implements ProfileService {
       pictureHash: profile.pictureHash,
       knownAt: profile.knownAt,
     );
+  }
+
+  @override
+  Future<Uint8List?> getMemberPicture(String pubkeyHex) async {
+    methodCalls.add((
+      method: 'getMemberPicture',
+      args: {'pubkeyHex': pubkeyHex},
+    ));
+    final gate = memberPictureGate;
+    if (gate != null && !gate.isCompleted) await gate.future;
+    return memberPictures[pubkeyHex];
   }
 
   @override

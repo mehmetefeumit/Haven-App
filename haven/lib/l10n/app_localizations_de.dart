@@ -1768,10 +1768,6 @@ class AppLocalizationsDe extends AppLocalizations {
       'Dein Anzeigename und dein Foto sind für jeden im Nostr-Netzwerk sichtbar, nicht nur für Mitglieder deiner Kreise. Mach nur das öffentlich, womit du dich wohlfühlst.';
 
   @override
-  String get identityRefreshProfileTooltip =>
-      'Öffentliches Profil aktualisieren';
-
-  @override
   String get identityAdvancedExportError =>
       'Der geheime Schlüssel konnte nicht exportiert werden. Bitte versuche es erneut.';
 
@@ -1939,6 +1935,23 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get memberNicknameSheetClearedAnnouncement => 'Spitzname entfernt';
+
+  @override
+  String get memberNicknameSheetSavedLabel => 'Spitzname gespeichert';
+
+  @override
+  String get memberNicknameSheetNoneLabel => 'Kein Spitzname festgelegt';
+
+  @override
+  String get memberNicknameSheetSavingLabel => 'Spitzname wird gespeichert';
+
+  @override
+  String get memberNicknameSheetRetryLabel =>
+      'Spitzname nicht gespeichert. Wiederholen';
+
+  @override
+  String get memberNicknameSheetSaveFailedAnnouncement =>
+      'Spitzname nicht gespeichert, versuche es erneut';
 
   @override
   String get npubQrScanLabel => 'Scannen, um mich hinzuzufügen';

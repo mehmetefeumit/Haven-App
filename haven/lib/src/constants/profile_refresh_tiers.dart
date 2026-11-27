@@ -30,9 +30,9 @@ library;
 /// app picks up a rename or a new photo.
 const Duration profileForegroundMaxAge = Duration(minutes: 1);
 
-/// Tolerance for a user-visible, intent-driven refresh: circle select, an
-/// invitation accepted, a circle created or members invited, and roster
-/// changes.
+/// Tolerance for a user-visible, intent-driven refresh: circle select, opening
+/// the Identity page, an invitation accepted, a circle created or members
+/// invited, and roster changes.
 ///
 /// Short enough that switching circles picks up a rename, long enough that
 /// circle-flipping collapses into a single fetch.

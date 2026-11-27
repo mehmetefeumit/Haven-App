@@ -339,10 +339,6 @@ abstract final class WidgetKeys {
   /// (save / spinner / check / retry) without coupling to a text label.
   static const Key displayNameSaveButton = Key('display_name_save_button');
 
-  /// Refresh [IconButton] on the Identity page (forces a network re-fetch of
-  /// the user's own public profile).
-  static const Key identityRefreshButton = Key('identity_refresh_button');
-
   // ---------------------------------------------------------------------------
   // Member detail sheet
   // ---------------------------------------------------------------------------
@@ -350,11 +346,17 @@ abstract final class WidgetKeys {
   /// Nickname [TextField] in the member detail bottom sheet.
   static const Key memberNicknameField = Key('member_nickname_field');
 
-  /// "Save Nickname" button in the member detail bottom sheet.
+  /// The circular save button beside the nickname field in the member detail
+  /// bottom sheet (state-dependent icon, like [displayNameSaveButton]).
   static const Key memberNicknameSave = Key('member_nickname_save');
 
-  /// "Clear Nickname" button in the member detail bottom sheet.
+  /// The clear icon inside the nickname field in the member detail bottom
+  /// sheet, shown while the field has text.
   static const Key memberNicknameClear = Key('member_nickname_clear');
+
+  /// The member's photo in the member detail bottom sheet, tappable to view it
+  /// full screen when the member has one.
+  static const Key memberDetailPhoto = Key('member_detail_photo');
 
   /// "Copy Public Key" action in the member detail bottom sheet.
   static const Key memberDetailCopyPublicKey = Key(

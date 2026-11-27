@@ -1833,9 +1833,6 @@ class AppLocalizationsAr extends AppLocalizations {
       'اسمك المعروض وصورتك مرئيان لأي شخص على شبكة Nostr، لا لأعضاء دوائرك فقط. شارِك فقط ما ترتاح لجعله عامًا.';
 
   @override
-  String get identityRefreshProfileTooltip => 'تحديث الملف الشخصي العام';
-
-  @override
   String get identityAdvancedExportError =>
       'تعذّر تصدير المفتاح السري. يُرجى إعادة المحاولة.';
 
@@ -1993,6 +1990,23 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get memberNicknameSheetClearedAnnouncement => 'تم مسح الاسم المستعار';
+
+  @override
+  String get memberNicknameSheetSavedLabel => 'تم حفظ الاسم المستعار';
+
+  @override
+  String get memberNicknameSheetNoneLabel => 'لا يوجد اسم مستعار';
+
+  @override
+  String get memberNicknameSheetSavingLabel => 'جارٍ حفظ الاسم المستعار';
+
+  @override
+  String get memberNicknameSheetRetryLabel =>
+      'لم يُحفظ الاسم المستعار. أعد المحاولة';
+
+  @override
+  String get memberNicknameSheetSaveFailedAnnouncement =>
+      'لم يُحفظ الاسم المستعار، أعد المحاولة';
 
   @override
   String get npubQrScanLabel => 'امسح لإضافتي';

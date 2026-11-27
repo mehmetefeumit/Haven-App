@@ -1753,10 +1753,6 @@ class AppLocalizationsNe extends AppLocalizations {
       'तपाईंको प्रदर्शन नाम र फोटो Nostr सञ्जालमा जो कसैलाई पनि देखिन्छन्, तपाईंका सर्कलका सदस्यलाई मात्र होइन। सार्वजनिक बनाउन तपाईं सहज हुनुहुने कुरा मात्र साझा गर्नुहोस्।';
 
   @override
-  String get identityRefreshProfileTooltip =>
-      'सार्वजनिक प्रोफाइल ताजा गर्नुहोस्';
-
-  @override
   String get identityAdvancedExportError =>
       'गोप्य कुञ्जी निर्यात गर्न सकिएन। कृपया फेरि प्रयास गर्नुहोस्।';
 
@@ -1922,6 +1918,23 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get memberNicknameSheetClearedAnnouncement => 'उपनाम हटाइयो';
+
+  @override
+  String get memberNicknameSheetSavedLabel => 'उपनाम सुरक्षित गरियो';
+
+  @override
+  String get memberNicknameSheetNoneLabel => 'कुनै उपनाम राखिएको छैन';
+
+  @override
+  String get memberNicknameSheetSavingLabel => 'उपनाम सुरक्षित गर्दै';
+
+  @override
+  String get memberNicknameSheetRetryLabel =>
+      'उपनाम सुरक्षित गर्न सकिएन। पुनः प्रयास गर्नुहोस्';
+
+  @override
+  String get memberNicknameSheetSaveFailedAnnouncement =>
+      'उपनाम सुरक्षित गर्न सकिएन, फेरि प्रयास गर्नुहोस्';
 
   @override
   String get npubQrScanLabel => 'मलाई थप्न स्क्यान गर्नुहोस्';
