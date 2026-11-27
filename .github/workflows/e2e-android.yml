@@ -188,7 +188,7 @@ jobs:
       # here (scripts/ci/check_gradle_build_hardened.sh).
       - name: Fetch this run's Gradle dependencies
         timeout-minutes: 5
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: gradle-deps
           path: ${{ runner.temp }}/gradle-deps
