@@ -9,8 +9,9 @@
 # on disk for nothing: on a 72 GB runner eight APKs left 44 MB for the system
 # image (CI run 41167769413), and a single one left 3.3 GB, too little for the
 # image to unpack (CI run 41322563075). Nothing after the build reads it, nor
-# the Gradle caches, which these lanes restore and never save: the drives
-# install the copied APKs with --use-application-binary.
+# the Gradle caches, which these lanes unpack from the run's dependency set
+# (android-gradle-deps.yml) and never upload: the drives install the copied
+# APKs with --use-application-binary.
 #
 # Usage: release-apk-build-outputs.sh <dir holding the lane's copied APKs>
 # Refuses (exit 2) unless that directory holds at least one APK, so it can never

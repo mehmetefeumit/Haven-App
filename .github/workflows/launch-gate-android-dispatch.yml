@@ -1,0 +1,63 @@
+# The Android launch gate, by hand: prove the gate on a published release
+# (candidate_release_tag, e.g. v0.1.14 must be red) or on this branch's tree
+# (empty: it is built, as a pull request builds it). docs/LAUNCH_GATE.md
+# "Proving the gate".
+#
+# A wrapper, not a trigger on launch-gate-android.yml itself, because a branch
+# build needs the run's Gradle dependency set (android-gradle-deps.yml), whose
+# job needs `actions: read`; the gate's own workflow-level `permissions:
+# contents: read` could not grant that, and release-build.yml calls the gate
+# with APKs it built and must need nothing new. A tag run resolves the set
+# too, unused, rather than carry a condition the verdict would have to read.
+
+name: Launch Gate (Android, by hand)
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_release_tag:
+        description: A published release whose APKs are the candidate (empty builds this branch).
+        type: string
+        default: ''
+        required: false
+
+permissions: {}
+
+jobs:
+  gradle-deps:
+    name: Android Gradle Dependencies
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/android-gradle-deps.yml
+
+  launch-gate-android:
+    name: Launch Gate (Android)
+    needs: [gradle-deps]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/launch-gate-android.yml
+    with:
+      candidate_release_tag: ${{ inputs.candidate_release_tag }}
+
+  # Red unless both jobs succeeded (scripts/ci/check_all_jobs_passed.sh).
+  verdict:
+    name: All jobs passed
+    if: always()
+    needs:
+      - gradle-deps
+      - launch-gate-android
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: scripts/ci
+
+      - name: Every job this run needs succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: bash scripts/ci/check_all_jobs_passed.sh --judge

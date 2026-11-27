@@ -22,8 +22,19 @@ on:
   workflow_dispatch:
 
 jobs:
+  # The run's Android Gradle dependency set, which every Android lane needs and
+  # builds offline from (android-gradle-deps.yml). Its failure skips them and
+  # reddens `verdict`.
+  gradle-deps:
+    name: Android Gradle Dependencies
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/android-gradle-deps.yml
+
   e2e-android-live:
     name: E2E Core Flow (Android, live-sync)
+    needs: [gradle-deps]
     uses: ./.github/workflows/e2e-android.yml
     with:
       live_sync: true
@@ -33,3 +44,27 @@ jobs:
     uses: ./.github/workflows/e2e-ios.yml
     with:
       live_sync: true
+
+  # Red unless every job above succeeded: a lane skipped because the Gradle
+  # dependency job failed is not a passed lane (scripts/ci/check_all_jobs_passed.sh).
+  verdict:
+    name: All jobs passed
+    if: always()
+    needs:
+      - gradle-deps
+      - e2e-android-live
+      - e2e-ios-live
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: scripts/ci
+
+      - name: Every job this run needs succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: bash scripts/ci/check_all_jobs_passed.sh --judge

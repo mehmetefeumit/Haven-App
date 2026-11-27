@@ -426,6 +426,7 @@ jobs:
             tooling/logscan
           # Per-leg, so the matrix jobs never race each other's cache save.
           key: e2e-ios-bg-publish-${{ matrix.leg }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The runtime log scanner, release-built ONCE, before Flutter and the
       # simulator are resident. The runner seals and scans with it after the

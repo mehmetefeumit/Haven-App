@@ -21,6 +21,18 @@
 // appended. CI installs this into $GRADLE_USER_HOME/init.d from
 // scripts/ci/build_apk_with_retry.sh and scripts/build_release.sh; a developer
 // may copy it there too.
+//
+// Online, it matters to the two CI builds that still reach the network: the
+// deps job's resolution (android-gradle-deps.yml), which every Android lane
+// then builds OFFLINE from, and the release build. The lanes install it too,
+// because the repositories a build declares are part of how Gradle files a
+// cached module: an offline lane must declare the ones the deps job resolved
+// through. It is part of the set's key (scripts/ci/gradle_deps.sh).
+//
+// kotlin-dsl itself is a plugin only the Portal serves (Central and the mirror
+// answer 404), so this file cannot help when the Portal is down; that is what
+// the deps job's retry budget and the main run's kept set are for (CI runs
+// 45142774793, 45012283370).
 
 val centralMirror = uri("https://maven-central.storage-download.googleapis.com/maven2/")
 

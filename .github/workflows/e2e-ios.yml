@@ -179,6 +179,7 @@ jobs:
             tooling/e2e/local-relay
             tooling/logscan
           key: e2e-ios-sim
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The runtime log scanner, release-built ONCE, before Flutter and the
       # simulator are resident (the build-before-boot discipline below). The

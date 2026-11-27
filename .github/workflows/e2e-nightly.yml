@@ -29,15 +29,27 @@ on:
     - cron: '0 3 * * *'
 
 jobs:
+  # The run's Android Gradle dependency set, which every Android lane needs and
+  # builds offline from (android-gradle-deps.yml). Its failure skips them and
+  # reddens `verdict`.
+  gradle-deps:
+    name: Android Gradle Dependencies
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/android-gradle-deps.yml
+
   # Full consolidated core flow — identical lane to the PR gate,
   # run on a schedule.
   e2e-android:
     name: E2E Core Flow (Android, nightly)
+    needs: [gradle-deps]
     uses: ./.github/workflows/e2e-android.yml
 
   # The component-level integration tests — identical lane to the PR gate.
   e2e-integration:
     name: E2E Integration Tests (Android, nightly)
+    needs: [gradle-deps]
     uses: ./.github/workflows/e2e-integration.yml
 
   # The relay-management lane — identical lane to the PR gate (boots two
@@ -45,4 +57,30 @@ jobs:
   # plus the fault relays the relay-status target reads every state from).
   e2e-relay-management:
     name: E2E Relay Management (Android, nightly)
+    needs: [gradle-deps]
     uses: ./.github/workflows/e2e-relay-management.yml
+
+  # Red unless every job above succeeded: a lane skipped because the Gradle
+  # dependency job failed is not a passed lane (scripts/ci/check_all_jobs_passed.sh).
+  verdict:
+    name: All jobs passed
+    if: always()
+    needs:
+      - gradle-deps
+      - e2e-android
+      - e2e-integration
+      - e2e-relay-management
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: scripts/ci
+
+      - name: Every job this run needs succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: bash scripts/ci/check_all_jobs_passed.sh --judge

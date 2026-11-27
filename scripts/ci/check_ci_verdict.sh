@@ -92,7 +92,7 @@ DEADLINE_SECS="${CI_VERDICT_DEADLINE_SECS:-10800}"
 readonly API_MISS_LIMIT=3
 # How many fixtures the self-test runs. Pinned, because a fixture that stops
 # running is the one way a deleted check reports success.
-readonly SELF_TEST_FIXTURES=20
+readonly SELF_TEST_FIXTURES=21
 
 log() {
   printf '\033[1;34m[check_ci_verdict]\033[0m %s\n' "$*"
@@ -315,6 +315,16 @@ self_test() {
   _edit skipped.tsv 's#^(Repo Guards / Static checks\tcompleted\t)success#\1skipped#'
   _case "a required job that only skipped fails" 1 _gate "${tmp}/skipped.tsv"
 
+  # The shape a failed Android Gradle dependency job leaves: every job that
+  # needs it is skipped before its reusable workflow expands, so the API lists
+  # ONE row under the caller's bare name and none of its jobs. Nothing in it is
+  # a failure under a gate prefix; the gate fails because the required
+  # public-profile jobs never passed.
+  { grep -v '^E2E Public Profile (Android + iOS) / ' "${tmp}/green.tsv"
+    printf 'Android Gradle Dependencies / Resolve and verify offline\tcompleted\tfailure\n'
+    printf 'E2E Public Profile (Android + iOS)\tcompleted\tskipped\n'; } >"${tmp}/deps-red.tsv"
+  _case "public-profile jobs skipped because the Gradle dependency job failed fail the gate" 1 _gate "${tmp}/deps-red.tsv"
+
   { cat "${tmp}/green.tsv"; printf 'Rust Checks / a job added later\tcompleted\tfailure\n'; } >"${tmp}/unlisted.tsv"
   _case "a failed job under a gate workflow fails even when the list does not name it" 1 _gate "${tmp}/unlisted.tsv"
 
@@ -380,7 +390,7 @@ self_test() {
     fails=1
   fi
   (( fails == 0 )) || { echo "check_ci_verdict.sh --self-test: FAILED" >&2; return 1; }
-  log "OK: self-test passed — each way a gate job can fail, skip, go missing or never finish (the public-profile E2E jobs among them), a missing or bare run, an API blip and outage, both queries, and each way the pinned list can drift."
+  log "OK: self-test passed — each way a gate job can fail, skip, go missing or never finish (the public-profile E2E jobs among them, skipped whole when the Gradle dependency job failed), a missing or bare run, an API blip and outage, both queries, and each way the pinned list can drift."
 }
 
 case "${1:-}" in
