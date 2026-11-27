@@ -363,7 +363,7 @@ jobs:
       # leaves behind is in airplane mode with error dialogs hidden — saved, it
       # would be every other lane's emulator. A miss is created locally below.
       - name: AVD cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         id: avd-cache
         timeout-minutes: 10
         with:
@@ -571,7 +571,7 @@ jobs:
       # mode with error dialogs hidden — saved, it would be the next lane's
       # emulator.
       - name: AVD cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         id: avd-cache
         timeout-minutes: 10
         with:
