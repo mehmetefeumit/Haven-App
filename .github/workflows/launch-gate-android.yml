@@ -167,7 +167,7 @@ jobs:
       - name: Fetch this run's Gradle dependencies
         if: env.MODE == 'build'
         timeout-minutes: 5
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: gradle-deps
           path: ${{ runner.temp }}/gradle-deps
@@ -212,7 +212,7 @@ jobs:
 
       - name: Download the candidate APKs
         if: env.MODE == 'artifact'
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: ${{ inputs.candidate_artifact }}
           path: /tmp/launch-gate/candidate-apks
@@ -337,7 +337,7 @@ jobs:
       - name: Receive the candidate
         id: verify
         timeout-minutes: 5
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: launch-gate-candidate-${{ github.run_id }}
           path: /tmp/launch-gate
@@ -544,7 +544,7 @@ jobs:
       - name: Receive the candidate
         id: verify
         timeout-minutes: 5
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: launch-gate-candidate-${{ github.run_id }}
           path: /tmp/launch-gate
@@ -674,7 +674,7 @@ jobs:
     steps:
       - name: Receive the candidate
         timeout-minutes: 5
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: launch-gate-candidate-${{ github.run_id }}
           path: /tmp/launch-gate

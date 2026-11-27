@@ -305,7 +305,7 @@ jobs:
       contents: write
     steps:
       - name: Download the launched APKs
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: haven-release-android
           path: apks
@@ -322,7 +322,7 @@ jobs:
             || { echo "::error::The APKs to publish are not the ones the launch gate tested."; exit 1; }
 
       - name: Download the launched simulator app
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: haven-ios-simulator-app
           path: sim
