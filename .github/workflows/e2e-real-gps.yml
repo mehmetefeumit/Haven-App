@@ -236,7 +236,7 @@ jobs:
         run: bash tooling/e2e/ci/provision-android-sdk.sh 34 google_apis x86_64
 
       - name: Restore AVD cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         id: avd-cache
         with:
           path: |
@@ -448,7 +448,7 @@ jobs:
       - name: Save AVD cache
         if: ${{ success() && github.ref == 'refs/heads/main' && steps.avd-cache.outputs.cache-hit != 'true' }}
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             ~/.android/avd/*
