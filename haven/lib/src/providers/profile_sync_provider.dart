@@ -16,6 +16,8 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/profile_service.dart';
 
@@ -104,7 +106,13 @@ class OwnProfileSyncController extends Notifier<void>
     }
     _inFlight = true;
     try {
-      await ref.read(profileServiceProvider).syncOwnProfile();
+      try {
+        await ref.read(profileServiceProvider).syncOwnProfile();
+      } finally {
+        // Also on a throw: a pass may have cached a newer kind-0 from another
+        // device in the own row before it failed.
+        _invalidateOwnProfile();
+      }
       _failureRetryArmed = false;
       if (_disposed) return;
       await _arm();
@@ -125,6 +133,16 @@ class OwnProfileSyncController extends Notifier<void>
         unawaited(retryIfPending());
       }
     }
+  }
+
+  /// Shows what the own row now holds on every surface. Through the
+  /// container: a debug build's `ref.invalidate` mounts a provider nothing
+  /// has read.
+  void _invalidateOwnProfile() {
+    if (_disposed) return;
+    ref.container
+      ..invalidate(displayNameProvider)
+      ..invalidate(ownProfileProvider);
   }
 
   /// Consults the persisted backoff and syncs ONLY when a save is pending AND

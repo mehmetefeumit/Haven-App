@@ -188,14 +188,16 @@ abstract class IdentityService {
   /// Throws [IdentityServiceException] if deletion fails.
   Future<void> deleteIdentity();
 
-  /// Gets the user's display name.
+  /// Gets the device-local display name, or `null` if none is held.
   ///
-  /// Returns `null` if no display name has been set.
+  /// Shown only while the own profile row holds no name; every surface reads
+  /// the user's name through `displayNameProvider`, never this.
   Future<String?> getDisplayName();
 
-  /// Sets the user's display name.
+  /// Sets the device-local display name.
   ///
-  /// Pass `null` or empty string to clear the display name.
+  /// Pass `null` or empty string to clear it. Saving the user's name is
+  /// `ProfileService.updateOwnProfile`, not this.
   Future<void> setDisplayName(String? name);
 
   /// Clears in-memory caches.

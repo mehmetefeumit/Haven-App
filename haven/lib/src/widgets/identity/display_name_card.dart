@@ -11,36 +11,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
-import 'package:haven/src/constants/feature_flags.dart';
 import 'package:haven/src/constants/text_input_privacy.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/profile_sync_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
-import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
-
-/// Possible UI states for the display-name editor.
-@visibleForTesting
-enum DisplayNameStatus {
-  /// The field matches the persisted value.
-  saved,
-
-  /// The field has been edited but not yet saved.
-  unsaved,
-
-  /// A save is in flight.
-  saving,
-
-  /// The most recent save attempt failed.
-  failed,
-}
+import 'package:haven/src/widgets/common/circular_save_button.dart';
 
 /// Card containing the display-name editor.
 ///
-/// Consumes [identityServiceProvider] and [displayNameProvider]; tests can
+/// Consumes [displayNameProvider] and the services that save; tests can
 /// inject mocks via `ProviderScope` overrides.
 class DisplayNameCard extends ConsumerStatefulWidget {
   /// Creates a display-name card.
@@ -53,16 +35,20 @@ class DisplayNameCard extends ConsumerStatefulWidget {
 class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
   final _controller = TextEditingController();
   String _savedName = '';
-  DisplayNameStatus _status = DisplayNameStatus.saved;
+  SaveStatus _status = SaveStatus.saved;
   bool _loaded = false;
 
   @override
   void initState() {
     super.initState();
     _controller.addListener(_onTextChanged);
-    // If the provider already has data when we mount, seed synchronously
-    // so the very first paint shows the user's name (not an empty field).
-    ref.read(displayNameProvider).whenData(_seedSilently);
+    // Seed synchronously from whatever is already loaded, so the very first
+    // paint shows the user's name (not an empty field): no listener reports a
+    // value that landed before this card mounted. Not while it reloads: the
+    // value it carries then is the one from before the save that invalidated
+    // it.
+    final name = ref.read(displayNameProvider);
+    if (name.hasValue && !name.isLoading) _seedSilently(name.value);
   }
 
   @override
@@ -75,13 +61,15 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
 
   bool get _isDirty => _controller.text.trim() != _savedName;
 
+  bool get _canSave => _isDirty && _status != SaveStatus.saving;
+
   /// Sets the controller and status without firing the dirty-state listener.
   ///
   /// Called from `initState` (pre-build, no setState needed) and from
   /// `ref.listen` in `build` (caller wraps in setState).
   ///
   /// Callers gate re-invocation on `_status == saved` (see the `ref.listen`
-  /// callbacks in [build]) so a slower kind-0 fetch can reseed the field
+  /// callback in [build]) so a slower kind-0 fetch can reseed the field
   /// (plan D12 / Flutter review F1) without ever clobbering an in-progress
   /// `unsaved` / `saving` / `failed` edit.
   void _seedSilently(String? value) {
@@ -94,17 +82,16 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
       ..text = trimmed
       ..addListener(_onTextChanged);
     _savedName = trimmed;
-    _status = DisplayNameStatus.saved;
+    _status = SaveStatus.saved;
     _loaded = true;
   }
 
   void _onTextChanged() {
     if (!_loaded) return;
-    // While saving or holding a failed state, leave status alone so an
-    // in-flight save (or a failure the user has not acknowledged) is not
-    // overwritten by an incidental keystroke.
-    if (_status == DisplayNameStatus.saving) return;
-    final next = _isDirty ? DisplayNameStatus.unsaved : DisplayNameStatus.saved;
+    // An in-flight save keeps its status until it lands; any other state,
+    // a failure included, follows the text.
+    if (_status == SaveStatus.saving) return;
+    final next = _isDirty ? SaveStatus.unsaved : SaveStatus.saved;
     if (next != _status) setState(() => _status = next);
   }
 
@@ -117,27 +104,26 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
     final textDirection = Directionality.of(context);
     final l10n = AppLocalizations.of(context);
     final syncController = ref.read(ownProfileSyncProvider.notifier);
-    setState(() => _status = DisplayNameStatus.saving);
+    final identityService = ref.read(identityServiceProvider);
+    final profileService = ref.read(profileServiceProvider);
+    final container = ProviderScope.containerOf(context, listen: false);
+    setState(() => _status = SaveStatus.saving);
     try {
-      await ref
-          .read(identityServiceProvider)
-          .setDisplayName(text.isEmpty ? null : text);
-      if (!mounted) return;
-      ref.invalidate(displayNameProvider);
-      // ALWAYS also merge the edit onto the LOCAL public-profile cache —
-      // saving is unconditional (public-by-default, owner-directed
-      // 2026-07-16, matching White Noise), no consent gate. This is now a
-      // fast, local-only write (`ProfileService.updateOwnProfile` no longer
-      // touches a relay); the sync below is what actually
-      // publishes, in the background.
-      await ref
-          .read(profileServiceProvider)
-          .updateOwnProfile(displayName: text);
-      // The local write is done: publish even if the card is gone, since
-      // `ref` is unusable then.
+      // A row with no name falls back to the device-local one, so a clear
+      // drops that first: an interrupted clear never brings the old name back.
+      if (text.isEmpty) await identityService.setDisplayName(null);
+      // One local SQLCipher transaction that both holds the edit and queues
+      // its publish (unconditional — public by default, owner-directed
+      // 2026-07-16), so it is the save; [displayNameProvider] drops the
+      // local name once the row holds one.
+      await profileService.updateOwnProfile(displayName: text);
+      // Publish, and show the name everywhere, even if the card is gone,
+      // since `ref` is unusable then.
       unawaited(syncController.sync());
+      container
+        ..invalidate(displayNameProvider)
+        ..invalidate(ownProfileProvider);
       if (!mounted) return;
-      ref.invalidate(ownProfileProvider);
       unawaited(
         SemanticsService.sendAnnouncement(
           view,
@@ -154,8 +140,8 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
         // reseed gate (`_mayReseed`) and let a stale fetched value clobber
         // the newer, not-yet-saved keystrokes.
         _status = _controller.text.trim() == text
-            ? DisplayNameStatus.saved
-            : DisplayNameStatus.unsaved;
+            ? SaveStatus.saved
+            : SaveStatus.unsaved;
       });
     } on Object catch (e) {
       // Detail is logged in debug; surface a generic state to the user.
@@ -170,64 +156,39 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
           assertiveness: Assertiveness.assertive,
         ),
       );
-      setState(() => _status = DisplayNameStatus.failed);
+      setState(() => _status = SaveStatus.failed);
     }
   }
 
-  /// Whether a new value from either seed source may safely reseed the
-  /// field: before the very first seed lands (`!_loaded`), or once it has
-  /// and the field carries no unsaved/in-flight edit (`_status == saved`).
+  /// Whether a newly read name may safely reseed the field: before the very
+  /// first seed lands (`!_loaded`), or once it has and the field carries no
+  /// unsaved/in-flight/failed edit (`_status == saved`).
   ///
   /// Flutter review F1 (plan D12): the seed-once guard used to stop
   /// reseeding forever after `_loaded` first flipped `true`, which could
-  /// discard the (slower) authoritative kind-0 fetch if the fast local
-  /// cache seeded first. Relaxed here to keep reseeding whenever there is
-  /// nothing to clobber.
-  bool get _mayReseed => !_loaded || _status == DisplayNameStatus.saved;
-
-  /// Prefers the fetched kind-0 `display_name`, falling back to `name`;
-  /// returns `null` when neither is set (never reseeds with a blank value).
-  static String? _preferredProfileName(Profile? profile) {
-    final displayName = profile?.displayName?.trim();
-    if (displayName != null && displayName.isNotEmpty) return displayName;
-    final name = profile?.name?.trim();
-    if (name != null && name.isNotEmpty) return name;
-    return null;
-  }
+  /// discard a name the (slower) kind-0 fetch wrote later. Relaxed here to
+  /// keep reseeding whenever there is nothing to clobber.
+  bool get _mayReseed => !_loaded || _status == SaveStatus.saved;
 
   @override
   Widget build(BuildContext context) {
-    // Local (device-only) display name — always the first, fast seed source.
+    // The user's name as every surface shows it. Not while it reloads:
+    // `when` would hand over the value from before the save that
+    // invalidated it.
     ref.listen<AsyncValue<String?>>(displayNameProvider, (_, next) {
-      if (!_mayReseed) return;
+      if (!_mayReseed || next.isLoading) return;
       next.when(
-        data: (value) => setState(() => _seedSilently(value)),
+        data: (name) => setState(() => _seedSilently(name)),
         error: (_, _) {
-          // The local read failed (e.g. a SharedPreferences hiccup) — seed an
-          // empty, EDITABLE field rather than blocking the whole card (F2):
-          // once `_loaded` flips true here the loaded body always renders,
-          // never an uneditable error-only state.
+          // No name could be read — seed an EDITABLE empty field rather than
+          // blocking the whole card (F2): once `_loaded` flips true here the
+          // loaded body always renders, never an uneditable error-only state.
+          // A field already seeded keeps its text.
           if (!_loaded) setState(() => _seedSilently(null));
         },
         loading: () {},
       );
     });
-
-    // The fetched public kind-0 profile is authoritative — reseed with it
-    // whenever it lands, honoring the same `_mayReseed` guard so a slower
-    // network fetch never clobbers an edit already in progress. Gated on
-    // `publicProfilesEnabled` (the build-time kill switch for the
-    // fetch/display machinery, not a user-facing opt-out — see
-    // `feature_flags.dart`), not on any consent state — publishing itself is
-    // unconditional. `ownProfileProvider` never throws for connectivity (D7),
-    // so there is no error branch to handle here.
-    if (publicProfilesEnabled) {
-      ref.listen<AsyncValue<Profile?>>(ownProfileProvider, (_, next) {
-        if (!_mayReseed) return;
-        final fetchedName = _preferredProfileName(next.valueOrNull);
-        if (fetchedName != null) setState(() => _seedSilently(fetchedName));
-      });
-    }
 
     final displayNameAsync = ref.watch(displayNameProvider);
 
@@ -235,6 +196,9 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
       child: Padding(
         padding: const EdgeInsets.all(HavenSpacing.base),
         child: displayNameAsync.when(
+          // A profile row reloading under the name must not take the field
+          // away from someone typing in it.
+          skipLoadingOnReload: true,
           loading: () => _buildLoadingBody(context),
           // F2: keep the field usable on a local-read error rather than
           // rendering an uneditable error-only state — the `ref.listen`
@@ -289,6 +253,10 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
                 // Haven's storage and its logout wipe.
                 enableIMEPersonalizedLearning: false,
                 autofillHints: kNoAutofill,
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) {
+                  if (_canSave) unawaited(_save());
+                },
                 // Hide the default 0/64 counter — it adds visual noise to a
                 // single-field card.
                 buildCounter:
@@ -307,11 +275,14 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
               ),
             ),
             const SizedBox(width: HavenSpacing.sm),
-            _CircularSaveButton(
+            CircularSaveButton(
+              buttonKey: WidgetKeys.displayNameSaveButton,
               status: _status,
-              onPressed: (_isDirty && _status != DisplayNameStatus.saving)
-                  ? _save
-                  : null,
+              onPressed: _canSave ? _save : null,
+              savedLabel: l10n.displayNameCardSavedLabel,
+              saveLabel: l10n.displayNameCardSaveLabel,
+              savingLabel: l10n.displayNameCardSavingLabel,
+              retryLabel: l10n.displayNameCardRetryLabel,
             ),
           ],
         ),
@@ -325,99 +296,6 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
           ),
         ],
       ],
-    );
-  }
-}
-
-/// Compact circular save button to the right of the display-name field.
-///
-/// Encodes the current [DisplayNameStatus] through its icon (a distinct shape
-/// per state, so the signal is never color-only) and carries a per-state
-/// tooltip/accessible label. Kept a [FilledButton] so it inherits the M3 state
-/// layer, focus ring, and disabled treatment, and stays a [ButtonStyleButton].
-/// The spinner is rendered inside the button while a save is in flight.
-class _CircularSaveButton extends StatelessWidget {
-  const _CircularSaveButton({required this.status, required this.onPressed});
-
-  final DisplayNameStatus status;
-  final VoidCallback? onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final l10n = AppLocalizations.of(context);
-    final reducedMotion = MediaQuery.disableAnimationsOf(context);
-
-    final (Widget child, String label, Color? background, Color? foreground) =
-        switch (status) {
-          DisplayNameStatus.saved => (
-            const Icon(LucideIcons.check, size: 20),
-            l10n.displayNameCardSavedLabel,
-            null,
-            null,
-          ),
-          DisplayNameStatus.unsaved => (
-            const Icon(LucideIcons.arrowUp, size: 20),
-            l10n.displayNameCardSaveLabel,
-            null,
-            null,
-          ),
-          DisplayNameStatus.saving => (
-            SizedBox(
-              height: 18,
-              width: 18,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: colorScheme.onPrimary,
-              ),
-            ),
-            l10n.displayNameCardSavingLabel,
-            null,
-            null,
-          ),
-          DisplayNameStatus.failed => (
-            const Icon(LucideIcons.rotateCcw, size: 20),
-            l10n.displayNameCardRetryLabel,
-            colorScheme.errorContainer,
-            colorScheme.onErrorContainer,
-          ),
-        };
-
-    // Animate the icon/spinner swap unless the user prefers reduced motion.
-    final animatedChild = reducedMotion
-        ? child
-        : AnimatedSwitcher(
-            duration: const Duration(milliseconds: 200),
-            transitionBuilder: (c, animation) =>
-                ScaleTransition(scale: animation, child: c),
-            child: KeyedSubtree(
-              key: ValueKey<DisplayNameStatus>(status),
-              child: child,
-            ),
-          );
-
-    return Tooltip(
-      message: label,
-      child: FilledButton(
-        key: WidgetKeys.displayNameSaveButton,
-        onPressed: onPressed,
-        style: FilledButton.styleFrom(
-          shape: const CircleBorder(),
-          padding: EdgeInsets.zero,
-          minimumSize: const Size(48, 48),
-          fixedSize: const Size(48, 48),
-          backgroundColor: background,
-          foregroundColor: foreground,
-        ),
-        // Give the icon-only button a state-dependent accessible name. There
-        // is no live region in this card; screen readers read this label when
-        // the button is focused, and _save() announces save outcomes.
-        child: Semantics(
-          label: label,
-          excludeSemantics: true,
-          child: animatedChild,
-        ),
-      ),
     );
   }
 }

@@ -293,6 +293,14 @@ abstract class ProfileService {
   /// Throws [ProfileServiceException] on a genuine failure.
   Future<Profile?> getOwnProfile({bool forceRefresh = false});
 
+  /// The user's own cached profile without its picture: what a name needs,
+  /// read from the local store alone — no picture bytes are loaded and no
+  /// relay is asked. `null` when no profile is cached.
+  ///
+  /// Throws [ProfileServiceException] when the store cannot be read, so a
+  /// failed read is never taken for a profile with no name.
+  Future<Profile?> getOwnProfileText();
+
   /// What the profile relays hold of the user's own profile now — never the
   /// cached copy alone, which may be an edit the network never saw.
   ///
@@ -427,6 +435,14 @@ abstract class ProfileService {
   Future<Map<String, Profile>> getCachedMemberProfiles(
     List<String> pubkeyHexes,
   );
+
+  /// The full-resolution copy of [pubkeyHex]'s cached picture, where
+  /// [getMemberProfile] carries only the 96px thumbnail — for viewing the
+  /// photo full screen.
+  ///
+  /// A local read only: never touches the network. **Never throws**; `null`
+  /// when no full-size copy is cached or the store cannot be read.
+  Future<Uint8List?> getMemberPicture(String pubkeyHex);
 
   /// Batch-refreshes the kind-0 profiles for [pubkeyHexes], and returns the
   /// pubkeys whose current picture is not cached yet.

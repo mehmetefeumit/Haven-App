@@ -1326,6 +1326,7 @@ else
     exit 2
   fi
   location_define=(--dart-define=HAVEN_E2E_LOCATION_RELAY="${HAVEN_E2E_LOCATION_RELAY}")
+  # HAVEN_GRADLE_DEPS-EXEMPT: a local run's fallback; every CI lane stages the APK its own build step made offline (/tmp/scenario.apk), so this build never runs there.
   flutter build apk \
     --debug \
     --target-platform android-x64 \

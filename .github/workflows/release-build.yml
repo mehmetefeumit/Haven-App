@@ -107,15 +107,18 @@ jobs:
     # APK's receive path is live_sync_provider.dart's defaultValue, not a
     # value this workflow chooses.
     #
-    # HAVEN_GRADLE_CACHE-EXEMPT: this job signs and ships the artifact, and an
-    # unverified cache is not an input a release build should take to save one
-    # cold build per release. Nothing here would check what a restore put on
-    # disk: there is no haven/android/gradle/verification-metadata.xml (Gradle
-    # dependency verification is off), so a poisoned `~/.gradle/caches/modules-2`
-    # can substitute a dependency into the one build whose output users install
-    # (the distribution itself is pinned by gradle-wrapper.properties'
-    # distributionSha256Sum, so `~/.gradle/wrapper` is no longer the hole). The
-    # E2E lanes take that trade because they ship nothing; this job does not.
+    # HAVEN_GRADLE_DEPS-EXEMPT: this job signs and ships the artifact, and a
+    # dependency set another job handed over (android-gradle-deps.yml's, which
+    # the lanes build offline from) is not an input a release build should take
+    # to save one cold build per release. Nothing here would check what that
+    # set put on disk: there is no haven/android/gradle/verification-metadata.xml
+    # (Gradle dependency verification is off), so a poisoned
+    # `~/.gradle/caches/modules-2` can substitute a dependency into the one
+    # build whose output users install (the distribution itself is pinned by
+    # gradle-wrapper.properties' distributionSha256Sum, so `~/.gradle/wrapper`
+    # is no longer the hole). The E2E lanes take that trade because they ship
+    # nothing; this job does not, so it builds ONLINE and never sets
+    # HAVEN_GRADLE_OFFLINE (check_gradle_build_hardened.sh G6).
     # It still gets the widened in-Gradle 429 window from
     # haven/android/gradle.properties (5 tentatives, 2 s doubling backoff),
     # which is the only retry on this path: scripts/build_release.sh calls
@@ -163,9 +166,10 @@ jobs:
         with:
           workspaces: haven-core
           key: release-android
-          # A tag-scoped cache can never be restored (a later tag cannot read
-          # it, nor can main), and it evicts main's from the full 10 GB store.
-          save-if: ${{ github.ref_type != 'tag' }}
+          # Only main saves, as at every rust-cache here: a tag-scoped cache
+          # can never be restored (a later tag cannot read it, nor can main),
+          # and it evicts main's from the full 10 GB store.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -201,8 +205,8 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
-      # No Gradle dependency cache here, on purpose — see the
-      # HAVEN_GRADLE_CACHE-EXEMPT reason on this job. This build resolves its
+      # No Gradle dependency set here, on purpose — see the
+      # HAVEN_GRADLE_DEPS-EXEMPT reason on this job. This build resolves its
       # dependencies and its Gradle distribution from the network every time,
       # because that is the only path anything upstream is in a position to
       # authenticate.
@@ -262,6 +266,9 @@ jobs:
   # baseline) with its data kept. Nothing below publishes unless this passes.
   android-launch-gate:
     name: Android launch gate
+    # HAVEN_GRADLE_DEPS-EXEMPT: it hands the gate `candidate_artifact`, so the
+    # gate's candidate job downloads those APKs and builds nothing; no Gradle
+    # dependency set is needed, and the release must need nothing new to launch.
     needs: [android]
     uses: ./.github/workflows/launch-gate-android.yml
     with:
@@ -403,9 +410,10 @@ jobs:
         with:
           workspaces: haven-core
           key: release-ios
-          # A tag-scoped cache can never be restored (a later tag cannot read
-          # it, nor can main), and it evicts main's from the full 10 GB store.
-          save-if: ${{ github.ref_type != 'tag' }}
+          # Only main saves, as at every rust-cache here: a tag-scoped cache
+          # can never be restored (a later tag cannot read it, nor can main),
+          # and it evicts main's from the full 10 GB store.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2

@@ -1789,9 +1789,6 @@ class AppLocalizationsPt extends AppLocalizations {
       'Seu nome de exibição e sua foto ficam visíveis para qualquer pessoa na rede Nostr, não apenas para os membros dos seus círculos. Compartilhe apenas o que você se sentir à vontade para tornar público.';
 
   @override
-  String get identityRefreshProfileTooltip => 'Atualizar perfil público';
-
-  @override
   String get identityAdvancedExportError =>
       'Falha ao exportar a chave secreta. Tente de novo.';
 
@@ -1952,6 +1949,23 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get memberNicknameSheetClearedAnnouncement => 'Apelido removido';
+
+  @override
+  String get memberNicknameSheetSavedLabel => 'Apelido salvo';
+
+  @override
+  String get memberNicknameSheetNoneLabel => 'Nenhum apelido definido';
+
+  @override
+  String get memberNicknameSheetSavingLabel => 'Salvando o apelido';
+
+  @override
+  String get memberNicknameSheetRetryLabel =>
+      'Apelido não salvo. Tente de novo';
+
+  @override
+  String get memberNicknameSheetSaveFailedAnnouncement =>
+      'Apelido não salvo, tente de novo';
 
   @override
   String get npubQrScanLabel => 'Escaneie para me adicionar';

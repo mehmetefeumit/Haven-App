@@ -1750,9 +1750,6 @@ class AppLocalizationsTr extends AppLocalizations {
       'Görünen adınız ve fotoğrafınız yalnızca çevrelerinizin üyelerine değil, Nostr ağındaki herkese görünür. Yalnızca herkese açık olmasında sakınca görmediğiniz şeyleri paylaşın.';
 
   @override
-  String get identityRefreshProfileTooltip => 'Herkese açık profili yenile';
-
-  @override
   String get identityAdvancedExportError =>
       'Gizli anahtar dışa aktarılamadı. Lütfen tekrar deneyin.';
 
@@ -1902,16 +1899,33 @@ class AppLocalizationsTr extends AppLocalizations {
   String get memberNicknameSheetLabel => 'Takma Ad';
 
   @override
-  String get memberNicknameSheetSave => 'Takma Adı Kaydet';
+  String get memberNicknameSheetSave => 'Takma adı kaydet';
 
   @override
-  String get memberNicknameSheetClear => 'Takma Adı Temizle';
+  String get memberNicknameSheetClear => 'Takma adı temizle';
 
   @override
   String get memberNicknameSheetSavedAnnouncement => 'Takma ad kaydedildi';
 
   @override
   String get memberNicknameSheetClearedAnnouncement => 'Takma ad temizlendi';
+
+  @override
+  String get memberNicknameSheetSavedLabel => 'Takma ad kaydedildi';
+
+  @override
+  String get memberNicknameSheetNoneLabel => 'Takma ad ayarlanmadı';
+
+  @override
+  String get memberNicknameSheetSavingLabel => 'Takma ad kaydediliyor';
+
+  @override
+  String get memberNicknameSheetRetryLabel =>
+      'Takma ad kaydedilemedi. Yeniden deneyin';
+
+  @override
+  String get memberNicknameSheetSaveFailedAnnouncement =>
+      'Takma ad kaydedilemedi, tekrar deneyin';
 
   @override
   String get npubQrScanLabel => 'Beni eklemek için tarayın';

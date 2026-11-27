@@ -677,15 +677,30 @@
 #     so that is the only one it can vouch for.
 #
 #   Gradle build hardening            scripts/ci/check_gradle_build_hardened.sh
-#     Every job that builds the app through Gradle restores the shared
-#     dependency cache, on the canonical key, BEFORE its first build, and
-#     reaches Gradle through scripts/ci/build_apk_with_retry.sh — never a bare
-#     `flutter build apk`, which would retry a compile error and, worse, retry
-#     a full disk into a green build. Exactly ONE job writes the key, because
-#     the relay-management lane wipes ~/.gradle/caches by design and a
-#     second writer could publish that hole to everyone. A cold classpath
-#     resolution is what HTTP 429'd a lane into a red job that ran no test
-#     (CI run 35622556197, and run 30732662493 before it).
+#     Every job that builds the app through Gradle fetches and installs the
+#     run's verified dependency set (android-gradle-deps.yml) BEFORE Setup
+#     Flutter and its first build, pins the set's Flutter, and builds with
+#     HAVEN_GRADLE_OFFLINE=1 through scripts/ci/build_apk_with_retry.sh —
+#     never a bare `flutter build apk`. Every caller of such a workflow needs
+#     the deps job, which grants itself `actions: read`; exactly one step
+#     uploads the set; nothing caches ~/.gradle; release-build.yml never builds
+#     offline; every tooling script that builds is a listed builder. Each lane resolving its own classpath at build time is what lost
+#     runs to a Plugin Portal blip (CI runs 45142774793, 45012283370), and an
+#     HTTP 429 before it (35622556197).
+#
+#   Gradle dependency set             scripts/ci/gradle_deps.sh --self-test
+#     The deps job's own logic: the key moves with every input that decides
+#     the set and nothing else; a main run's source is taken only from a
+#     trusted workflow's push or schedule on main in this repository, newest
+#     first; pack/unpack carry exactly what offline Gradle needs and pin
+#     Flutter; an incomplete source is topped up and replaced; nothing is
+#     packed unless the offline verification and both canaries hold.
+#
+#   Every job passed                  scripts/ci/check_all_jobs_passed.sh
+#     ci.yml and every workflow that calls the deps job end in one `verdict`
+#     job that needs every other job, runs always and is red unless each
+#     succeeded: a lane skipped because the deps job failed passes a required
+#     check, so a skip must never be what a run reports.
 #
 #   Diag-scan exit codes              scripts/ci/check_diag_scan_exit_codes.sh
 #     In a step that writes a `*_LEAK.txt` marker, exit code 1 means a leak
@@ -1013,15 +1028,16 @@ jobs:
 
       # The XML-comment-safe manifest/plist checks need xmllint, which the
       # Ubuntu 26.04 image no longer ships, and the ARB and privacy-manifest
-      # checks parse JSON with jq. Installed only when missing, through an
+      # checks parse JSON with jq; the Gradle dependency set's self-test packs
+      # and unpacks with zstd. Installed only when missing, through an
       # archive outage (run 44523702729), or failing here by name; the guards
-      # that need either tool then say it is missing, never a violation. The
+      # that need one of them then say it is missing, never a violation. The
       # cap is the script's 300 s archive budget plus the untimed local install,
       # and it keeps the job inside its 30: ~20 min of work + 7 = 27.
-      - name: Ensure xmllint and jq
+      - name: Ensure xmllint, jq and zstd
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         timeout-minutes: 7
-        run: bash scripts/ci/ensure_ci_tools.sh xmllint=libxml2-utils jq=jq
+        run: bash scripts/ci/ensure_ci_tools.sh xmllint=libxml2-utils jq=jq zstd=zstd
 
       # The one non-bash guard in this job. `check-wire-canaries.dart` is a
       # plain Dart program with no package dependencies — it imports
@@ -2075,32 +2091,58 @@ jobs:
       # a compile error and a full disk are not, a persistent 429 stops at
       # exactly the attempt count with one ::error:: saying INFRASTRUCTURE and
       # that no test ran, and a budget an earlier build in the step already
-      # spent starts no further attempt. Its fake `flutter` refuses both a
-      # non-build argv and a build missing the flags the wrapper adds, so a
-      # green run means the command line was really passed through.
+      # spent starts no further attempt. Offline, a gap is tried once and named
+      # as the deps job's, the offline switch lives exactly as long as the
+      # build, and --resolve-only and --provision-only (NDK and CMake) do what
+      # the deps job and build_release.sh rely on. Its fake `flutter` refuses
+      # both a non-build argv and a build missing the flags the wrapper adds, so
+      # a green run means the command line was really passed through.
       - name: Build-retry engine self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/build_apk_with_retry.sh --self-test
 
-      # Every Gradle-building job restores the shared dependency cache before
-      # its first build and builds through that classified retry, and exactly
-      # ONE job writes the cache key. A cold ~/.gradle fetches hundreds of POMs
-      # from a shared runner IP, which is what HTTP 429'd a lane into a red job
-      # that ran no test (CI run 35622556197); a cold build takes 455-946 s
-      # against a warm one's 29-48 s.
-      - name: Gradle builds are cached and retried by class
+      # Every Gradle-building job builds OFFLINE from the run's verified set:
+      # it fetches and installs `gradle-deps` before Setup Flutter and its first
+      # build, pins the set's Flutter, sets HAVEN_GRADLE_OFFLINE=1 and builds
+      # through the classified retry; every caller needs the deps job; one step
+      # uploads the set; nothing caches ~/.gradle; release-build.yml stays
+      # online. Lanes resolving their own classpath at build time lost runs to a
+      # Plugin Portal blip (CI runs 45142774793, 45012283370).
+      - name: Gradle builds are offline from the run's set
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_gradle_build_hardened.sh
 
-      # Both directions: a building job with no cache step, one whose restore
-      # lands after its build, a bare `flutter build apk`, a non-canonical key
-      # or path, a second writer and a save without `if: success()` each fail;
-      # a bare build quoted in a COMMENT is prose and passes; an exemption is
-      # honoured only when it carries a reason. Fixture count pinned by
-      # equality.
+      # Both directions: a missing, late or wrong fetch or install, an unpinned
+      # Flutter, an online build, a caller without the deps job or its
+      # permissions, a building workflow with a trigger of its own, a ~/.gradle
+      # cache, a second uploader, a fail-open or uncapped fetch, a bare build
+      # (gradlew included), a tooling builder outside BUILDERS, a job key
+      # spelled so it would escape, and release-build.yml reaching a set each
+      # fail; the same bare build in a comment passes; an exemption holds only
+      # as a comment of its own with a reason. Pinned count.
       - name: Gradle build hardening guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_gradle_build_hardened.sh --self-test
+
+      # The deps job's decisions against stubbed gh/flutter and planted trees:
+      # the key, the source-trust filter, pack/unpack, top-up-and-replace, and
+      # the canary judgement in both directions. Its Gradle calls run for real
+      # on every deps job, where the canaries prove offline and strictness.
+      - name: Gradle dependency set self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/gradle_deps.sh --self-test
+
+      - name: Every workflow ends in an all-jobs-passed verdict
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_all_jobs_passed.sh
+
+      # A skipped, cancelled or failed job reds the judgement and an empty
+      # needs context is refused; a job left out of `needs:`, a need that is no
+      # job, `if: success()`, a verdict that judges nothing or cannot fail, and
+      # a deps-calling workflow with no verdict each fail the wiring check.
+      - name: All-jobs-passed verdict self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_all_jobs_passed.sh --self-test
 
       # The fresh-install broadcast barrier every Android lane installs through.
       # Against a stub device: a fresh install is checked, then followed by a

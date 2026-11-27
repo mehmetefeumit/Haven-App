@@ -27,9 +27,19 @@
 #   release-build.yml  candidate_artifact: the EXACT signed APKs about to be
 #                      published, with their .sha256 sidecars. The publish job
 #                      compares its own download against `tested_sha256`.
-#   candidate_release_tag: a published release's APKs, to prove the gate on a
-#                      known build (v0.1.14 red naming WorkDatabase_Impl;
-#                      see docs/LAUNCH_GATE.md "Proving the gate").
+#   launch-gate-android-dispatch.yml
+#                      by hand, to prove the gate: candidate_release_tag, a
+#                      published release's APKs (v0.1.14 red naming
+#                      WorkDatabase_Impl; see docs/LAUNCH_GATE.md "Proving the
+#                      gate"), or empty to build its branch, after the
+#                      Android Gradle dependency job that a build needs.
+#
+# Building (ci.yml, and the dispatch wrapper with no tag) needs the calling
+# run's `gradle-deps` artifact (android-gradle-deps.yml) and builds offline
+# from it. This file declares no dependency job of its own: its workflow-level
+# `permissions: contents: read` could not grant the `actions: read` that job
+# needs, and release-build.yml, which hands over its APKs, must need nothing
+# new to call it.
 #
 # Docs: docs/LAUNCH_GATE.md.
 #
@@ -65,15 +75,6 @@ on:
           one `<sha256>  <basename>` line per APK, sorted, joined with `;` —
           set only when both launch jobs passed.
         value: ${{ jobs.tested.outputs.tested_sha256 }}
-  # By hand, to prove the gate: v0.1.14 must be red; empty builds the
-  # checked-out tree, as a pull request does, and a fixed tree must be green.
-  workflow_dispatch:
-    inputs:
-      candidate_release_tag:
-        description: A published release whose APKs are the candidate (empty builds this branch).
-        type: string
-        default: ''
-        required: false
 
 permissions:
   contents: read
@@ -86,9 +87,10 @@ jobs:
     # step below passes no HAVEN_LIVE_SYNC define on purpose.
     #
     # No emulator here. The cap clears the sum of the step caps: upgrade
-    # sources 5 + Setup Flutter 15 + Gradle cache 2 + build 40 + verify 5 +
-    # prepare 5 + upload 5 = 77, plus the uncapped setup (free disk, Java,
-    # Rust, cargo cache, pub get, the artifact download), rounded to 90.
+    # sources 5 + Fetch 5 and Install 2 this run's Gradle dependencies + Setup
+    # Flutter 15 + build 40 + verify 5 + prepare 5 + upload 5 = 82, plus the
+    # uncapped setup (free disk, Java, Rust, cargo cache, pub get, the
+    # candidate download), rounded to 90.
     timeout-minutes: 90
     outputs:
       has_baseline: ${{ steps.sources.outputs.has_baseline }}
@@ -128,7 +130,7 @@ jobs:
           workspaces: |
             haven-core
           key: launch-gate-android
-          save-if: ${{ github.ref_type != 'tag' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The release to upgrade from, and the v0.1.13 baseline unless it IS that
       # release (true until a fixed release ships, v0.1.14 being yanked) or is
@@ -154,34 +156,40 @@ jobs:
           fi
           echo "has_baseline=${has_baseline}" >> "${GITHUB_OUTPUT}"
 
+      # This run's Gradle dependency set, resolved once and proved complete
+      # offline by android-gradle-deps.yml (the job this one `needs:`), so the
+      # build below runs with HAVEN_GRADLE_OFFLINE=1 and never meets the
+      # network: a Plugin Portal blip failed lanes at the build when each
+      # resolved its own (CI runs 45142774793, 45012283370). Before Setup
+      # Flutter, which pins the Flutter version the set was resolved with. Not
+      # `continue-on-error`: a lane without its set cannot build, and says so
+      # here (scripts/ci/check_gradle_build_hardened.sh).
+      - name: Fetch this run's Gradle dependencies
+        if: env.MODE == 'build'
+        timeout-minutes: 5
+        uses: actions/download-artifact@v6
+        with:
+          name: gradle-deps
+          path: ${{ runner.temp }}/gradle-deps
+
+      - name: Install this run's Gradle dependencies
+        if: env.MODE == 'build'
+        timeout-minutes: 2
+        run: bash scripts/ci/gradle_deps.sh unpack "${RUNNER_TEMP}/gradle-deps"
+
       - name: Setup Flutter
         if: env.MODE == 'build'
         timeout-minutes: 15
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: ${{ env.HAVEN_FLUTTER_VERSION }}
           cache: true
 
       - name: Get Flutter dependencies
         if: env.MODE == 'build'
         working-directory: haven
         run: flutter pub get
-
-      # Restore-only; build-check.yml is the single writer of this key
-      # (check_gradle_build_hardened.sh).
-      - name: Restore Gradle dependency cache
-        id: gradle-cache-restore
-        if: env.MODE == 'build'
-        uses: actions/cache/restore@v4
-        timeout-minutes: 2
-        continue-on-error: true
-        with:
-          path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/wrapper
-          key: gradle-deps-${{ runner.os }}-${{ hashFiles('haven/android/**/*.gradle*', 'haven/rust_builder/**/*.gradle*', 'haven/android/gradle/wrapper/gradle-wrapper.properties', 'haven/pubspec.lock') }}
-          restore-keys: |
-            gradle-deps-${{ runner.os }}-
 
       # The shipped build path, unchanged: R8, obfuscation, every ABI. No
       # keystore, so Gradle signs with this runner's debug key; the upgrade
@@ -192,6 +200,7 @@ jobs:
         timeout-minutes: 40
         working-directory: haven
         env:
+          HAVEN_GRADLE_OFFLINE: "1"
           STADIA_API_KEY: ci-launch-gate-no-tile-key
         run: |
           set -euo pipefail
@@ -314,7 +323,7 @@ jobs:
           workspaces: |
             tooling/logscan
           key: launch-gate-android-scanner
-          save-if: ${{ github.ref_type != 'tag' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Release-built before the emulator is resident; the runner seals and
       # scans with it, and so does the pre-upload scan below.
@@ -521,7 +530,7 @@ jobs:
           workspaces: |
             tooling/logscan
           key: launch-gate-android-scanner
-          save-if: ${{ github.ref_type != 'tag' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Release-built before the emulator is resident; the runner seals and
       # scans with it, and so does the pre-upload scan below.

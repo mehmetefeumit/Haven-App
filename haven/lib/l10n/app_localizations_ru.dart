@@ -1794,9 +1794,6 @@ class AppLocalizationsRu extends AppLocalizations {
       'Ваше отображаемое имя и фото видны любому в сети Nostr, а не только участникам ваших кругов. Делитесь только тем, что готовы сделать публичным.';
 
   @override
-  String get identityRefreshProfileTooltip => 'Обновить публичный профиль';
-
-  @override
   String get identityAdvancedExportError =>
       'Не удалось экспортировать секретный ключ. Пожалуйста, повторите попытку.';
 
@@ -1958,6 +1955,23 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get memberNicknameSheetClearedAnnouncement => 'Псевдоним убран';
+
+  @override
+  String get memberNicknameSheetSavedLabel => 'Псевдоним сохранён';
+
+  @override
+  String get memberNicknameSheetNoneLabel => 'Псевдоним не задан';
+
+  @override
+  String get memberNicknameSheetSavingLabel => 'Сохраняем псевдоним';
+
+  @override
+  String get memberNicknameSheetRetryLabel =>
+      'Псевдоним не сохранён. Повторить';
+
+  @override
+  String get memberNicknameSheetSaveFailedAnnouncement =>
+      'Псевдоним не сохранён, попробуйте снова';
 
   @override
   String get npubQrScanLabel => 'Отсканируйте, чтобы добавить меня';

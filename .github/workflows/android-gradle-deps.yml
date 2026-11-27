@@ -1,0 +1,113 @@
+# Reusable workflow: the Android Gradle dependency set of this run.
+#
+# One job resolves every Gradle dependency the run's Android builds can ask
+# for, proves the set complete OFFLINE, and uploads it as the artifact
+# `gradle-deps`; every Android-building job of the run needs this job, starts
+# by fetching that artifact, pins the Flutter version recorded with it, and
+# builds with HAVEN_GRADLE_OFFLINE=1 (scripts/ci/check_gradle_build_hardened.sh).
+#
+# Why: the lanes resolved their classpath over the network from a cache that
+# GitHub evicted before nearly every main run, so a Plugin Portal blip on
+# `org.gradle.kotlin.kotlin-dsl` failed whichever lane drew it at "Build E2E
+# test APK" (CI runs 45142774793, 45012283370). Now the run meets the network
+# once, here, with its own retry budget, and a main run's verified set is kept
+# as `gradle-deps-src-<key>` for 90 days, so most runs meet it not at all. The
+# whole mechanism, its source-trust rules and its proofs are in
+# scripts/ci/gradle_deps.sh.
+#
+# Failure is red, never a skip (owner decision, 2026-11-26): every Android
+# lane, and the iOS jobs that share e2e-profile.yml and build-check.yml with
+# them, is skipped, the run fails, and each caller's `verdict` job
+# (scripts/ci/check_all_jobs_passed.sh) fails with it. A human re-runs it.
+# It runs beside the ~23-minute rust gate every lane already waits for, so it
+# adds no wall-clock.
+#
+# Callers grant the calling job `permissions: {contents: read, actions: read}`:
+# reading a main run's source means listing artifacts and reading the run that
+# made them. ci.yml, e2e-nightly.yml, e2e-live-sync.yml and
+# launch-gate-android-dispatch.yml call it; release-build.yml never does — it
+# builds what it signs online, from no set (HAVEN_GRADLE_DEPS-EXEMPT there).
+
+name: Android Gradle Dependencies
+
+on:
+  workflow_call:
+
+jobs:
+  resolve:
+    name: Resolve and verify offline
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    # The sum of the step caps (Setup Flutter 15 + resolve 35 + the two
+    # uploads 10 + 10 = 70) plus the uncapped checkout, Java and pub get.
+    timeout-minutes: 80
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # gradle-daemon-jvm.properties asks for an Adoptium 21; this is it, so
+      # Gradle downloads no JDK, here or in the offline lanes.
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # Whatever stable is now. Its version is recorded with the set and every
+      # lane of the run pins it: flutter_tools' own build and the engine jars
+      # follow the Flutter revision, which is part of the set's key.
+      - name: Setup Flutter
+        timeout-minutes: 15
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: bash ../scripts/ci/retry_on_network_failure.sh -- flutter pub get
+
+      # A main run's verified set if one matches the key, else an online
+      # resolution inside a 900 s retry budget (15 min) and 12 attempts, the
+      # count high enough that the budget is what ends it; either way accepted
+      # only if havenResolveAll passes offline and the canaries prove offline
+      # and strictness hold. The cap is that budget plus a cold resolution, an
+      # offline re-verification and the pack, ~10 min measured locally.
+      - name: Resolve, verify offline and pack
+        id: produce
+        timeout-minutes: 35
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci/gradle_deps.sh produce
+
+      # Seven days: a job re-run within a week finds the set it was built for.
+      # Already zstd-compressed, so the artifact service adds no compression.
+      - name: Upload this run's Gradle dependencies
+        timeout-minutes: 10
+        uses: actions/upload-artifact@v6
+        with:
+          name: gradle-deps
+          path: ${{ runner.temp }}/gradle-deps/
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
+          overwrite: true
+
+      # Only a main run of a workflow gradle_deps.sh trusts (ci.yml on push,
+      # e2e-nightly.yml on schedule) publishes, and only a set it had to
+      # resolve or top up. `continue-on-error` because the run's own set is
+      # already uploaded: a lost source costs the next run one online
+      # resolution, never a lane.
+      - name: Keep the verified set for later runs
+        if: ${{ steps.produce.outputs.upload_source == 'true' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule') }}
+        continue-on-error: true
+        timeout-minutes: 10
+        uses: actions/upload-artifact@v6
+        with:
+          name: gradle-deps-src-${{ steps.produce.outputs.key }}
+          path: ${{ runner.temp }}/gradle-deps/
+          retention-days: 90
+          compression-level: 0
+          if-no-files-found: error

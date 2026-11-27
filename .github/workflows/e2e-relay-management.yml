@@ -77,15 +77,14 @@ jobs:
     # cap must clear the SUM of the step caps: below it, a run whose every step
     # is still inside its own cap can die here, and a job-cap death skips every
     # `if: failure()` step (e2e-android.yml states the rule). So: Build the
-    # runtime log scanner 10 + Build the fault relay 10 + Restore Gradle
-    # dependency cache 2 + Build relay-management test APKs 50 + Provision the
+    # runtime log scanner 10 + Build the fault relay 10 + Fetch 5 and Install 2 this run's Gradle dependencies + Build relay-management test APKs 50 + Provision the
     # Android SDK 11 (derived in that script) + Create AVD snapshot (on an
     # AVD-cache miss) 15 + the drive step 44 (derived there) + the most the work
     # no step cap bounds has taken, 4.4 min over all 259 runs of this job
     # (ci.yml and e2e-nightly.yml, 2026-06-09..09-11; 2.8 of it Free disk
-    # space, run 28105109440), taken as 5 = 147.
+    # space, run 28105109440) = 147 + 4.4 = 151.4 -> 152.
     # job-uncapped-minutes: 4.4 (259 runs, worst 28105109440)
-    timeout-minutes: 147
+    timeout-minutes: 152
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       HAVEN_E2E_RELAY_2: ws://10.0.2.2:7778
@@ -148,6 +147,7 @@ jobs:
           # all build the same x86_64-linux-android target so the
           # savings are equivalent.
           key: e2e-relay-management-x64
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The runtime log scanner, release-built ONCE, before Flutter and the
       # emulator are resident (same reasoning as the APK build below). Capped
@@ -173,45 +173,35 @@ jobs:
           mkdir -m 0700 -p /tmp/haven-soak/needles
           rm -f /tmp/haven-soak/needles/*.needles.decl /tmp/haven-soak/needles/*.needles.json /tmp/haven-soak/needles/*.canaries.json
 
+      # This run's Gradle dependency set, resolved once and proved complete
+      # offline by android-gradle-deps.yml (the job this one `needs:`), so the
+      # build below runs with HAVEN_GRADLE_OFFLINE=1 and never meets the
+      # network: a Plugin Portal blip failed lanes at the build when each
+      # resolved its own (CI runs 45142774793, 45012283370). Before Setup
+      # Flutter, which pins the Flutter version the set was resolved with. Not
+      # `continue-on-error`: a lane without its set cannot build, and says so
+      # here (scripts/ci/check_gradle_build_hardened.sh).
+      - name: Fetch this run's Gradle dependencies
+        timeout-minutes: 5
+        uses: actions/download-artifact@v6
+        with:
+          name: gradle-deps
+          path: ${{ runner.temp }}/gradle-deps
+
+      - name: Install this run's Gradle dependencies
+        timeout-minutes: 2
+        run: bash scripts/ci/gradle_deps.sh unpack "${RUNNER_TEMP}/gradle-deps"
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: ${{ env.HAVEN_FLUTTER_VERSION }}
           cache: true
 
       - name: Get Flutter dependencies
         working-directory: haven
         run: flutter pub get
-
-      # Gradle resolves the buildscript classpath over the network BEFORE it
-      # compiles anything, so a cold ~/.gradle makes this lane fetch hundreds of
-      # POMs — and hosted runners share egress IPs, so Maven Central rate-limits
-      # a runner nobody here provoked. CI run 35622556197 job 106414462454 lost
-      # a whole lane to HTTP 429 on the classpath, with NO test run, while twelve
-      # sibling Android lanes built the same commit with zero 429s. A warm
-      # dependency cache REMOVES those requests; the classified retry in
-      # scripts/ci/build_apk_with_retry.sh is only the backstop for what is left.
-      #
-      # Restore-only. build-check.yml is the single writer of this key, so a lane
-      # that deletes or half-fills ~/.gradle cannot publish a cache the other
-      # lanes would then restore. The `restore-keys` prefix means a changed
-      # dependency set still starts from the last good cache instead of cold.
-      #
-      # `continue-on-error` because a cache is an optimisation, and a step that
-      # overruns its own `timeout-minutes` FAILS the job: without this, a slow
-      # or unavailable cache service reddens a lane that would otherwise have
-      # built cold and run every test.
-      - name: Restore Gradle dependency cache
-        uses: actions/cache/restore@v4
-        timeout-minutes: 2
-        continue-on-error: true
-        with:
-          path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/wrapper
-          key: gradle-deps-${{ runner.os }}-${{ hashFiles('haven/android/**/*.gradle*', 'haven/rust_builder/**/*.gradle*', 'haven/android/gradle/wrapper/gradle-wrapper.properties', 'haven/pubspec.lock') }}
-          restore-keys: |
-            gradle-deps-${{ runner.os }}-
 
       # Build all five target APKs BEFORE the emulator boots, for the same
       # reason every other E2E lane builds up front: the Rust-NDK +
@@ -239,6 +229,8 @@ jobs:
         # bounds in the other E2E lanes. 40 for four APKs, plus 10 for the
         # fifth (the Rust .so is cached after the first).
         timeout-minutes: 50
+        env:
+          HAVEN_GRADLE_OFFLINE: "1"
         run: |
           set -euo pipefail
           mkdir -p /tmp/relay-mgmt-apks
@@ -304,8 +296,8 @@ jobs:
         timeout-minutes: 11
         run: bash tooling/e2e/ci/provision-android-sdk.sh 34 google_apis x86_64
 
-      - name: AVD cache
-        uses: actions/cache@v4
+      - name: Restore AVD cache
+        uses: actions/cache/restore@v4
         id: avd-cache
         with:
           path: |
@@ -556,3 +548,23 @@ jobs:
           STRFRY_CONTAINER=strfry2 STRFRY_DATA_DIR=/tmp/strfry2-data \
             bash tooling/e2e/ci/stop-strfry.sh
           pkill -f -- '--haven-fault-relay-instance=' || true
+
+      # Saved from main only (a pull request's run reads main's AVD and writes
+      # none, so it cannot evict one), and as actions/cache's own post step
+      # did: from a run that built the AVD on a miss and passed. A lost save is
+      # a cold snapshot next time, never a red lane.
+      - name: Save AVD cache
+        if: ${{ success() && github.ref == 'refs/heads/main' && steps.avd-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          # Shared with e2e-android.yml / e2e-integration.yml on
+          # purpose: the AVD snapshot is byte-identical (same
+          # api/arch/target/profile), so this lane restores the snapshot
+          # those jobs created instead of rebuilding it. Cache writes
+          # are first-writer-wins; a concurrent miss just means one save
+          # is a no-op.
+          key: avd-api34-x86_64-google_apis-single-v1

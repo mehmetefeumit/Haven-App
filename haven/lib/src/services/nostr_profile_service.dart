@@ -170,6 +170,28 @@ class NostrProfileService implements ProfileService {
   }
 
   @override
+  Future<Profile?> getOwnProfileText() async {
+    try {
+      final identity = await _identityService.getIdentity();
+      if (identity == null) return null;
+      final manager = await _circleManagerFactory();
+      final ffi = await manager.getCachedProfile(pubkeyHex: identity.pubkeyHex);
+      if (ffi == null || !ffi.isKnown) return null;
+      return Profile(
+        pubkeyHex: ffi.pubkeyHex,
+        name: ffi.name,
+        displayName: ffi.displayName,
+        about: ffi.about,
+        pictureHash: ffi.pictureSha256Hex,
+        knownAt: DateTime.fromMillisecondsSinceEpoch(ffi.fetchedAt * 1000),
+      );
+    } on Object catch (e) {
+      debugPrint('[Profile] getOwnProfileText: ${e.runtimeType}');
+      throw const ProfileServiceException('Failed to load profile');
+    }
+  }
+
+  @override
   Future<PublishedOwnProfile> fetchOwnPublishedProfile() async {
     final Identity? identity;
     try {
@@ -376,6 +398,17 @@ class NostrProfileService implements ProfileService {
       );
     }
     return profiles;
+  }
+
+  @override
+  Future<Uint8List?> getMemberPicture(String pubkeyHex) async {
+    try {
+      final manager = await _circleManagerFactory();
+      return await manager.getProfilePicture(pubkeyHex: pubkeyHex);
+    } on Object catch (e) {
+      debugPrint('[Profile] getMemberPicture: ${e.runtimeType}');
+      return null;
+    }
   }
 
   @override

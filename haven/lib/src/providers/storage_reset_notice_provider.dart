@@ -150,10 +150,10 @@ Future<void> clearCircleScopedPrefsIfResetOwes(
 /// Clears the preferences the reset left naming what it deleted: the pending
 /// leaves, the background publish history — and the user's own display name.
 ///
-/// The name is written here before it is published, and the reset deleted
-/// the record of whether it ever was, so it may be an edit the network never
-/// saw. It is dropped, and [reseedOwnNameIfOwed] takes the name the user's
-/// published profile carries instead.
+/// A name held here may be an edit the network never saw, and the reset
+/// deleted the record of whether it ever was. It is dropped, and
+/// [reseedOwnNameIfOwed] takes the name the user's published profile carries
+/// instead.
 Future<void> clearCircleScopedPrefsAfterReset(SharedPreferences prefs) async {
   await PendingLeaveService(prefs: prefs).clearAll();
   await BackgroundLocationManager.clearPublishHistoryOnIdentityDelete();
@@ -171,8 +171,11 @@ Future<void> clearCircleScopedPrefsAfterReset(SharedPreferences prefs) async {
 /// relay serves the profile, or every relay answers that none is published
 /// — the reseed stays owed, and the fetch's own miss backoff spaces the asks.
 /// A name the user has set since the update ([currentName]) wins over the
-/// published one. Nothing is asked while the build fetches no public
-/// profiles ([profilesEnabled]). Returns whether the name changed.
+/// published one; while it cannot be read, the reseed stays owed. Nothing is
+/// asked while the build fetches no public profiles ([profilesEnabled]).
+/// Returns whether the name shown may have changed: whenever the fetch served
+/// a profile or failed after asking, since it may have cached a newer own
+/// profile row, whether or not the reseed set a name.
 Future<bool> reseedOwnNameIfOwed({
   required SharedPreferences prefs,
   required Future<PublishedOwnProfile> Function() fetchPublished,
@@ -187,10 +190,10 @@ Future<bool> reseedOwnNameIfOwed({
     published = await fetchPublished();
   } on Object catch (e) {
     debugPrint('[Haven] own profile not fetched: ${e.runtimeType}');
-    return false;
+    return true;
   }
   if (!published.answered) return false;
-  var changed = false;
+  final served = published.profile != null;
   // The first two tiers of Rust's `resolve_display_name`: a blank display
   // name falls through to the name. Its two deprecated fallback keys do not
   // cross the FFI, so a profile naming the user only there reseeds nothing.
@@ -198,12 +201,17 @@ Future<bool> reseedOwnNameIfOwed({
   final name = displayName.isNotEmpty
       ? displayName
       : published.profile?.name?.trim() ?? '';
-  if (await currentName() == null && name.isNotEmpty) {
-    await setName(name);
-    changed = true;
+  final String? current;
+  try {
+    current = await currentName();
+  } on Object catch (e) {
+    // Unread is not unset: a name set since the update must not be replaced.
+    debugPrint('[Haven] own name not read: ${e.runtimeType}');
+    return served;
   }
+  if (current == null && name.isNotEmpty) await setName(name);
   await prefs.remove(kOwnNameReseedOwedKey);
-  return changed;
+  return served;
 }
 
 bool _ffiReset(String dataDir) => frb_api.resetPreV2Storage(dataDir: dataDir);

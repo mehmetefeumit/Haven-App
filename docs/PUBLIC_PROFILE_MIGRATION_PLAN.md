@@ -166,7 +166,7 @@ upstream (restructured spec). In-app visibility copy (§6.5), onboarding copy.
 |---|---|---|
 | D1 | Opt-in | Default OFF. Consent flag persisted **Rust-side** in `circles.db` (`user_settings` key `profile_publish_opt_in`); publish FFI hard-errors without it (never a silent no-op); Flutter shows the consent dialog and reads the flag via FFI. Retraction (`remove_my_profile_picture`, `delete_my_public_profile`) is never consent-gated but is a **no-op unless a profile/picture was actually published** (gated on `published_events` kind-0 row / cached Known picture — it must never mint a first public event for a never-consented pubkey). |
 | D2 | Fetch transport | **All network I/O in Rust** (relay fetch/publish via existing `RelayManager`; Blossom via HTTP in core). Flutter renders bytes via existing `HavenAvatar`/`Image.memory`; **no URL ever crosses the FFI** (download resolves the URL from the Rust cache row). The `Image.network` ban stays true and enforced. Downloads are size-capped, sha256-verified, decode-bomb re-validated, **connect-time IP-filtered (anti-SSRF)**, cached in SQLCipher. |
-| D3 | Refresh strategy | Bounded one-shot batched fetch + **per-caller staleness tiers** (`fetch_member_profiles(pubkeys, max_age_secs)`; tiers in `haven/lib/src/constants/profile_refresh_tiers.dart` — foreground 1 min, interactive 15 min, periodic 30 min, forced 0). Triggers: every transition to the foreground — each cold start and each resume, at the foreground tier, behind neither the resume debounce nor the resume-extras window (**owner-directed 2026-11-26**: the 1-min floor collapses rapid app switching; that the profile relays can infer when the user brings Haven to the foreground is accepted by the owner) — circle select, roster change (invite accept, circle created or members invited, live-sync `GroupUpdate`) at the interactive tier, a foreground-only anti-entropy sweep (45 min ±25 %), and an explicit forced refresh. Concurrent triggers coalesce (in-flight guard + one queued follow-up, strictest tier wins); a refresh that met a circle session it could not open (on Android, one the foreground service still held at a resume) runs once more when the session next opens, if the app is then in the foreground, never forced (floored at the foreground tier) and never re-armed by that run itself. Own profile rides the member batch rather than a separate forced fetch. Still **no standing subscription**; profile fetch never rides the live-sync engine and never runs in the background catch-up lane. *(Superseded the original single 6 h TTL — that value's "White Noise parity" rationale was wrong: WN has no TTL for real users, it holds a standing kind-0 subscription instead, which §1.6 forbids here.)* |
+| D3 | Refresh strategy | Bounded one-shot batched fetch + **per-caller staleness tiers** (`fetch_member_profiles(pubkeys, max_age_secs)`; tiers in `haven/lib/src/constants/profile_refresh_tiers.dart` — foreground 1 min, interactive 15 min, periodic 30 min, forced 0). Triggers: every transition to the foreground — each cold start and each resume, at the foreground tier, behind neither the resume debounce nor the resume-extras window (**owner-directed 2026-11-26**: the 1-min floor collapses rapid app switching; that the profile relays can infer when the user brings Haven to the foreground is accepted by the owner) — circle select, opening the Identity page, roster change (invite accept, circle created or members invited, live-sync `GroupUpdate`) at the interactive tier, a foreground-only anti-entropy sweep (45 min ±25 %), and an explicit forced refresh. Concurrent triggers coalesce (in-flight guard + one queued follow-up, strictest tier wins); a refresh that met a circle session it could not open (on Android, one the foreground service still held at a resume) runs once more when the session next opens, if the app is then in the foreground, never forced (floored at the foreground tier) and never re-armed by that run itself. Own profile rides the member batch rather than a separate forced fetch. Still **no standing subscription**; profile fetch never rides the live-sync engine and never runs in the background catch-up lane. *(Superseded the original single 6 h TTL — that value's "White Noise parity" rationale was wrong: WN has no TTL for real users, it holds a standing kind-0 subscription instead, which §1.6 forbids here.)* |
 | D4 | Relay sets | Reads: `discovery_relays()` (existing AUTH-free plane; fetch path never answers NIP-42 AUTH — test-pinned). Writes: user's NIP-65 **write** relays if configured (new `extract_nip65_write_relays` helper), else discovery relays. **Fail-closed** if the effective set is empty. Never a circle's relays. |
 | D5 | Blossom server | Single default `https://blossom.primal.net` (WN parity), constant in `profile/config.rs`. User-configurable override + kind-10063 publishing deferred (v2). Hash-fallback URL parsing implemented on read. |
 | D6 | Local nicknames | `contacts.display_name` becomes a purely user-set petname override (auto-populate from location messages is deleted). Precedence for **other members**: local nickname → kind-0 `display_name` → kind-0 `name` → npub prefix + initials. **The self row keeps its dedicated resolution path** (today's `isSelfMember` branch) and never goes through the generic resolver, so the member list and Identity page always agree (Flutter review F3). |
@@ -175,7 +175,7 @@ upstream (restructured spec). In-app visibility copy (§6.5), onboarding copy.
 | D9 | HTTP stack | `nostr-blossom = "=0.44.0"` for upload (the crate pins `x`/`expiration` via `BlossomAuthorizationOptions`; auth header is standard-base64-with-padding — see §2). Direct `reqwest = "=0.12.x"` with `default-features = false, features = ["rustls-tls", "stream"]` for the capped streaming download — this **unifies on nostr-blossom's existing reqwest-0.12/ring instance** (no second reqwest major, no `rustls-no-provider`, no provider-install, no aws-lc; Rust review F1). Hand-rolled BUD-02 client demoted to contingency. |
 | D10 | Logout/delete | Local rows wiped with `circles.db` (existing flow). "Delete public profile" action: blank kind-0 republish + NIP-09 deletion (reuses `build_nip09_deletion`) + Blossom DELETE; documented best-effort; no-op without a prior published profile (D1). |
 | D11 | Cutover | Build-time flag `HAVEN_PUBLIC_PROFILES` (default off, `HAVEN_LIVE_SYNC` precedent): new system lands flag-gated while old system keeps working; one final coordinated commit flips the flag and deletes the old system + its tests (coverage gate only ever sees fully-tested end states). |
-| D12 | Name source of truth | Consent OFF: display name stays local-only (SharedPreferences, today's behavior) — visible only to self; others see npub + initials. Consent ON: the **fetched kind-0 value is authoritative** for the Identity page (owner's directive); the local pref becomes a write-through fallback cache. Edits fetch-merge-publish. Multi-device caveat (protocol review): replaceable-event convergence is `created_at`-ordered, so a skewed clock on another device can transiently out-rank a later edit — accepted, one-line note in docs. **Implementation prerequisite (Flutter review F1)**: `DisplayNameCard`'s seed-once guard is relaxed to "reseed whenever `_status == saved`" (refuse to clobber `unsaved`/`saving`/`failed` only), so the slower kind-0 fetch result can land after the initial cache seed. |
+| D12 | Name source of truth | Consent OFF: display name stays local-only (SharedPreferences, today's behavior) — visible only to self; others see npub + initials. Consent ON: the **fetched kind-0 value is authoritative** for the Identity page (owner's directive); the local pref becomes a write-through fallback cache *(superseded 2026-11-26: nothing writes it through any more; it is read only while the own profile row holds no name, and dropped once it holds one — `docs/PROFILE_LOCAL_FIRST_SYNC.md`)*. Edits fetch-merge-publish. Multi-device caveat (protocol review): replaceable-event convergence is `created_at`-ordered, so a skewed clock on another device can transiently out-rank a later edit — accepted, one-line note in docs. **Implementation prerequisite (Flutter review F1)**: `DisplayNameCard`'s seed-once guard is relaxed to "reseed whenever `_status == saved`" (refuse to clobber `unsaved`/`saving`/`failed` only), so the slower kind-0 fetch result can land after the initial cache seed. |
 
 ---
 
@@ -406,8 +406,8 @@ the coverage run).
   `ref.invalidate` must not hold a disposable ref; Flutter review F5).
   `refreshAll({maxAge})` builds the **union of all circles' member pubkeys plus the
   own pubkey** (§1.7) and hands it to `refreshRoster({maxAge})`, which batches it
-  into one FFI call → invalidate the `memberProfileProvider` family +
-  `ownProfileProvider`. An in-flight guard coalesces overlapping triggers into one
+  into one FFI call → invalidate the `memberProfileProvider` family,
+  `ownProfileProvider` and `displayNameProvider`. An in-flight guard coalesces overlapping triggers into one
   fetch plus a single queued follow-up (strictest pending tier wins), so a circle
   select landing on an anti-entropy tick costs one round trip, not two.
 - Refresh triggers: every transition to the foreground at `profileForegroundMaxAge`
@@ -419,10 +419,13 @@ the coverage run).
   (`invitation_card.dart` accept path, `name_circle_page.dart`,
   `add_member_page.dart` + `onGroupUpdated` in `service_providers.dart`), the
   foreground-only anti-entropy timer (4th timer in
-  `maintenance_scheduler_provider.dart`), and the forced refreshes of the
-  "Refresh circles" action on `circles_page.dart` and the Identity-page refresh
-  icon (the union, never an own-profile-only fetch, §1.7). No trigger runs in the
-  background catch-up lane.
+  `maintenance_scheduler_provider.dart`), and the forced "Refresh circles" action
+  on `circles_page.dart`. Opening the Identity page (`identity_page.dart`
+  `initState`) runs the same union refresh at `profileInteractiveMaxAge` — the
+  union, never an own-profile-only fetch (§1.7); its manual refresh icon was
+  removed 2026-11-26 (owner-directed: the page keeps itself current, and an
+  own-pubkey-only REQ would label the local user among the union requests). No
+  trigger runs in the background catch-up lane.
 
 ### 6.3 UI
 
@@ -478,8 +481,9 @@ avatar branch), `_ingestAvatar` + its 3 call sites and `onAvatarComplete` plumbi
 **and its `||`-branch consumer in `location_sharing_provider.dart:71-75`** (Flutter
 review F8b), `DecryptedLocation.displayName`, `background_location_task.dart`'s
 display-name read + `encryptLocation` param, `CircleService`'s avatar interface
-sections + `mock_circle_service.dart`'s avatar overrides. `displayNameProvider`/
-`IdentityService` name storage stays (local fallback + consent-OFF path, D12).
+sections + `mock_circle_service.dart`'s avatar overrides. `IdentityService`'s
+local name storage stays, as the fallback `displayNameProvider` reads only while
+the own profile row holds no name (D12, as superseded 2026-11-26).
 
 ### 6.5 l10n
 

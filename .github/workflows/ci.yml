@@ -12,10 +12,13 @@
 #                          E2E is a functional signal, not a coverage signal)
 #   5. Build verification— debug builds for every mobile target
 #
-# All E2E lanes run in PARALLEL (each `needs:` only rust; the soak lane only
-# rust-tooling, which writes its cache), so PR wall-clock is bounded by the
-# slowest lane, not the sum. haven-core's suite gates no lane: it runs in
-# rust-suite (stable, uninstrumented) and in coverage (pinned, instrumented).
+# All E2E lanes run in PARALLEL (each `needs:` only rust, and every Android
+# lane also gradle-deps, the run's offline Gradle dependency set, which runs
+# beside rust; the soak lane only rust-tooling, which writes its cache on main
+# and restores it everywhere), so PR wall-clock is bounded by the slowest lane,
+# not the sum. haven-core's suite gates no lane: it runs in rust-suite (stable,
+# uninstrumented) and in coverage (pinned, instrumented). The last job,
+# `verdict`, is red unless every other job succeeded.
 
 name: CI
 
@@ -108,6 +111,21 @@ jobs:
     name: Localization
     uses: ./.github/workflows/l10n-check.yml
 
+  # The run's Android Gradle dependency set (android-gradle-deps.yml): resolved
+  # and proved complete OFFLINE once, so every Android lane and Debug Builds,
+  # which need it, build offline and can no longer lose a run to a Plugin
+  # Portal or Maven Central blip at the build (CI runs 45142774793,
+  # 45012283370). It runs beside `rust`, which every lane already waits for,
+  # so it adds no wall-clock. If it fails the lanes skip and `verdict` below
+  # is red: re-run it, never merge past it. `actions: read` to reuse a main
+  # run's verified set, kept as an artifact.
+  gradle-deps:
+    name: Android Gradle Dependencies
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/android-gradle-deps.yml
+
   # ---------------------------------------------------------------------------
   # Stage 4 — end-to-end suites. Each lane boots the real app (Android AVD or
   # iOS simulator) against hermetic infrastructure (strfry relay, and a
@@ -129,7 +147,7 @@ jobs:
   # launches the tag's exact APKs, and a simulator build of the tag's tree.
   launch-gate-android:
     name: Launch Gate (Android)
-    needs: [rust]
+    needs: [rust, gradle-deps]
     uses: ./.github/workflows/launch-gate-android.yml
 
   launch-gate-ios:
@@ -148,7 +166,7 @@ jobs:
   # the rollback path unproven.
   e2e-android:
     name: E2E Core Flow (Android)
-    needs: [rust]
+    needs: [rust, gradle-deps]
     uses: ./.github/workflows/e2e-android.yml
 
   # Same core flow on a booted iOS simulator against a host-native relay
@@ -165,7 +183,7 @@ jobs:
   # alongside the poll path above.
   e2e-android-live-sync:
     name: E2E Core Flow (Android, live-sync)
-    needs: [rust]
+    needs: [rust, gradle-deps]
     uses: ./.github/workflows/e2e-android.yml
     with:
       live_sync: true
@@ -183,7 +201,7 @@ jobs:
   # relay per target.
   e2e-integration:
     name: E2E Integration Tests (Android)
-    needs: [rust]
+    needs: [rust, gradle-deps]
     uses: ./.github/workflows/e2e-integration.yml
 
   # Proves a user-customized relay set is honored, against TWO distinct
@@ -191,7 +209,7 @@ jobs:
   # from "published to default").
   e2e-relay-management:
     name: E2E Relay Management (Android)
-    needs: [rust]
+    needs: [rust, gradle-deps]
     uses: ./.github/workflows/e2e-relay-management.yml
 
   # Runtime proof of the Android background catch-up worker: cold isolate
@@ -202,7 +220,7 @@ jobs:
   # entry.
   e2e-background-catchup:
     name: E2E Background Catch-up (Android)
-    needs: [rust]
+    needs: [rust, gradle-deps]
     uses: ./.github/workflows/e2e-background-catchup.yml
 
   # Runtime proof that Android background sharing comes back with no UI launch
@@ -212,7 +230,7 @@ jobs:
   # foreground service is alive.
   e2e-android-resume:
     name: E2E Android Resume
-    needs: [rust]
+    needs: [rust, gradle-deps]
     uses: ./.github/workflows/e2e-android-resume.yml
 
   # Runtime proof that the Android foreground service actually PUBLISHES while
@@ -231,7 +249,7 @@ jobs:
   # deleted gate until 2026-09-09.
   e2e-fgs-publish:
     name: E2E FGS Publish (Android)
-    needs: [rust]
+    needs: [rust, gradle-deps]
     uses: ./.github/workflows/e2e-fgs-publish.yml
 
   # Runtime proof of the REAL location stack (backlog B3): no
@@ -243,7 +261,7 @@ jobs:
   # constant.
   e2e-real-gps:
     name: E2E Real GPS (Android)
-    needs: [rust]
+    needs: [rust, gradle-deps]
     uses: ./.github/workflows/e2e-real-gps.yml
 
   # Runtime proof that a +/-6h device wall-clock jump does not silently kill
@@ -255,7 +273,7 @@ jobs:
   # real rather than self-consistent.
   e2e-clock-skew:
     name: E2E Clock Skew (Android)
-    needs: [rust]
+    needs: [rust, gradle-deps]
     uses: ./.github/workflows/e2e-clock-skew.yml
 
   # Runtime proof that a ROTATED KeyPackage still works for somebody ELSE.
@@ -272,7 +290,7 @@ jobs:
   # is exactly what a "did the Add succeed" check would miss.
   e2e-kp-rotation:
     name: E2E KeyPackage Rotation (Android)
-    needs: [rust]
+    needs: [rust, gradle-deps]
     uses: ./.github/workflows/e2e-kp-rotation.yml
 
   # The iOS twin of the lane above (backlog B4): `simctl privacy grant location`
@@ -297,7 +315,7 @@ jobs:
   # workflow header.
   e2e-location-provider-toggle:
     name: E2E Location Provider Toggle (Android)
-    needs: [rust]
+    needs: [rust, gradle-deps]
     uses: ./.github/workflows/e2e-location-provider-toggle.yml
 
   # Runtime proof that revoking the APP's location permission mid-session
@@ -312,7 +330,7 @@ jobs:
   # also covers the per-circle scheduler the app-side checks cannot see.
   e2e-permission-revocation:
     name: E2E Permission Revocation (Android)
-    needs: [rust]
+    needs: [rust, gradle-deps]
     uses: ./.github/workflows/e2e-permission-revocation.yml
 
   # iOS CoreLocation authorization tiers (backlog B7): the same drive target run
@@ -378,7 +396,7 @@ jobs:
   # restarts an engine torn down by `_onStreamClosed`.
   e2e-network-reconnect:
     name: E2E Network Reconnect (Android)
-    needs: [rust]
+    needs: [rust, gradle-deps]
     uses: ./.github/workflows/e2e-network-reconnect.yml
 
   # The public-profile flow (kind-0 + Blossom photo) on BOTH platforms:
@@ -389,7 +407,7 @@ jobs:
   # A release gate job (scripts/ci/check_ci_verdict.sh).
   e2e-profile:
     name: E2E Public Profile (Android + iOS)
-    needs: [rust]
+    needs: [rust, gradle-deps]
     uses: ./.github/workflows/e2e-profile.yml
 
   # The Tier-1 soak rig: several whole Haven devices in ONE process against
@@ -415,5 +433,66 @@ jobs:
 
   build:
     name: Debug Builds
-    needs: [rust, guards]
+    needs: [rust, guards, gradle-deps]
     uses: ./.github/workflows/build-check.yml
+
+  # ---------------------------------------------------------------------------
+  # The verdict: red unless every job above succeeded. A job whose `needs:`
+  # failed is SKIPPED, and a skipped job passes a required status check, so a
+  # run whose Gradle dependency job failed would otherwise skip every Android
+  # lane and read as passed. This is the one check a branch rule should
+  # require. scripts/ci/check_all_jobs_passed.sh holds its `needs:` to every
+  # other job here.
+  # ---------------------------------------------------------------------------
+
+  verdict:
+    name: All jobs passed
+    if: always()
+    needs:
+      - rust
+      - rust-suite
+      - rust-tooling
+      - flutter
+      - cross-compile
+      - coverage
+      - dependency-audit
+      - guards
+      - localization
+      - gradle-deps
+      - launch-gate-android
+      - launch-gate-ios
+      - e2e-android
+      - e2e-ios
+      - e2e-android-live-sync
+      - e2e-ios-live-sync
+      - e2e-integration
+      - e2e-relay-management
+      - e2e-background-catchup
+      - e2e-android-resume
+      - e2e-fgs-publish
+      - e2e-real-gps
+      - e2e-clock-skew
+      - e2e-kp-rotation
+      - e2e-ios-real-gps
+      - e2e-location-provider-toggle
+      - e2e-permission-revocation
+      - e2e-ios-auth-tier
+      - e2e-ios-background-publish
+      - e2e-network-reconnect
+      - e2e-profile
+      - soak-core-pr
+      - build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: scripts/ci
+
+      - name: Every job this run needs succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: bash scripts/ci/check_all_jobs_passed.sh --judge

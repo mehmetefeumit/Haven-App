@@ -896,6 +896,10 @@ class MockCircleService implements CircleService {
   /// Whether [setContactDisplayName] should throw an exception.
   bool shouldThrowOnSetContactDisplayName = false;
 
+  /// When set, [setContactDisplayName] waits on it before writing (or
+  /// throwing), so a test can observe the in-flight state.
+  Completer<void>? setContactDisplayNameGate;
+
   /// Whether [getContactDisplayName] should throw an exception.
   bool shouldThrowOnGetContactDisplayName = false;
 
@@ -914,6 +918,7 @@ class MockCircleService implements CircleService {
     String? displayName,
   }) async {
     methodCalls.add('setContactDisplayName');
+    await setContactDisplayNameGate?.future;
     if (shouldThrowOnSetContactDisplayName) {
       throw const CircleServiceException('Mock setContactDisplayName error');
     }

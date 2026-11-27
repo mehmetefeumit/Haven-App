@@ -4,7 +4,6 @@
 /// - Profile photo (view / edit / remove) and an end-to-end-encryption note
 /// - Display name with persistent inline save state
 /// - QR code subpage for sharing the public key
-/// - Photo-sharing subpage (send / receive avatars, data saver)
 /// - Entry point to the [IdentityAdvancedPage] (raw keys, secret export)
 /// - Identity deletion (behind Advanced)
 library;
@@ -12,13 +11,11 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
-import 'package:haven/src/constants/feature_flags.dart';
 import 'package:haven/src/constants/profile_refresh_tiers.dart';
 import 'package:haven/src/pages/identity_advanced_page.dart';
 import 'package:haven/src/pages/settings/qr_code_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
-import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/profile_refresh_trigger.dart';
 import 'package:haven/src/widgets/common/directional_arrow.dart';
@@ -39,30 +36,24 @@ class IdentityPage extends ConsumerStatefulWidget {
 
 class _IdentityPageState extends ConsumerState<IdentityPage> {
   @override
+  void initState() {
+    super.initState();
+    // Opening the page is intent to see the own profile, so it pulls an edit
+    // another device made like the other intent triggers do: through the UNION
+    // batch, where the own pubkey is asked like any member's, never the
+    // own-profile fetch, which asks every profile relay for it alone (§1.7).
+    // At the interactive tier an own profile fetched under 15 minutes ago is
+    // not asked again, so such an edit can wait for the next refresh.
+    triggerProfileRefresh(ref, maxAge: profileInteractiveMaxAge);
+  }
+
+  @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final identityAsync = ref.watch(identityNotifierProvider);
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text(l10n.identityTitle),
-        actions: [
-          if (publicProfilesEnabled)
-            IconButton(
-              key: WidgetKeys.identityRefreshButton,
-              icon: const Icon(LucideIcons.refreshCw),
-              tooltip: l10n.identityRefreshProfileTooltip,
-              // Deliberately the UNION refresh, not an own-pubkey-only fetch:
-              // a single-author kind-0 REQ to the same discovery relays labels
-              // which pubkey in every other (unlabelled) union request is the
-              // local user, letting a relay reconstruct the co-membership
-              // cluster §1.7 exists to prevent. `refreshRoster` invalidates
-              // `ownProfileProvider`, so this page still updates.
-              onPressed: () =>
-                  triggerProfileRefresh(ref, maxAge: profileForceMaxAge),
-            ),
-        ],
-      ),
+      appBar: AppBar(title: Text(l10n.identityTitle)),
       body: identityAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (error, _) {

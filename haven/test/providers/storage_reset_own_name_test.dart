@@ -183,6 +183,38 @@ void main() {
       expect(prefs.getBool(kOwnNameReseedOwedKey), isNull);
     });
 
+    test('a fetch that may have cached a newer own row refreshes the name '
+        'shown, even when the reseed sets none', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      await _clearAfterReset(prefs);
+      await _identity().setDisplayName('Chosen Since');
+
+      expect(
+        await reseed(
+          prefs,
+          fetchPublished: () async => _answer(displayName: _published),
+        ),
+        isTrue,
+        reason: 'the fetch cached what the relay served in the own row',
+      );
+      expect(
+        await _identity().getDisplayName(),
+        'Chosen Since',
+        reason: 'anti-vacuity: the reseed itself set no name',
+      );
+
+      await _clearAfterReset(prefs);
+      expect(
+        await reseed(
+          prefs,
+          fetchPublished: () async => throw StateError('after the upsert'),
+        ),
+        isTrue,
+        reason: 'a fetch that failed after asking may have cached one',
+      );
+    });
+
     test('stays owed while the relays have not settled what is '
         'published', () async {
       SharedPreferences.setMockInitialValues({});
@@ -237,6 +269,32 @@ void main() {
         ..assertNoNeedles([_pubkeyHex, 'wss://relay.secret']);
     });
 
+    test('a current name that cannot be read stays owed, replaces nothing, '
+        'and logs its type alone', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      await _clearAfterReset(prefs);
+      final logs = LogCapture.install();
+      final identity = _identity();
+
+      expect(
+        await reseedOwnNameIfOwed(
+          prefs: prefs,
+          fetchPublished: () async => _answer(displayName: _published),
+          currentName: () async =>
+              throw StateError('row of $_pubkeyHex unreadable'),
+          setName: identity.setDisplayName,
+        ),
+        isTrue,
+        reason: 'the fetch may have cached the served profile in the own row',
+      );
+      expect(prefs.getBool(kOwnNameReseedOwedKey), isTrue);
+      expect(await identity.getDisplayName(), isNull);
+      logs
+        ..assertContains('own name not read: StateError')
+        ..assertNoNeedles([_pubkeyHex, _published]);
+    });
+
     test('a blank display name falls through to the name, as Rust resolves '
         'it', () async {
       SharedPreferences.setMockInitialValues({});
@@ -264,7 +322,11 @@ void main() {
         return _answer();
       }
 
-      expect(await reseed(prefs, fetchPublished: fetch), isFalse);
+      expect(
+        await reseed(prefs, fetchPublished: fetch),
+        isTrue,
+        reason: 'the blank may have replaced the name the own row held',
+      );
       expect(await _identity().getDisplayName(), isNull);
       expect(prefs.getBool(kOwnNameReseedOwedKey), isNull);
       await reseed(prefs, fetchPublished: fetch);

@@ -97,6 +97,30 @@ from `pubspec.yaml`'s `version:`. Anything that is not a version is refused;
 Refuses to build if the key is missing/empty/placeholder. Emits debug symbols to
 `haven/build/symbols/` (gitignored) — keep them to de-obfuscate crash reports.
 
+**Offline:** `HAVEN_GRADLE_OFFLINE=1` builds from the local Gradle dependency
+cache alone, after provisioning (on CI) the NDK and CMake an offline AGP cannot
+install. The Android launch gate's build mode sets it over its run's verified
+set; `release-build.yml` never does. Any other value is refused.
+
+## Android Gradle builds in CI
+
+Every Android lane builds OFFLINE from one dependency set per run, resolved and
+proved complete by `.github/workflows/android-gradle-deps.yml`; a lane never
+meets the network at its Gradle build. The pieces:
+
+| Script | Role |
+|---|---|
+| `ci/gradle_deps.sh produce` | The deps job: reuse a trusted main run's verified set (`gradle-deps-src-<key>`, 90 days) or resolve online, verify it offline, run the offline and strictness canaries, pack it as the `gradle-deps` artifact (7 days). |
+| `ci/gradle_deps.sh unpack <dir>` | A lane: install the set into `~/.gradle` and pin Flutter to the version it was resolved with. |
+| `ci/gradle-resolve-all.init.gradle.kts` | `havenResolveAll`: every resolvable configuration of the composite, Flutter's included build too, non-leniently. |
+| `ci/gradle-offline.init.gradle.kts` | Offline for the build and every build it includes. |
+| `ci/build_apk_with_retry.sh` | The one build site: `HAVEN_GRADLE_OFFLINE=1` installs the offline switch for the build only, a gap is tried once and named as the deps job's; `--resolve-only` is the deps job's resolution; `--provision-only` the NDK and CMake. |
+| `ci/check_gradle_build_hardened.sh` | Holds every Gradle-building job to that shape. |
+| `ci/check_all_jobs_passed.sh` | The `verdict` job: a run whose deps job failed is red, never passed by skipped lanes. |
+
+The shell scripts take `--self-test`. `docs/E2E_TROUBLESHOOTING.md` failure modes 6 and 6b
+say what to do when the deps job or an offline build is red.
+
 ### `generate_map_style_previews.sh`
 
 Renders the Map style page's bundled preview images from Stadia's cacheable

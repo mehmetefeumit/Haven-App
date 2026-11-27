@@ -296,7 +296,12 @@ check_build_scripts() {
     [[ "${rel}" =~ ${BUILD_SCRIPT_EXEMPT_RE} ]] && continue
 
     local code
-    code="$(_code_only < "${file}" || true)"
+    # `flutter build <x> --config-only` writes Gradle's project files and
+    # compiles nothing, so it has no receive path to declare: that is why
+    # scripts/ci/gradle_deps.sh, whose only `flutter build` it is, needs no
+    # define. Structural, not a name on a list: a real build in the same
+    # script is still checked.
+    code="$(_code_only < "${file}" | grep -vE 'flutter build [a-z]+ .*--config-only' || true)"
 
     # Does this script actually compile the app? (Comments already stripped —
     # every sibling in tooling/e2e/ci discusses `flutter build apk` at length.)
@@ -619,6 +624,20 @@ set -euo pipefail
 flutter build apk --release --dart-define-from-file="${defines}"
 '
 
+  # (14b) A `--config-only` build compiles nothing (gradle_deps.sh's shape)
+  #       and needs no define; the same script compiling for real still does.
+  _script_case "a --config-only build needs no define" 0 "scripts/ci/gradle_deps.sh" \
+'#!/usr/bin/env bash
+set -euo pipefail
+(cd "${REPO_ROOT}/haven" && flutter build apk --config-only)
+'
+  _script_case "a real build beside a --config-only one still needs the define" 1 "scripts/ci/gradle_deps.sh" \
+'#!/usr/bin/env bash
+set -euo pipefail
+(cd "${REPO_ROOT}/haven" && flutter build apk --config-only)
+flutter build apk --debug
+'
+
   # (15-19) _code_only's heredoc handling, in BOTH directions. A guard that
   #         parses workflows carries workflow-shaped fixtures, so a real opener
   #         must be stripped -- but three near-miss shapes must NOT be, because
@@ -659,7 +678,7 @@ flutter build apk --debug --dart-define=HAVEN_LIVE_SYNC=false
     fail_msg "self-test failed — this guard cannot be trusted until it is fixed"
     exit 2
   fi
-  log "OK: self-test passed (25 fixtures)."
+  log "OK: self-test passed (27 fixtures)."
 }
 
 # ---------------------------------------------------------------------------

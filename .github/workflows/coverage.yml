@@ -94,6 +94,7 @@ jobs:
           workspaces: |
             haven-core
             tooling/logscan
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Before the transcript exists: the wrapper treats an absent scanner as a
       # broken guard (rc 2), never as a skipped scan. Built on the pinned
@@ -302,6 +303,7 @@ jobs:
         with:
           workspaces: tooling/logscan
           key: coverage-logscan
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Before the transcript exists: the wrapper treats an absent scanner as a
       # broken guard (rc 2), never as a skipped scan. `id` because this step

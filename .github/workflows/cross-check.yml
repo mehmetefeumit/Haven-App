@@ -27,6 +27,7 @@ jobs:
             haven-core
             haven/rust_builder
           key: cross-apple
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check macOS (aarch64-apple-darwin)
         working-directory: haven/rust_builder
@@ -55,6 +56,7 @@ jobs:
             haven-core
             haven/rust_builder
           key: cross-windows
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check Windows (x86_64-pc-windows-msvc)
         working-directory: haven/rust_builder
@@ -79,6 +81,7 @@ jobs:
             haven-core
             haven/rust_builder
           key: cross-android
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup Android NDK environment
         run: |

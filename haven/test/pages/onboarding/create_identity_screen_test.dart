@@ -19,6 +19,7 @@ import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/pages/onboarding/create_identity_screen.dart';
 import 'package:haven/src/pages/onboarding/import_nsec_screen.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
+import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/location_disclosure_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
@@ -31,6 +32,7 @@ import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/maintenance_service.dart';
 import 'package:haven/src/services/nostr_identity_service.dart';
+import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/common/storage_reset_notice_dialog.dart';
@@ -46,6 +48,15 @@ import '../../mocks/mock_relay_preferences_service.dart';
 import '../../mocks/mock_relay_service.dart';
 
 final _namePattern = RegExp(r'^[A-Z][a-z]+ [A-Z][a-z]+$');
+
+/// `onboardingDisplayNameError`, in English.
+const _nameNotSaved = 'Couldn’t save that name. Please try again.';
+
+/// Every name onboarding saved, in order: the own profile row is the save.
+List<Object?> _savedNames(MockProfileService profile) => [
+  for (final call in profile.methodCalls)
+    if (call.method == 'updateOwnProfile') call.args['displayName'],
+];
 
 /// `onboardingPhotoNotSaved`, in English.
 const _photoNotSaved =
@@ -235,10 +246,19 @@ void main() {
       await pumpFrames(tester);
 
       expect(service.createIdentityCalls, 1);
-      expect(service.setDisplayNameCalls, [name]);
+      expect(_savedNames(profile), [name]);
       expect(
-        profile.methodCalls.map((c) => c.method),
-        contains('updateOwnProfile'),
+        service.setDisplayNameCalls,
+        isEmpty,
+        reason: 'the own profile row is the save: a name held only on this '
+            'device is one no relay gets',
+      );
+      expect(
+        await ProviderScope.containerOf(
+          tester.element(find.byType(CreateIdentityScreen)),
+        ).read(displayNameProvider.future),
+        name,
+        reason: 'the saved name is the one every surface shows',
       );
       // The local save must also trigger the background publish.
       expect(
@@ -251,6 +271,39 @@ void main() {
       expect(location.requestPermissionCalled, isTrue);
     },
   );
+
+  testWidgets('a name already read as none before the save shows the saved '
+      'one after it', (tester) async {
+    final gate = Completer<void>();
+    final profile = MockProfileService()..updateOwnProfileGate = gate;
+    await pumpLocalized(
+      tester,
+      const CreateIdentityScreen(),
+      overrides: buildOverrides(
+        service: _RecordingIdentityService(),
+        profileService: profile,
+      ),
+      settle: false,
+    );
+    await tester.pump();
+    final name = prefilledName(tester);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(CreateIdentityScreen)),
+    );
+    final held = container.listen(displayNameProvider, (_, _) {});
+    addTearDown(held.close);
+
+    await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+    await pumpFrames(tester);
+    // The save is in flight and the new identity's name has been read: none.
+    expect(_savedNames(profile), [name]);
+    expect(container.read(displayNameProvider), const AsyncData<String?>(null));
+
+    gate.complete();
+    await pumpFrames(tester);
+
+    expect(container.read(displayNameProvider).valueOrNull, name);
+  });
 
   group('Android 11+ without "Allow all the time"', () {
     testWidgets('one disclosure carries the step; Agree asks foreground, then '
@@ -398,16 +451,16 @@ void main() {
     });
   });
 
-  testWidgets('an edited name is what gets saved and published', (
-    tester,
-  ) async {
-    final service = _RecordingIdentityService();
+  testWidgets('an edited name is what gets saved and published', (tester) async {
     final profile = MockProfileService();
 
     await pumpLocalized(
       tester,
       const CreateIdentityScreen(),
-      overrides: buildOverrides(service: service, profileService: profile),
+      overrides: buildOverrides(
+        service: _RecordingIdentityService(),
+        profileService: profile,
+      ),
       settle: false,
     );
     await tester.pump();
@@ -418,19 +471,24 @@ void main() {
     await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
     await pumpFrames(tester);
 
-    expect(service.setDisplayNameCalls, ['Wren Willow']);
+    expect(_savedNames(profile), ['Wren Willow']);
   });
 
   testWidgets('declining the disclosure still completes onboarding', (
     tester,
   ) async {
     final service = _RecordingIdentityService();
+    final profile = MockProfileService();
     final location = _FakeLocationService();
 
     await pumpLocalized(
       tester,
       const CreateIdentityScreen(),
-      overrides: buildOverrides(service: service, locationService: location),
+      overrides: buildOverrides(
+        service: service,
+        profileService: profile,
+        locationService: location,
+      ),
       settle: false,
     );
     await tester.pump();
@@ -444,7 +502,7 @@ void main() {
     final prefs = await SharedPreferences.getInstance();
     // Identity is still created + name saved, and onboarding completes...
     expect(service.createIdentityCalls, 1);
-    expect(service.setDisplayNameCalls, hasLength(1));
+    expect(_savedNames(profile), hasLength(1));
     expect(prefs.getBool(kOnboardingCompletedKey), isTrue);
     // ...but nothing was requested or enabled.
     expect(prefs.getBool(kBackgroundSharingKey), isNot(true));
@@ -454,12 +512,15 @@ void main() {
   testWidgets('a cleared field falls back to a generated name (never empty)', (
     tester,
   ) async {
-    final service = _RecordingIdentityService();
+    final profile = MockProfileService();
 
     await pumpLocalized(
       tester,
       const CreateIdentityScreen(),
-      overrides: buildOverrides(service: service),
+      overrides: buildOverrides(
+        service: _RecordingIdentityService(),
+        profileService: profile,
+      ),
       settle: false,
     );
     await tester.pump();
@@ -470,8 +531,8 @@ void main() {
     await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
     await pumpFrames(tester);
 
-    expect(service.setDisplayNameCalls, hasLength(1));
-    final saved = service.setDisplayNameCalls.single!;
+    expect(_savedNames(profile), hasLength(1));
+    final saved = _savedNames(profile).single! as String;
     expect(_namePattern.hasMatch(saved), isTrue, reason: 'saved: "$saved"');
   });
 
@@ -479,11 +540,12 @@ void main() {
     'resume (identity already exists): does not re-create the keypair',
     (tester) async {
       final service = _RecordingIdentityService(hasIdentityValue: true);
+      final profile = MockProfileService();
 
       await pumpLocalized(
         tester,
         const CreateIdentityScreen(),
-        overrides: buildOverrides(service: service),
+        overrides: buildOverrides(service: service, profileService: profile),
         settle: false,
       );
       await tester.pump();
@@ -496,49 +558,86 @@ void main() {
       // The pre-existing identity is detected and never overwritten...
       expect(service.createIdentityCalls, 0);
       // ...but the rest of the sequence still runs.
-      expect(service.setDisplayNameCalls, hasLength(1));
+      expect(_savedNames(profile), hasLength(1));
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getBool(kOnboardingCompletedKey), isTrue);
     },
   );
 
-  testWidgets('resume with an existing chosen name preserves it (no clobber)', (
-    tester,
-  ) async {
-    final service = _RecordingIdentityService(
-      hasIdentityValue: true,
-      existingDisplayName: 'Alice',
-    );
+  testWidgets(
+    'resume with an existing chosen name preserves it (no clobber)',
+    (tester) async {
+      final service = _RecordingIdentityService(
+        hasIdentityValue: true,
+        existingDisplayName: 'Alice',
+      );
+      final profile = MockProfileService();
 
-    await pumpLocalized(
-      tester,
-      const CreateIdentityScreen(),
-      overrides: buildOverrides(service: service),
-      settle: false,
-    );
-    // Let initState's async restore replace the random pre-fill with "Alice".
-    await tester.pump();
-    await tester.pump();
-    expect(prefilledName(tester), 'Alice');
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(service: service, profileService: profile),
+        settle: false,
+      );
+      // Let initState's async restore replace the random pre-fill with "Alice".
+      await tester.pump();
+      await tester.pump();
+      expect(prefilledName(tester), 'Alice');
 
     await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
     await pumpFrames(tester);
     await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
     await pumpFrames(tester);
 
-    // The existing name is saved as-is — not overwritten by a fresh random.
-    expect(service.setDisplayNameCalls, ['Alice']);
-  });
+      // The existing name is saved as-is — not overwritten by a fresh random.
+      expect(_savedNames(profile), ['Alice']);
+    },
+  );
+
+  testWidgets(
+    'resume after the name was saved restores the one the profile row holds',
+    (tester) async {
+      // Killed after the save, before onboarding completed: the row holds the
+      // name and nothing else does.
+      final profile = MockProfileService(
+        ownProfile: Profile(
+          pubkeyHex: _RecordingIdentityService._identity.pubkeyHex,
+          displayName: 'Wren Willow',
+        ),
+      );
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(
+          service: _RecordingIdentityService(hasIdentityValue: true),
+          profileService: profile,
+        ),
+        settle: false,
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(prefilledName(tester), 'Wren Willow');
+
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
+
+      expect(_savedNames(profile), ['Wren Willow']);
+    },
+  );
 
   testWidgets('a create failure surfaces a snackbar and does not complete', (
     tester,
   ) async {
     final service = _RecordingIdentityService(throwOnCreate: true);
+    final profile = MockProfileService();
 
     await pumpLocalized(
       tester,
       const CreateIdentityScreen(),
-      overrides: buildOverrides(service: service),
+      overrides: buildOverrides(service: service, profileService: profile),
       settle: false,
     );
     await tester.pump();
@@ -556,6 +655,7 @@ void main() {
     // No disclosure, no name save, no completion.
     expect(find.byKey(WidgetKeys.locationDisclosureAgree), findsNothing);
     expect(service.setDisplayNameCalls, isEmpty);
+    expect(_savedNames(profile), isEmpty);
     final prefs = await SharedPreferences.getInstance();
     expect(prefs.getBool(kOnboardingCompletedKey), isNot(true));
   });
@@ -661,6 +761,7 @@ void main() {
       final logs = LogCapture();
       addTearDown(logs.restore);
       final service = _RecordingIdentityService();
+      final profile = MockProfileService();
       final maintenance = _FakeMaintenance(MockRelayPreferencesService());
       maintenance.kpAnswers.add(
         () => Completer<KeyPackageMaintenanceOutcome>().future,
@@ -669,7 +770,11 @@ void main() {
       await pumpLocalized(
         tester,
         const CreateIdentityScreen(),
-        overrides: buildOverrides(service: service, maintenance: maintenance),
+        overrides: buildOverrides(
+          service: service,
+          profileService: profile,
+          maintenance: maintenance,
+        ),
         settle: false,
       );
       await tester.pump();
@@ -700,7 +805,7 @@ void main() {
 
       expect(await onboardingCompleted(), isTrue);
       expect(service.createIdentityCalls, 1);
-      expect(service.setDisplayNameCalls, hasLength(1));
+      expect(_savedNames(profile), hasLength(1));
       expect(maintenance.calls, ['relayList', 'kp', 'relayList', 'kp']);
       logs.restore();
     },
@@ -789,18 +894,27 @@ void main() {
 
   Finder cta() => find.byKey(WidgetKeys.createIdentityCta);
 
+  // The user's stored name lives in the own profile row (#86).
+  MockProfileService rowNamed(String name) => MockProfileService(
+    ownProfile: Profile(
+      pubkeyHex: _RecordingIdentityService._identity.pubkeyHex,
+      displayName: name,
+    ),
+  );
+
   testWidgets(
     'a stored name replaces the generated one once storage can be read',
     (tester) async {
-      final service = _RecordingIdentityService(
-        hasIdentityValue: true,
-        existingDisplayName: 'Alice',
-      )..hasIdentityAnswers.add(unavailable);
+      final service = _RecordingIdentityService(hasIdentityValue: true)
+        ..hasIdentityAnswers.add(unavailable);
 
       await pumpLocalized(
         tester,
         const CreateIdentityScreen(),
-        overrides: buildOverrides(service: service),
+        overrides: buildOverrides(
+          service: service,
+          profileService: rowNamed('Alice'),
+        ),
         settle: false,
       );
       await tester.pump();
@@ -811,6 +925,38 @@ void main() {
 
       expect(prefilledName(tester), 'Alice');
       expect(service.hasIdentityCalls, 2);
+    },
+  );
+
+  testWidgets(
+    'a name read as none while the key could not be read is read again from '
+    'the row once it can',
+    (tester) async {
+      final service = _RecordingIdentityService()
+        ..hasIdentityAnswers.add(unavailable);
+
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(
+          service: service,
+          profileService: rowNamed('Alice'),
+        ),
+        settle: false,
+      );
+      await tester.pump();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(CreateIdentityScreen)),
+      );
+      // Something read the identity and the name during the miss: none.
+      expect(await container.read(identityProvider.future), isNull);
+      expect(await container.read(displayNameProvider.future), isNull);
+
+      service.hasIdentityValue = true;
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump();
+
+      expect(prefilledName(tester), 'Alice');
     },
   );
 
@@ -840,6 +986,7 @@ void main() {
       expect(find.text(createError), findsOneWidget);
       expect(service.createIdentityCalls, 0);
       expect(service.setDisplayNameCalls, isEmpty);
+      expect(_savedNames(profile), isEmpty);
       expect(
         profile.methodCalls.map((c) => c.method),
         isNot(anyOf(contains('updateOwnProfile'), contains('syncOwnProfile'))),
@@ -862,15 +1009,14 @@ void main() {
   testWidgets(
     'storage readable by the tap: the stored key and stored name are used',
     (tester) async {
-      final service = _RecordingIdentityService(
-        hasIdentityValue: true,
-        existingDisplayName: 'Alice',
-      )..hasIdentityAnswers.add(unavailable);
+      final service = _RecordingIdentityService(hasIdentityValue: true)
+        ..hasIdentityAnswers.add(unavailable);
+      final profile = rowNamed('Alice');
 
       await pumpLocalized(
         tester,
         const CreateIdentityScreen(),
-        overrides: buildOverrides(service: service),
+        overrides: buildOverrides(service: service, profileService: profile),
         settle: false,
       );
       await tester.pump();
@@ -882,7 +1028,7 @@ void main() {
       await pumpFrames(tester);
 
       expect(service.createIdentityCalls, 0);
-      expect(service.setDisplayNameCalls, ['Alice']);
+      expect(_savedNames(profile), ['Alice']);
       expect(await onboardingCompleted(), isTrue);
     },
   );
@@ -890,15 +1036,14 @@ void main() {
   testWidgets('an edit made while storage could not be read wins', (
     tester,
   ) async {
-    final service = _RecordingIdentityService(
-      hasIdentityValue: true,
-      existingDisplayName: 'Alice',
-    )..hasIdentityAnswers.add(unavailable);
+    final service = _RecordingIdentityService(hasIdentityValue: true)
+      ..hasIdentityAnswers.add(unavailable);
+    final profile = rowNamed('Alice');
 
     await pumpLocalized(
       tester,
       const CreateIdentityScreen(),
-      overrides: buildOverrides(service: service),
+      overrides: buildOverrides(service: service, profileService: profile),
       settle: false,
     );
     await tester.pump();
@@ -912,7 +1057,7 @@ void main() {
     await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
     await pumpFrames(tester);
 
-    expect(service.setDisplayNameCalls, ['Wren Willow']);
+    expect(_savedNames(profile), ['Wren Willow']);
   });
 
   testWidgets(
@@ -920,11 +1065,12 @@ void main() {
     'goes on trying to read',
     (tester) async {
       final service = _RecordingIdentityService(createError: unavailable);
+      final profile = MockProfileService();
 
       await pumpLocalized(
         tester,
         const CreateIdentityScreen(),
-        overrides: buildOverrides(service: service),
+        overrides: buildOverrides(service: service, profileService: profile),
         settle: false,
       );
       await tester.pump();
@@ -934,6 +1080,7 @@ void main() {
       expect(find.text(createError), findsOneWidget);
       expect(service.createIdentityCalls, 1);
       expect(service.setDisplayNameCalls, isEmpty);
+      expect(_savedNames(profile), isEmpty);
       expect(await onboardingCompleted(), isFalse);
       expect(service.hasIdentityCalls, 2);
 
@@ -995,15 +1142,16 @@ void main() {
     (tester) async {
       final logs = LogCapture();
       addTearDown(logs.restore);
-      final service = _RecordingIdentityService(
-        hasIdentityValue: true,
-        existingDisplayName: 'Alice',
-      )..hasIdentityAnswers.add(Exception('npub1plantedplanted'));
+      final service = _RecordingIdentityService(hasIdentityValue: true)
+        ..hasIdentityAnswers.add(Exception('npub1plantedplanted'));
 
       await pumpLocalized(
         tester,
         const CreateIdentityScreen(),
-        overrides: buildOverrides(service: service),
+        overrides: buildOverrides(
+          service: service,
+          profileService: rowNamed('Alice'),
+        ),
         settle: false,
       );
       await tester.pump();
@@ -1138,17 +1286,19 @@ void main() {
     'a stored name that cannot be read at the tap is not published over: '
     'nothing is saved or published, and the next tap uses it',
     (tester) async {
-      final service = _RecordingIdentityService(
-        hasIdentityValue: true,
-        existingDisplayName: 'Alice',
-      )..hasIdentityAnswers.add(unavailable);
-      service.getDisplayNameErrors.add(Exception('prefs unreadable'));
+      final service = _RecordingIdentityService(hasIdentityValue: true)
+        ..hasIdentityAnswers.add(unavailable);
+      final profile = rowNamed('Alice')..shouldThrowOnGetOwnProfileText = true;
       final maintenance = _FakeMaintenance(MockRelayPreferencesService());
 
       await pumpLocalized(
         tester,
         const CreateIdentityScreen(),
-        overrides: buildOverrides(service: service, maintenance: maintenance),
+        overrides: buildOverrides(
+          service: service,
+          profileService: profile,
+          maintenance: maintenance,
+        ),
         settle: false,
       );
       await tester.pump();
@@ -1157,11 +1307,12 @@ void main() {
 
       expect(find.text(createError), findsOneWidget);
       expect(service.createIdentityCalls, 0);
-      expect(service.setDisplayNameCalls, isEmpty);
+      expect(_savedNames(profile), isEmpty);
       expect(maintenance.calls, isEmpty, reason: 'nothing published');
       expect(await onboardingCompleted(), isFalse);
 
-      // The re-armed retry reads the name; the snackbar goes.
+      // The row reads again; the re-armed retry reads the name from it.
+      profile.shouldThrowOnGetOwnProfileText = false;
       await tester.pump(const Duration(seconds: 5));
       await tester.pump(const Duration(seconds: 1));
       expect(prefilledName(tester), 'Alice');
@@ -1170,7 +1321,7 @@ void main() {
       await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
       await pumpFrames(tester);
 
-      expect(service.setDisplayNameCalls, ['Alice']);
+      expect(_savedNames(profile), ['Alice']);
       expect(await onboardingCompleted(), isTrue);
     },
   );
@@ -1181,34 +1332,45 @@ void main() {
     (tester) async {
       final logs = LogCapture();
       addTearDown(logs.restore);
-      final service = _RecordingIdentityService(
-        hasIdentityValue: true,
-        existingDisplayName: 'Alice',
-      );
+      final service = _RecordingIdentityService();
+      // The new identity's row cannot be read, and the device-local name
+      // behind it fails too, with nothing shown for it before.
+      final profile = MockProfileService()
+        ..shouldThrowOnGetOwnProfileText = true;
+      service.getDisplayNameErrors.add(Exception('npub1plantedplanted'));
       final maintenance = _FakeMaintenance(MockRelayPreferencesService());
 
       await pumpLocalized(
         tester,
         const CreateIdentityScreen(),
-        overrides: buildOverrides(service: service, maintenance: maintenance),
+        overrides: buildOverrides(
+          service: service,
+          profileService: profile,
+          maintenance: maintenance,
+        ),
         settle: false,
       );
       await tester.pump();
       await tester.enterText(find.byType(TextField), '');
-      service.getDisplayNameErrors.add(Exception('npub1plantedplanted'));
       await tester.tap(cta());
       await pumpFrames(tester);
 
       expect(find.text(createError), findsOneWidget);
-      expect(service.setDisplayNameCalls, isEmpty);
+      expect(service.createIdentityCalls, 1);
+      expect(_savedNames(profile), isEmpty);
       expect(maintenance.calls, isEmpty, reason: 'nothing published');
       expect(await onboardingCompleted(), isFalse);
       logs
-        ..assertContains('[Onboarding] stored name read failed: _Exception')
+        ..assertContains(
+          '[Onboarding] stored name read failed: ProfileServiceException',
+        )
         ..assertNoNeedles(['npub1plantedplanted'])
         ..restore();
 
-      // Once the snackbar has gone, the same tap goes through.
+      // Once the row reads and the snackbar has gone, the same tap goes
+      // through on the key it created: the row holds no name, so the
+      // generated one is saved.
+      profile.shouldThrowOnGetOwnProfileText = false;
       await tester.pump(const Duration(seconds: 5));
       await tester.pump(const Duration(seconds: 1));
       await tester.tap(cta());
@@ -1216,7 +1378,9 @@ void main() {
       await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
       await pumpFrames(tester);
 
-      expect(service.setDisplayNameCalls, ['Alice']);
+      expect(service.createIdentityCalls, 1);
+      final saved = _savedNames(profile).single! as String;
+      expect(_namePattern.hasMatch(saved), isTrue, reason: 'saved: "$saved"');
       expect(await onboardingCompleted(), isTrue);
     },
   );
@@ -1224,16 +1388,14 @@ void main() {
   testWidgets(
     'a name the user typed is saved even when the stored one cannot be read',
     (tester) async {
-      final service = _RecordingIdentityService(
-        hasIdentityValue: true,
-        existingDisplayName: 'Alice',
-      )..hasIdentityAnswers.add(unavailable);
-      service.getDisplayNameErrors.add(Exception('prefs unreadable'));
+      final service = _RecordingIdentityService(hasIdentityValue: true)
+        ..hasIdentityAnswers.add(unavailable);
+      final profile = rowNamed('Alice')..shouldThrowOnGetOwnProfileText = true;
 
       await pumpLocalized(
         tester,
         const CreateIdentityScreen(),
-        overrides: buildOverrides(service: service),
+        overrides: buildOverrides(service: service, profileService: profile),
         settle: false,
       );
       await tester.pump();
@@ -1243,7 +1405,7 @@ void main() {
       await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
       await pumpFrames(tester);
 
-      expect(service.setDisplayNameCalls, ['Wren Willow']);
+      expect(_savedNames(profile), ['Wren Willow']);
     },
   );
 
@@ -1294,9 +1456,9 @@ void main() {
       expect(find.byKey(WidgetKeys.locationDisclosureAgree), findsOneWidget);
       expect(manager.createCalls, 1);
       expect(storage.writes, hasLength(1));
-      // The restore's, the tap's, the identity notifier's first load and the
-      // create's: one each, as before the restore asked hasIdentity.
-      expect(storage.readCalls, 4);
+      // As many as this flow read before its restore asked hasIdentity
+      // first (measured on the same flow without it).
+      expect(storage.readCalls, 5);
     },
   );
 
@@ -1698,7 +1860,8 @@ void main() {
   });
 
   testWidgets(
-    'if the name LOCAL SAVE fails, the picked photo is NOT saved either',
+    'a name the profile row cannot take is not presented as saved: fixed '
+    'copy, nothing saved or published, and a retry saves it',
     (tester) async {
       final service = _RecordingIdentityService();
       final profile = MockProfileService();
@@ -1722,28 +1885,55 @@ void main() {
 
         await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
         await pumpFrames(tester);
-        await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
-        await pumpFrames(tester);
       } finally {
         log.restore();
       }
 
-      // The name local save threw, so the avatar's local save is gated off
-      // — no picture-only local edit is queued without the intended name.
-      final methods = profile.methodCalls.map((c) => c.method);
-      expect(methods, contains('updateOwnProfile'));
-      expect(methods, isNot(contains('setOwnAvatar')));
-      // The picked photo was lost with it, and the user is told so.
-      expect(find.text(_photoNotSaved), findsOneWidget);
+      expect(find.text(_nameNotSaved), findsOneWidget);
+      expect(find.textContaining('cannot store'), findsNothing);
       log
         ..assertContains('[Onboarding] profile name save failed: StateError')
         ..assertNoNeedles([name]);
-      // Onboarding still completes: the local-save failure is logged by
-      // `_saveOnboardingProfileLocally` and reported, and the background
-      // publish trigger is unconditional (there is nothing to publish, but
-      // triggering it is harmless — see `ProfileSyncOutcome.nothingPending`).
-      final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getBool(kOnboardingCompletedKey), isTrue);
+      expect(
+        service.setDisplayNameCalls,
+        isEmpty,
+        reason: 'a name held only on this device would never reach a relay',
+      );
+      expect(
+        await ProviderScope.containerOf(
+          tester.element(find.byType(CreateIdentityScreen)),
+        ).read(displayNameProvider.future),
+        isNull,
+        reason: 'nothing may show a name that was not saved',
+      );
+      final methods = profile.methodCalls.map((c) => c.method);
+      expect(methods, isNot(contains('setOwnAvatar')));
+      expect(methods, isNot(contains('syncOwnProfile')));
+      expect(find.byKey(WidgetKeys.locationDisclosureAgree), findsNothing);
+      expect(await onboardingCompleted(), isFalse);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).enabled,
+        isTrue,
+        reason: 'the user stays here, free to try again',
+      );
+
+      // The store takes it on the next try.
+      profile.updateOwnProfileError = null;
+      tester
+          .state<ScaffoldMessengerState>(find.byType(ScaffoldMessenger))
+          .removeCurrentSnackBar();
+      await tester.pump();
+      await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
+      await pumpFrames(tester);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await pumpFrames(tester);
+
+      expect(_savedNames(profile), [name, name]);
+      expect(profile.ownProfile?.displayName, name);
+      expect(profile.ownProfile?.pictureBytes, photoBytes);
+      expect(profile.syncOwnProfileCalls, greaterThanOrEqualTo(1));
+      expect(service.createIdentityCalls, 1);
+      expect(await onboardingCompleted(), isTrue);
     },
   );
 
@@ -1817,7 +2007,7 @@ class _RecordingIdentityService implements IdentityService {
     this.createError,
   });
 
-  final bool hasIdentityValue;
+  bool hasIdentityValue;
 
   /// When set, [hasIdentity] throws it once [hasIdentityAnswers] run out.
   Exception? hasIdentityError;
@@ -1860,12 +2050,14 @@ class _RecordingIdentityService implements IdentityService {
     }
     final error = hasIdentityError;
     if (error != null) throw error;
-    return hasIdentityValue;
+    return hasIdentityValue || createIdentityCalls > 0;
   }
 
+  // Like the real service: no identity while storage cannot be read, and
+  // none of [hasIdentity]'s scripted answers or counts spent on it.
   @override
   Future<Identity?> getIdentity() async =>
-      (hasIdentityValue || createIdentityCalls > 0) ? _identity : null;
+      hasIdentityValue || createIdentityCalls > 0 ? _identity : null;
 
   @override
   Future<Identity> createIdentity() async {

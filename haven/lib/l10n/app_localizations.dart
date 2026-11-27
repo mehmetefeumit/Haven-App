@@ -2550,12 +2550,6 @@ abstract class AppLocalizations {
   /// **'Your display name and photo are visible to anyone on the Nostr network, not just members of your circles. Share only what you\'re comfortable making public.'**
   String get profileIsPublicNoticeBody;
 
-  /// Tooltip on the Identity-page AppBar refresh action that forces a network re-fetch of the user's own public profile.
-  ///
-  /// In en, this message translates to:
-  /// **'Refresh public profile'**
-  String get identityRefreshProfileTooltip;
-
   /// Snackbar shown on the Advanced identity page when exporting the secret key fails. 'secret key' is the nsec; do not soften this wording.
   ///
   /// In en, this message translates to:
@@ -2826,16 +2820,16 @@ abstract class AppLocalizations {
   /// **'Nickname'**
   String get memberNicknameSheetLabel;
 
-  /// Button in the member detail sheet that saves the entered local nickname for a member.
+  /// Accessible label/tooltip on the circular save button beside the nickname field in the member detail sheet, when there are unsaved edits.
   ///
   /// In en, this message translates to:
-  /// **'Save Nickname'**
+  /// **'Save nickname'**
   String get memberNicknameSheetSave;
 
-  /// Button in the member detail sheet that clears the local nickname override for a member, reverting to the profile-derived name.
+  /// Accessible label/tooltip on the clear (x) icon inside the nickname field in the member detail sheet; tapping it only empties the field; the nickname is removed when the emptied field is saved with the save button.
   ///
   /// In en, this message translates to:
-  /// **'Clear Nickname'**
+  /// **'Clear nickname'**
   String get memberNicknameSheetClear;
 
   /// Screen-reader announcement when a member's local nickname is saved successfully.
@@ -2844,11 +2838,41 @@ abstract class AppLocalizations {
   /// **'Nickname saved'**
   String get memberNicknameSheetSavedAnnouncement;
 
-  /// Screen-reader announcement when a member's local nickname override is cleared.
+  /// Screen-reader announcement when saving an empty nickname field has removed a member's local nickname override.
   ///
   /// In en, this message translates to:
   /// **'Nickname cleared'**
   String get memberNicknameSheetClearedAnnouncement;
+
+  /// Accessible label/tooltip on the circular save button beside the nickname field when the field matches the member's saved local nickname.
+  ///
+  /// In en, this message translates to:
+  /// **'Nickname saved'**
+  String get memberNicknameSheetSavedLabel;
+
+  /// Accessible label/tooltip on the circular save button beside the nickname field when the field is empty and the member has no saved local nickname.
+  ///
+  /// In en, this message translates to:
+  /// **'No nickname set'**
+  String get memberNicknameSheetNoneLabel;
+
+  /// Accessible label/tooltip on the circular save button beside the nickname field while the nickname is being saved.
+  ///
+  /// In en, this message translates to:
+  /// **'Saving nickname'**
+  String get memberNicknameSheetSavingLabel;
+
+  /// Accessible label/tooltip on the circular save button beside the nickname field after saving or clearing the nickname failed; tapping it tries again.
+  ///
+  /// In en, this message translates to:
+  /// **'Nickname not saved. Retry'**
+  String get memberNicknameSheetRetryLabel;
+
+  /// Assertive screen-reader announcement when saving or clearing a member's local nickname fails.
+  ///
+  /// In en, this message translates to:
+  /// **'Nickname not saved, try again'**
+  String get memberNicknameSheetSaveFailedAnnouncement;
 
   /// Label shown beneath the QR code inviting others to scan it to add the user.
   ///
@@ -2886,7 +2910,7 @@ abstract class AppLocalizations {
   /// **'Remove'**
   String get photoHeaderRemove;
 
-  /// Accessibility label for the avatar when a photo is set and tapping it opens the full-screen viewer.
+  /// Accessibility label for a tappable profile photo that opens it full screen: the user's own photo on the Identity page, and a circle member's photo in the member detail sheet.
   ///
   /// In en, this message translates to:
   /// **'View profile photo'**
