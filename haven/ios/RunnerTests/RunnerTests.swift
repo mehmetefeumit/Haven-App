@@ -116,7 +116,7 @@ final class RunnerTests: XCTestCase {
   /// event before any scene came to the front is a location launch. The test
   /// above cannot reach the positive half, because its process was opened.
   func testOnlyTheFirstLocationEventBeforeAnyForegroundIsALocationLaunch() throws {
-    let app = type(of: try XCTUnwrap(UIApplication.shared.delegate as? NSObject))
+    let app = try type(of: XCTUnwrap(UIApplication.shared.delegate as? NSObject))
     let rule = NSSelectorFromString("startsLocationLaunchWithForegroundSeen:noted:")
     let method = try XCTUnwrap(class_getClassMethod(app, rule))
     typealias Rule = @convention(c) (AnyObject, Selector, ObjCBool, ObjCBool) -> ObjCBool

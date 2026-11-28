@@ -2237,8 +2237,10 @@ stmt_at() { grep -E -- "^[0-9]+: $1" | head -n1 | cut -d: -f1; }
 #     the front, once per process, and never after one has. Under scenes UIKit
 #     hands the app delegate no launch options and starts every launch in
 #     .background, so that event is the only witness, and the rule is pinned
-#     where each half of it lives: the set (in noteLocationLaunch, behind its
-#     guard, then the window, then the nudge to Dart), the one caller (the SLC
+#     where each half of it lives: the rule (a pure function RunnerTests
+#     drives, handed the process's own two facts), the set (in
+#     noteLocationLaunch, behind its guard, then the window, then the nudge to
+#     Dart), the one caller (the SLC
 #     hook, wired unconditionally at launch), the hook's two call sites (after
 #     the enable check, before the catch-up floor that would hide a delivery),
 #     the clear at the scene's first foreground, and the BGTask floor kept on
@@ -2252,14 +2254,21 @@ check_appdelegate_relaunch() { # <Runner dir>
   view="$(code_view "$ad")"
   all="$(for f in "$dir"/*.swift; do code_view "$f"; done)"
 
-  local note guard_line set_line begin_line notify_line
+  local note rule guard_line set_line begin_line notify_line
+  # The rule is a pure function so RunnerTests can drive both of its halves;
+  # what it is handed is pinned here, beside what it decides.
+  rule="$(fn_slice 'static func startsLocationLaunch(foregroundSeen: Bool, noted: Bool) -> Bool {' "$ad" | stmt_lines | sed -E 's/^[0-9]+: //' | grep -vxF '}' || true)"
+  [[ "$rule" == '!foregroundSeen && !noted' ]] ||
+    lfail "AppDelegate.startsLocationLaunch(foregroundSeen:noted:) is no longer exactly '!foregroundSeen && !noted' — without the first conjunct a location event in a process the user opened makes it a location launch, without the second the rule is no longer once per process"
   note="$(fn_slice 'func noteLocationLaunch()' "$ad" | stmt_lines)"
-  guard_line="$(stmt_at 'guard !foregroundSeen, !locationStreamHandler\.launchedForLocation else \{ return \}$' <<<"$note")"
+  [[ -n "$(stmt_at 'let noted = locationStreamHandler\.launchedForLocation$' <<<"$note")" ]] ||
+    lfail "noteLocationLaunch() no longer hands the rule the stream handler's own launchedForLocation as 'noted' (let noted = locationStreamHandler.launchedForLocation) — any other value lets a second location event in the same process note the launch again"
+  guard_line="$(stmt_at 'guard Self\.startsLocationLaunch\(foregroundSeen: foregroundSeen, noted: noted\) else \{ return \}$' <<<"$note")"
   set_line="$(stmt_at 'locationStreamHandler\.launchedForLocation = true$' <<<"$note")"
   begin_line="$(stmt_at 'locationStreamHandler\.beginLaunchWindow\(\)$' <<<"$note")"
   notify_line="$(stmt_at 'locationStreamHandler\.notifyLocationLaunch\(\)$' <<<"$note")"
   [[ -n "$guard_line" ]] ||
-    lfail "noteLocationLaunch() no longer guards with exactly 'guard !foregroundSeen, !locationStreamHandler.launchedForLocation else { return }' — without the first conjunct a location event in a process the user opened makes it a location launch, without the second the rule is no longer once per process"
+    lfail "noteLocationLaunch() no longer guards with exactly 'guard Self.startsLocationLaunch(foregroundSeen: foregroundSeen, noted: noted) else { return }' — the rule handed anything but the process's own foregroundSeen lets a process the user opened become a location launch"
   if [[ -z "$guard_line" || -z "$set_line" || -z "$begin_line" || -z "$notify_line" ]] ||
     (( guard_line >= set_line || set_line >= begin_line || begin_line >= notify_line )); then
     lfail "noteLocationLaunch() does not, at its own statement depth and in this order, pass its guard (line ${guard_line:-none}), set launchedForLocation (line ${set_line:-none}), open the launch window (line ${begin_line:-none}) and tell Dart (line ${notify_line:-none}) — a nudge before the set reads false, and a set without the window lets iOS suspend the process before the first publish"
@@ -3104,7 +3113,7 @@ fi
 # hide under the slack.
 # ---------------------------------------------------------------------------
 self_test() {
-  local -r SELF_TEST_FIXTURES=368
+  local -r SELF_TEST_FIXTURES=370
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -6533,10 +6542,16 @@ P3_PROVEN_BY_HOST=1" "${p3_probe}" "${p3_drive}" "${p3_constants}"
   }
 
   @objc func noteLocationLaunch() {
-    guard !foregroundSeen, !locationStreamHandler.launchedForLocation else { return }
+    let noted = locationStreamHandler.launchedForLocation
+    guard Self.startsLocationLaunch(foregroundSeen: foregroundSeen, noted: noted) else { return }
     locationStreamHandler.launchedForLocation = true
     locationStreamHandler.beginLaunchWindow()
     locationStreamHandler.notifyLocationLaunch()
+  }
+
+  @objc(startsLocationLaunchWithForegroundSeen:noted:)
+  static func startsLocationLaunch(foregroundSeen: Bool, noted: Bool) -> Bool {
+    !foregroundSeen && !noted
   }
 
   func sceneWillEnterForeground() {
@@ -6689,13 +6704,17 @@ P3_PROVEN_BY_HOST=1" "${p3_probe}" "${p3_drive}" "${p3_constants}"
   }
   _relaunch 'location launch: today'"'"'s tree passes' 0 "${fx_ad}"
   _relaunch 'location launch: a process the user opened can become one' 1 \
-    "$(_lit "${fx_ad}" 'guard !foregroundSeen, !locationStreamHandler' 'guard !locationStreamHandler')"
+    "$(_lit "${fx_ad}" '    !foregroundSeen && !noted' '    !noted')"
   _relaunch 'location launch: no longer once per process' 1 \
-    "$(_lit "${fx_ad}" 'guard !foregroundSeen, !locationStreamHandler.launchedForLocation else' 'guard !foregroundSeen else')"
+    "$(_lit "${fx_ad}" '    !foregroundSeen && !noted' '    !foregroundSeen')"
+  _relaunch 'location launch: the rule handed no foreground' 1 \
+    "$(_lit "${fx_ad}" '(foregroundSeen: foregroundSeen, noted: noted)' '(foregroundSeen: false, noted: noted)')"
+  _relaunch 'location launch: the rule handed no earlier launch' 1 \
+    "$(_lit "${fx_ad}" '    let noted = locationStreamHandler.launchedForLocation' '    let noted = false')"
   _relaunch 'location launch: the fact set above its guard' 1 \
     "$(_lit "$(_lit "${fx_ad}" '    locationStreamHandler.launchedForLocation = true
-' '')" '    guard !foregroundSeen,' '    locationStreamHandler.launchedForLocation = true
-    guard !foregroundSeen,')"
+' '')" '    guard Self.startsLocationLaunch(' '    locationStreamHandler.launchedForLocation = true
+    guard Self.startsLocationLaunch(')"
   _relaunch 'location launch: the window never opened' 1 \
     "$(_lit "${fx_ad}" '    locationStreamHandler.beginLaunchWindow()
 ' '')"

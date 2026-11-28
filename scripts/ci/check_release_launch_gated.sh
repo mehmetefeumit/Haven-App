@@ -232,6 +232,7 @@ check() { # <root>
   done
 
   local rt body n
+  # shellcheck disable=SC2016 # workflow text, expanded by the workflow's shell
   local scan='bash tooling/e2e/ci/scan-logs.sh --manifest-dir /tmp/haven-soak/needles --sink diag="${summary}" --report /tmp/ios-logscan/runner-tests.ndjson'
   rt="$(steps_with '-only-testing:RunnerTests' <"${lg}")"
   n="$(grep -c $'^\035$' <<<"${rt}" || true)"
@@ -254,7 +255,7 @@ check() { # <root>
       || err "G11: the RunnerTests step must start with set -euo pipefail"
     grep -Eq '^\(cd haven/ios && xcodebuild test -workspace Runner\.xcworkspace -scheme Runner .*-only-testing:RunnerTests .*\) >"\$\{work\}/xcodebuild\.out" 2>&1 \|\| rc=\$\?$' <<<"${body}" \
       || err "G11: xcodebuild test must write its transcript to \${work}/xcodebuild.out and keep its rc (2>&1 || rc=\$?)"
-    # shellcheck disable=SC2016 # the workflow's own shell expands these
+    # shellcheck disable=SC2016
     grep -Fxq 'passed="$(grep -cE "^[[:space:]]*Test [Cc]ase '"'.*'"' passed" "${summary}" || true)"' <<<"${body}" \
       || err "G11: the passed count must be read from the summary's passed test cases"
     # shellcheck disable=SC2016

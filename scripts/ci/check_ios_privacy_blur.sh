@@ -266,16 +266,31 @@ really going, retire this guard in the same commit."
     return 1
   fi
 
-  # --- the two bodies, structure-bound -------------------------------------
-  local add_range rem_range
-  add_range="$(method_range 'func sceneWillResignActive(' "${code}")"
+  # --- the four bodies, structure-bound ------------------------------------
+  # The connect slice starts mid-signature, at its `willConnectTo` label: the
+  # `func scene(` line names no callback, and the super call spells the label
+  # with a colon, so this substring is the signature's alone.
+  local add_range rem_range resign_range conn_range
+  add_range="$(method_range 'func coverWithPrivacyBlur(' "${code}")"
+  resign_range="$(method_range 'func sceneWillResignActive(' "${code}")"
+  conn_range="$(method_range 'willConnectTo session' "${code}")"
   rem_range="$(method_range 'func sceneDidBecomeActive(' "${code}")"
 
-  if [[ -z "${add_range}" ]]; then
+  if [[ -z "${resign_range}" ]]; then
     fail_msg "${swift##*/} has no sceneWillResignActive. That is the only \
 callback that runs before iOS renders Haven in the app switcher AND before the \
 Control-Centre/incoming-call peek; sceneDidEnterBackground has not fired \
 while the switcher card is on screen."
+    fail=1
+  fi
+  if [[ -z "${add_range}" ]]; then
+    fail_msg "${swift##*/} has no coverWithPrivacyBlur(), the one method that \
+installs the blur for both of its callers."
+    fail=1
+  fi
+  if [[ -z "${conn_range}" ]]; then
+    fail_msg "${swift##*/} has no scene(_:willConnectTo:options:), so nothing \
+covers a scene that connects in the background (link 9)."
     fail=1
   fi
   if [[ -z "${rem_range}" ]]; then
@@ -284,21 +299,30 @@ the blur back off: the app returns to the foreground behind an opaque overlay."
     fail=1
   fi
   (( fail == 0 )) || return 1
-  if [[ "${add_range}" == *EOF || "${rem_range}" == *EOF ]]; then
+  if [[ "${add_range}" == *EOF || "${rem_range}" == *EOF || "${resign_range}" == *EOF \
+    || "${conn_range}" == *EOF ]]; then
     broken_msg "a method body in ${swift##*/} never closes (unbalanced braces in \
-the code view: add=${add_range}, remove=${rem_range}). This guard slices ONE \
+the code view: add=${add_range}, remove=${rem_range}, resign=${resign_range}, \
+connect=${conn_range}). This guard slices ONE \
 method at a time on purpose, so a runaway slice would silently widen every check \
 below into a whole-file grep. Refusing to report a verdict."
     return 2
   fi
 
   local add_start add_end rem_start rem_end add_body rem_body add_top rem_top
+  local resign_start resign_end conn_start conn_end resign_body conn_body resign_top conn_top
   read -r add_start add_end <<<"${add_range}"
   read -r rem_start rem_end <<<"${rem_range}"
+  read -r resign_start resign_end <<<"${resign_range}"
+  read -r conn_start conn_end <<<"${conn_range}"
   add_body="$(sed -n "${add_start},${add_end}p" "${code}")"
   rem_body="$(sed -n "${rem_start},${rem_end}p" "${code}")"
+  resign_body="$(sed -n "${resign_start},${resign_end}p" "${code}")"
+  conn_body="$(sed -n "${conn_start},${conn_end}p" "${code}")"
   add_top="$(top_level <<<"${add_body}")"
   rem_top="$(top_level <<<"${rem_body}")"
+  resign_top="$(top_level <<<"${resign_body}")"
+  conn_top="$(top_level <<<"${conn_body}")"
 
   # The runaway that matters is not the one that reaches EOF — it is the one
   # that stays brace-BALANCED by swallowing the next method, which happens the
@@ -307,7 +331,8 @@ below into a whole-file grep. Refusing to report a verdict."
   # grep that passes on a file where the method it names has no end. A method
   # signature inside a method's own statement list is the signature of that.
   local swallowed
-  swallowed="$(grep -E '\bfunc\b' <<<"${add_top}"$'\n'"${rem_top}" || true)"
+  swallowed="$(grep -E '\bfunc\b' \
+    <<<"${add_top}"$'\n'"${rem_top}"$'\n'"${resign_top}"$'\n'"${conn_top}" || true)"
   if [[ -n "${swallowed}" ]]; then
     broken_msg "a sliced method body in ${swift##*/} contains another method \
 signature: ${swallowed//$'\n'/ | }. The braces do not balance where they should, \
@@ -320,7 +345,7 @@ be checking the wrong text. Refusing to report a verdict."
   # FlutterSceneDelegate forwards each scene callback to the engine and the
   # plugins; an override without super, or with super inside an `if`, keeps the
   # blur and leaves Dart's lifecycle a state behind.
-  if ! grep -qE '^[[:space:]]*super\.sceneWillResignActive\(' <<<"${add_top}"; then
+  if ! grep -qE '^[[:space:]]*super\.sceneWillResignActive\(' <<<"${resign_top}"; then
     fail_msg "sceneWillResignActive does not call super.sceneWillResignActive at \
 its own statement depth. FlutterSceneDelegate forwards the callback to the engine \
 and the plugins: without it Dart never hears the scene go inactive."
@@ -330,6 +355,78 @@ and the plugins: without it Dart never hears the scene go inactive."
     fail_msg "sceneDidBecomeActive does not call super.sceneDidBecomeActive at its \
 own statement depth. FlutterSceneDelegate forwards the callback to the engine and \
 the plugins: without it Dart never hears the scene come back."
+    fail=1
+  fi
+
+  # --- link 2: the resign covers, unconditionally ---------------------------
+  # Counted, not presence-tested at depth 1, for the reason the add's own
+  # statements are (link 5); and no `return` at any depth, as on become-active.
+  local n_call_body n_call_top
+  n_call_body="$(grep -cF 'coverWithPrivacyBlur()' <<<"${resign_body}" || true)"
+  n_call_top="$(grep -cE '^[[:space:]]*(self\.)?coverWithPrivacyBlur\(\)[[:space:]]*$' <<<"${resign_top}" || true)"
+  if (( n_call_top == 0 )); then
+    fail_msg "sceneWillResignActive does not call coverWithPrivacyBlur() at its \
+own statement depth, so nothing blurs the switcher card or the Control-Centre \
+peek."
+    fail=1
+  elif (( n_call_body != n_call_top )); then
+    fail_msg "sceneWillResignActive covers the window below its own statement \
+depth as well — nested in an \`if\`, a closure or a \`#if\` branch. A \
+conditional cover is an off switch with none of the shape of one."
+    fail=1
+  fi
+  if grep -qE '\breturn\b' <<<"${resign_body}"; then
+    fail_msg "sceneWillResignActive returns early. It takes no conditions: \
+whatever follows such a return is skipped in exactly the case that added it."
+    fail=1
+  fi
+
+  # --- link 9: a scene is covered from the moment it connects ---------------
+  n_call_body="$(grep -cF 'coverWithPrivacyBlur()' <<<"${conn_body}" || true)"
+  n_call_top="$(grep -cE '^[[:space:]]*(self\.)?coverWithPrivacyBlur\(\)[[:space:]]*$' <<<"${conn_top}" || true)"
+  if (( n_call_top == 0 )); then
+    fail_msg "scene(_:willConnectTo:options:) does not call coverWithPrivacyBlur() \
+at its own statement depth (link 9). A scene iOS reconnects in the background \
+shows the kept controller's last frame, and it never resigns active, so nothing \
+else covers it before iOS can snapshot it."
+    fail=1
+  elif (( n_call_body != n_call_top )); then
+    fail_msg "scene(_:willConnectTo:options:) covers the window below its own \
+statement depth as well (link 9) — under an \`if\` such as an activationState \
+test, which UIKit answers .unattached at connect, so the branch is taken never."
+    fail=1
+  fi
+  local l_cover l_win l_shown
+  l_cover="$(grep -nE '^[[:space:]]*(self\.)?coverWithPrivacyBlur\(\)' <<<"${conn_top}" | head -1 | cut -d: -f1)"
+  l_win="$(grep -nE '^[[:space:]]*self\.window *= *window[[:space:]]*$' <<<"${conn_top}" | head -1 | cut -d: -f1)"
+  l_shown="$(grep -nE '^[[:space:]]*window\.makeKeyAndVisible\(\)' <<<"${conn_top}" | head -1 | cut -d: -f1)"
+  if [[ -n "${l_cover}" ]] && [[ -z "${l_win}" ]] || (( ${l_cover:-0} > 0 && ${l_cover:-0} < ${l_win:-0} )); then
+    fail_msg "scene(_:willConnectTo:options:) covers the window before it assigns \
+self.window = window (link 9). coverWithPrivacyBlur() binds self.window and \
+does nothing while it is nil."
+    fail=1
+  fi
+  if [[ -n "${l_cover}" ]] && [[ -z "${l_shown}" ]] || (( ${l_cover:-0} > 0 && ${l_cover:-0} < ${l_shown:-0} )); then
+    fail_msg "scene(_:willConnectTo:options:) covers the window before \
+window.makeKeyAndVisible() (link 9). The window installs its root controller's \
+view when it is shown, and a blur added first can end up beneath the frame it \
+exists to cover."
+    fail=1
+  fi
+  local conn_return
+  conn_return="$(awk "${LITERAL_FREE}"'
+    function word(s, w) { return s ~ "(^|[^A-Za-z0-9_])" w "([^A-Za-z0-9_]|$)" }
+    {
+      d = depth
+      lfree = literal_free($0); o = gsub(/[{]/, "&", lfree); c = gsub(/[}]/, "&", lfree)
+      depth += o - c
+      t = $0; sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t)
+      if (word($0, "return") && !(d == 1 && t == "guard let windowScene = scene as? UIWindowScene else { return }")) print
+    }' <<<"${conn_body}")"
+  if [[ -n "${conn_return}" ]]; then
+    fail_msg "scene(_:willConnectTo:options:) returns early beyond its \
+UIWindowScene guard: ${conn_return//$'\n'/ | } (link 9). Every connect that \
+takes it shows the kept controller uncovered."
     fail=1
   fi
 
