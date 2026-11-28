@@ -1,0 +1,152 @@
+# Re-lock the Cargo roots a Dependabot bump left stale, and commit them to its
+# pull request.
+#
+# haven/rust_builder and tooling/soak path-depend on haven-core,
+# tooling/logscan and tooling/e2e/local-relay, but Dependabot re-locks only the
+# directory it updates, so `cargo metadata --locked` (rust-check.yml) refused
+# the other roots and every such pull request was red until someone re-locked
+# it by hand. What is re-locked, and why it is minimal, is
+# scripts/ci/sync_cargo_lockfiles.sh's header; this file is the trigger.
+#
+# Two jobs, so cargo never runs beside a write credential. `resolve` re-locks
+# with a read-only token and no secret, and hands the changed lockfiles on as
+# an artifact; `commit` mints a token for the lockfile-sync GitHub App, and
+# with no checkout of anything but scripts/ci and no cargo, commits them
+# through the REST API.
+#
+# `pull_request`, not `pull_request_target`: a run Dependabot triggers gets
+# Dependabot secrets and a read-only GITHUB_TOKEN, and that token could not
+# push anyway, nor would its push start CI. The app's credentials are
+# therefore DEPENDABOT secrets, visible to no run a person triggers. A push
+# with an app token does start ci.yml, whose concurrency group cancels the run
+# on the stale head. That push's actor is the app, so the `if:` below skips the
+# run it triggers: the sync cannot chain. The commit carries
+# `[dependabot skip]`, so Dependabot still rebases over it, and the sync runs
+# again on that push.
+#
+# Setup (once, by a repository admin):
+#   1. Settings > Developer settings > GitHub Apps > New GitHub App, on the
+#      account that owns this repository. Any name and homepage URL; Webhook
+#      "Active" off; Repository permissions: Contents "Read and write" (and
+#      nothing else; Metadata read-only is implied); installable "Only on this
+#      account". Create it, note its Client ID, and generate a private key.
+#   2. Install App > this account > "Only select repositories" > this one.
+#   3. This repository > Settings > Secrets and variables > Dependabot >
+#      New repository secret: LOCKFILE_SYNC_APP_CLIENT_ID = the Client ID,
+#      LOCKFILE_SYNC_APP_PRIVATE_KEY = the whole .pem file. Dependabot
+#      secrets, not Actions secrets: this workflow only runs as Dependabot.
+#   4. Comment `@dependabot recreate` on a Cargo pull request whose other
+#      roots are stale: this workflow's `commit` job pushes a Verified commit
+#      by the app's bot, and the new CI run resolves every root `--locked`.
+# Until then `commit` fails, naming the missing secrets.
+
+name: Dependabot Lockfile Sync
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+
+concurrency:
+  group: dependabot-lockfile-sync-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Re-lock every Cargo root
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]'
+      && github.actor == 'dependabot[bot]'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      changed: ${{ steps.relock.outputs.changed }}
+    steps:
+      # The branch head, not the merge commit: the re-lock is committed onto it.
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Re-lock
+        id: relock
+        run: |
+          set -euo pipefail
+          bash scripts/ci/sync_cargo_lockfiles.sh | tee "${RUNNER_TEMP}/relocked.txt"
+          stage="${RUNNER_TEMP}/relocked"
+          while IFS= read -r lock; do
+            install -D -m 0644 "${lock}" "${stage}/${lock}"
+          done <"${RUNNER_TEMP}/relocked.txt"
+          if [[ -s "${RUNNER_TEMP}/relocked.txt" ]]; then
+            echo "changed=true" >>"${GITHUB_OUTPUT}"
+          else
+            echo "Every Cargo root already agrees with its manifests; nothing to commit."
+            echo "changed=false" >>"${GITHUB_OUTPUT}"
+          fi
+
+      - name: Upload the re-locked lockfiles
+        if: ${{ steps.relock.outputs.changed == 'true' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: relocked-cargo-lockfiles
+          path: ${{ runner.temp }}/relocked
+          retention-days: 1
+          if-no-files-found: error
+
+  commit:
+    name: Commit the re-locked lockfiles
+    needs: resolve
+    if: ${{ needs.resolve.outputs.changed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Red, not skipped: without the app the pull request stays red at
+      # rust-check.yml's `--locked` step, and this names why.
+      - name: The lockfile-sync app is configured
+        env:
+          HAS_CLIENT_ID: ${{ secrets.LOCKFILE_SYNC_APP_CLIENT_ID != '' }}
+          HAS_KEY: ${{ secrets.LOCKFILE_SYNC_APP_PRIVATE_KEY != '' }}
+        run: |
+          if [[ "${HAS_CLIENT_ID}" != true || "${HAS_KEY}" != true ]]; then
+            echo "::error::The Dependabot secrets LOCKFILE_SYNC_APP_CLIENT_ID and LOCKFILE_SYNC_APP_PRIVATE_KEY are not both set, so the re-locked Cargo lockfiles cannot be committed and this pull request's --locked checks will fail. Set them up as the header of .github/workflows/dependabot-lockfile-sync.yml describes, then comment '@dependabot recreate'."
+            exit 1
+          fi
+
+      - name: Checkout the script
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/ci
+
+      - name: Download the re-locked lockfiles
+        uses: actions/download-artifact@v6
+        with:
+          name: relocked-cargo-lockfiles
+          path: ${{ runner.temp }}/relocked
+
+      # Contents write on this repository only, for this job only.
+      - name: Mint the app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.LOCKFILE_SYNC_APP_CLIENT_ID }}
+          private-key: ${{ secrets.LOCKFILE_SYNC_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Commit onto the Dependabot branch
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: bash scripts/ci/sync_cargo_lockfiles.sh --commit "${RUNNER_TEMP}/relocked"
