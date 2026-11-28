@@ -581,8 +581,9 @@ run shows:
 |---|---|
 | `testTheSceneShowsTheKeptControllerOnTheOneEngine` | UIKit built the one scene from the manifest's `SceneDelegate`; its window shows the controller `AppDelegate` keeps, on `AppDelegate.flutterEngine`, which holds the plugins (`HavenQrScanner`) — no per-scene controller, no second engine |
 | `testTheSceneRendersAFlutterFrame` | the engine started in the background draws a frame once the scene is in front |
-| `testPrivacyBlurCoversTheWindowWhileInactive` | the app-switcher blur covers the window from resign until active, is gone afterwards, and returns at the next resign |
+| `testPrivacyBlurCoversTheWindowWhileInactive` | no blur is left over the active scene (the one added when the scene connects is gone), the app-switcher blur covers the window from resign until active, is gone afterwards, and returns at the next resign |
 | `testALocationEventAfterTheForegroundIsNoLocationLaunch` | a location event in a process whose scene came to the front does not make it a location launch (OD-R1, D4) |
+| `testOnlyTheFirstLocationEventBeforeAnyForegroundIsALocationLaunch` | the launch rule's truth table (`AppDelegate.startsLocationLaunch`): only a first location event before any scene came to the front starts a location launch (D4) |
 | `testSceneManifestNamesHavenSceneDelegateAndNoStoryboard` | `UIApplicationSceneManifest` names Haven's delegate, one scene, no storyboard |
 
 The step is red when xcodebuild fails, any case fails, or no case passed

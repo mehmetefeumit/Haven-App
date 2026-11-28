@@ -471,9 +471,10 @@
 #     now prevents it: the GitHub Release, Zapstore and TestFlight wait for the
 #     launch gates, publish only the bytes the Android gate tested, the IPA
 #     load check runs before upload, and ci.yml and the verdict gate keep both
-#     gates (docs/LAUNCH_GATE.md). Each load and SDK check (the archive, the
-#     gate's candidate, build-check.yml's device build) must be an
-#     unconditional step whose whole command is the check, and the gate's
+#     gates (docs/LAUNCH_GATE.md). The archive's load check, and each SDK
+#     check (the archive, the gate's candidate, build-check.yml's device
+#     build), must be an unconditional step whose whole command is the check,
+#     and the gate's
 #     RunnerTests step must fail a failed or empty run and scan its summary
 #     before printing it.
 #
