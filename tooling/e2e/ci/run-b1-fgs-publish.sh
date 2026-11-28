@@ -349,7 +349,9 @@ readonly MIN_FIX_INTERVAL_SECS=$((PUBLISH_MIN_INTERVAL_SECS - FIX_LEAD_SECS))
 # runs out: run 46116377002 asked for 53 s ~13 s after its fix and was
 # delivered 43.6 s in, run 42802266653 asked for 129 s ~18 s after its fix and
 # was delivered 113.6 s in — each ~2-3 s past `fix + ask`, a fix's acquisition
-# time. So on a recovery registration the floor is 90 % of the interval THAT
+# time. Both ages are INFERRED, not logged (those builds printed none): from
+# when the UI's 1 s registration ended, so 46116377002's would have printed
+# -12 s or -13 s, and the run passes the floor below either way. So on a recovery registration the floor is 90 % of the interval THAT
 # registration asked for less the age of the fix it followed, both read off its
 # own `registration armed (Ns, fix -Ms)` line (see
 # `delivery_gaps_after_registration`), and never above this constant: a
@@ -359,7 +361,9 @@ readonly MIN_FIX_INTERVAL_SECS=$((PUBLISH_MIN_INTERVAL_SECS - FIX_LEAD_SECS))
 # The age is that of the newest fix the FGS itself held. A location the
 # platform obtained for another client, or one a restarted provider reported,
 # can be newer and move the platform's gate later than this floor — the cap at
-# this constant bounds what that admits. Which layer anchored run 46116377002
+# this constant bounds what that admits. The age compares the fix's Location
+# time with the wall clock while the platform gates on elapsedRealtime, so
+# drift between the two moves the floor by as much, within the same cap. Which layer anchored run 46116377002
 # is not proved: the manager drops its cached locations when the provider is
 # disabled, which is what raised the stream error, so either the restarted
 # Play-services provider reported the fix again or it applied the same rule
@@ -3305,8 +3309,9 @@ was held above the ${MIN_DELIVERY_GAP_SECS} s a steady-state registration is hel
   # --- the recovery's anchor, on run 46116377002's own lines ----------------
   # Verbatim but for two things: the `fix` field this build adds to each arm,
   # at the age it would print (the handoff cycle armed before its fix arrived;
-  # the recovery armed ~13 s after that fix; the delivery cycle just after its
-  # own), and the drive's three markers, which that job's log does not carry
+  # the recovery armed ~13 s after that fix — inferred from when the UI's 1 s
+  # registration ended, ~08:09:37.5, so -12 s or -13 s, and (71m) passes at
+  # either; the delivery cycle just after its own), and the drive's three markers, which that job's log does not carry
   # with a stamp and are placed where the sequence puts them. Play services
   # reaped its processes 6.6 s after a 66 s arm, the recovery asked for the
   # 53 s remainder, and the platform delivered 43.6 s in — at `fix + ask` plus

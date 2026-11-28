@@ -1712,8 +1712,10 @@ and never above 55 s. On S+ the platform measures a new request's first delivery
 from its last location (`docs/POWER_EFFICIENCY_PLAN.md` §2.2); a steady-state arm
 follows its fix by under a second, but a recovery arms at least
 `kStreamErrorRearmDelay` after the stream died — run 46116377002's recovery asked
-for 53 s, 13 s after its fix, and was delivered, correctly, 43.6 s after the arm, which the
-arm-anchored floor (47 s) failed. The arm line carries that age as `fix -Ns`
+for 53 s, ~13 s after its fix, and was delivered, correctly, 43.6 s after the arm, which the
+arm-anchored floor (47 s) failed. (That age is inferred, not logged — that build
+printed none — from when the UI's 1 s registration ended, ~08:09:37.5, so the line
+would have read `-12s` or `-13s`; the run passes the anchored floor either way.) The arm line carries that age as `fix -Ns`
 (`none` with no fix in hand, which leaves the arm as the anchor); a recovery arm
 without the field fails step (7) as a grammar change rather than fall back to a
 floor the platform does not apply. On every other cycle the 62 s / 55 s floors are unchanged —

@@ -1930,9 +1930,11 @@ named below rather than the Design.
   `stream-error` cycle armed it — **counted from the fix the recovery followed, not from the arm (corrected
   2026-11-28):** §2.2's delayed register and fastest-interval gate measure a new request from the platform's last
   location, which a steady-state arm follows by under a second and a recovery by at least `kStreamErrorRearmDelay`;
-  CI run 46116377002's recovery asked for 53 s, 13 s after its fix, and was delivered 43.6 s after the arm, ~3 s past
+  CI run 46116377002's recovery asked for 53 s, ~13 s after its fix, and was delivered 43.6 s after the arm, ~3 s past
   `fix + ask`, and the arm-anchored 47 s floor failed that correct run (run 42802266653's 113.6 s into a 129 s ask,
-  first read as "a restarted provider delivers early", is the same shape 18 s after its fix). The arm line now
+  first read as "a restarted provider delivers early", is the same shape ~18 s after its fix). Both ages are
+  INFERRED, not logged — those builds printed none — from when the UI's 1 s registration ended (~08:09:37.5 in
+  46116377002, so `-12s` or `-13s`); the run passes the anchored floor at either. The arm line now
   carries the fix's age (`registration armed (53s, fix -13s)`, an offset, never an instant). Which layer anchored
   that run is not proved — the manager drops its cached locations when the provider is disabled
   (`onEnabledChanged`), so either the restarted Play-services provider reported the fix again or it applies the
