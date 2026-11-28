@@ -115,7 +115,7 @@
 #
 # Usage:
 #   check_m7_native_wake_guards.sh              # check the repo
-#   check_m7_native_wake_guards.sh --self-test  # hermetic fixtures, checks 9b + 10
+#   check_m7_native_wake_guards.sh --self-test  # hermetic fixtures, checks 9b, 10, 13 + 14i
 #
 # Exit codes:
 #   0  all checks pass
@@ -137,6 +137,7 @@ MANIFEST="${REPO_ROOT}/haven/android/app/src/main/AndroidManifest.xml"
 SLC="${REPO_ROOT}/haven/ios/Runner/HavenSLCHandler.swift"
 BGT="${REPO_ROOT}/haven/ios/Runner/HavenBGTaskHandler.swift"
 APPDELEGATE="${REPO_ROOT}/haven/ios/Runner/AppDelegate.swift"
+SCENEDELEGATE="${REPO_ROOT}/haven/ios/Runner/SceneDelegate.swift"
 PLIST="${REPO_ROOT}/haven/ios/Runner/Info.plist"
 PUBSPEC="${REPO_ROOT}/haven/pubspec.yaml"
 IOS_DIR="${REPO_ROOT}/haven/ios/Runner"
@@ -1325,10 +1326,216 @@ SWIFT
   printf '\033[1;34m[check_m7_native_wake_guards]\033[0m OK: check 10 self-test passed (%d fixtures).\n' "${checked}"
 }
 
+# --- checks 13 and 14i, factored so --self-test can drive them -------------
+# Each returns 1 on a violation (reported through `fail`, so the main run's
+# FAILED latches too) and 0 otherwise.
+
+# 13 (stream handler). The location stream handler holds every coordinate the
+# device produces, so it has no network API and no native→Dart trigger but
+# one: `notifyLocationLaunch()`'s payload-free `invokeMethod("locationLaunch",
+# arguments: nil)`, which tells Dart a location launch began (OD-R1, D4
+# owner-directed 2026-11-28) and carries nothing — Dart answers by re-reading
+# status(). Exactly once, there, with nil arguments: a second invoke, one
+# with a payload, or one anywhere else is a second wake→work trigger outside
+# the payload-free runCatchup chokepoint (check 12).
+check_stream_handler_no_publish() { # <HavenLocationStreamHandler.swift>
+  local sh="$1" view surface admitted notify
+  view="$(code_view "$sh")"
+  if [[ -z "${view//[[:space:]]/}" ]]; then
+    fail "check 13: $(basename "$sh") holds no code to scan"
+    return 1
+  fi
+  surface="$(grep -nE 'URLSession|URLRequest|NWConnection|NWListener|NWBrowser|CFStream|URLSessionWebSocketTask|invokeMethod\(' <<<"$view" |
+    grep -vE '^[0-9]+: *channel\?\.invokeMethod\("locationLaunch", arguments: nil\)$' || true)"
+  admitted="$(grep -cE '^ *channel\?\.invokeMethod\("locationLaunch", arguments: nil\)$' <<<"$view" || true)"
+  notify="$(fn_slice 'func notifyLocationLaunch()' "$sh")"
+  if [[ -n "$surface" ]]; then
+    fail "$(basename "$sh") gained a network API or a native→Dart invoke: ${surface} — the location stream handler holds every coordinate the device produces and must have NO publish site. It reaches Dart through the event sink, its channel replies and the one payload-free locationLaunch nudge only; a networking call would publish from native code that no Dart consent gate can see, and any other invokeMethod would be a second wake→work trigger outside the payload-free runCatchup chokepoint (check 12)"
+    return 1
+  fi
+  if [[ "$admitted" != "1" ]] || ! grep -qF 'invokeMethod("locationLaunch", arguments: nil)' <<<"$notify"; then
+    fail "check 13: $(basename "$sh") must invoke 'locationLaunch' exactly once, payload-free, inside notifyLocationLaunch() (found ${admitted}) — Dart's start-up may already have read status() when a location launch is recognised, and nothing else tells it; anywhere else the nudge fires on what is not a launch"
+    return 1
+  fi
+  return 0
+}
+
+# 13 (scene delegate). The handlers live on AppDelegate: a scene delegate
+# lives and dies with its scene and does not exist at all on a scene-less
+# location or BGTask launch, so a handler it held or built would be missing
+# exactly when a background launch needs it.
+check_scene_delegate_holds_no_handler() { # <SceneDelegate.swift>
+  local view hits
+  view="$(code_view "$1")"
+  if ! grep -qE 'class +SceneDelegate\b' <<<"$view"; then
+    fail "check 13: $(basename "$1") declares no SceneDelegate class — this absence scan has no subject"
+    return 1
+  fi
+  hits="$(grep -nE '\b(let|var) +[A-Za-z_]*Handler\b|Haven[A-Za-z]*Handler\(' <<<"$view" || true)"
+  if [[ -n "$hits" ]]; then
+    fail "check 13: $(basename "$1") holds or builds a handler: ${hits} — every handler is AppDelegate's stored property, because a scene delegate does not exist on a scene-less background launch and dies with its scene"
+    return 1
+  fi
+  return 0
+}
+
+# 14i. AppDelegate MUST re-arm SLC + BGTask on every backgrounding (A3) —
+#      closes the launch-arm-before-mirror-write lag for upgraders and
+#      same-session toggle-enablers. Under scenes UIKit sends the background
+#      transition to the scene delegate only, so the re-arm is
+#      AppDelegate.sceneDidEnterBackground() and SceneDelegate's
+#      sceneDidEnterBackground must reach it. Both at their own statement
+#      depth. (bg-publish 9c pins the hop too; this guard proves its own
+#      promise.)
+check_background_rearm() { # <AppDelegate.swift> <SceneDelegate.swift>
+  local rc=0 hook hop
+  _depth1() { awk "${LITERAL_FREE}"'
+    { d = depth; lfree = literal_free($0); depth += gsub(/[{]/, "&", lfree) - gsub(/[}]/, "&", lfree)
+      if (d == 1) { t = $0; sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t); print t } }'; }
+  hook="$(fn_slice 'func sceneDidEnterBackground()' "$1" | _depth1)"
+  if [[ -z "$hook" ]]; then
+    fail "14i: AppDelegate has no sceneDidEnterBackground() — the iOS one-launch arming lag (A3) is not closed"
+    rc=1
+  else
+    grep -qxF 'slcHandler.startMonitoring()' <<<"$hook" ||
+      { fail "14i: AppDelegate.sceneDidEnterBackground() does not re-arm SLC (slcHandler.startMonitoring()) at its own statement depth"; rc=1; }
+    grep -qxF 'bgTaskHandler.scheduleNextCatchup()' <<<"$hook" ||
+      { fail "14i: AppDelegate.sceneDidEnterBackground() does not re-arm the BGTask (bgTaskHandler.scheduleNextCatchup()) at its own statement depth"; rc=1; }
+  fi
+  hop="$(fn_slice 'override func sceneDidEnterBackground(' "$2" | _depth1)"
+  grep -qxF 'appDelegate.sceneDidEnterBackground()' <<<"$hop" ||
+    { fail "14i: SceneDelegate.sceneDidEnterBackground no longer reaches the app delegate's re-arm (appDelegate.sceneDidEnterBackground() at its own statement depth) — UIKit sends the backgrounding to the scene only, so A3 would never run"; rc=1; }
+  return "$rc"
+}
+
+EXPECTED_NATIVE_FIXTURES=17
+
+native_self_test() {
+  local tmp fails=0 checked=0
+  tmp="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '${tmp}'" RETURN
+
+  _native_case() { # <label> <want-rc> <check> <file>=<body>...
+    local label="$1" want="$2" fn="$3" got=0 arg
+    local -a paths=()
+    shift 3
+    checked=$(( checked + 1 ))
+    for arg in "$@"; do
+      printf '%s\n' "${arg#*=}" >"${tmp}/${arg%%=*}"
+      paths+=("${tmp}/${arg%%=*}")
+    done
+    ( "${fn}" "${paths[@]}" ) >/dev/null 2>&1 || got=$?
+    if [[ "${got}" -eq "${want}" ]]; then
+      printf '  \033[1;32mPASS\033[0m %s (rc=%d)\n' "${label}" "${got}"
+    else
+      printf '  \033[1;31mFAIL\033[0m %s (want rc=%d, got rc=%d)\n' \
+        "${label}" "${want}" "${got}" >&2
+      fails=1
+    fi
+  }
+
+  printf '\033[1;34m[check_m7_native_wake_guards]\033[0m self-test: checks 13 and 14i, the native scene shape\n'
+
+  local stream='final class HavenLocationStreamHandler: NSObject, FlutterStreamHandler {
+  private var channel: FlutterMethodChannel?
+
+  func register(with messenger: FlutterBinaryMessenger) {
+    let channel = FlutterMethodChannel(name: Self.channelName, binaryMessenger: messenger)
+    self.channel = channel
+    channel.setMethodCallHandler { call, result in result(nil) }
+  }
+
+  // Never invokeMethod("locationLaunch", arguments: lastBestFix): no payload.
+  func notifyLocationLaunch() {
+    channel?.invokeMethod("locationLaunch", arguments: nil)
+  }
+}'
+  local check=check_stream_handler_no_publish f=HavenLocationStreamHandler.swift
+  _native_case 'stream handler: today'"'"'s tree passes' 0 "$check" "$f=${stream}"
+  _native_case 'stream handler: a fully commented-out file FAILS' 1 "$check" \
+    "$f=$(sed 's|^|// |' <<<"${stream}")"
+  _native_case 'stream handler: a network API FAILS' 1 "$check" \
+    "$f=${stream/  func notifyLocationLaunch() \{/  func upload() { URLSession.shared.dataTask(with: URL(string: \"x\")!).resume() \}
+  func notifyLocationLaunch() \{}"
+  _native_case 'stream handler: the nudge carries a payload FAILS' 1 "$check" \
+    "$f=${stream/    channel?.invokeMethod(\"locationLaunch\", arguments: nil)/    channel?.invokeMethod(\"locationLaunch\", arguments: lastBestFix)}"
+  _native_case 'stream handler: a second invoke of another method FAILS' 1 "$check" \
+    "$f=${stream/    channel?.invokeMethod(\"locationLaunch\", arguments: nil)/    channel?.invokeMethod(\"locationLaunch\", arguments: nil)
+    channel?.invokeMethod(\"publishNow\", arguments: nil)}"
+  _native_case 'stream handler: the nudge sent twice FAILS' 1 "$check" \
+    "$f=${stream/    channel?.invokeMethod(\"locationLaunch\", arguments: nil)/    channel?.invokeMethod(\"locationLaunch\", arguments: nil)
+    channel?.invokeMethod(\"locationLaunch\", arguments: nil)}"
+  _native_case 'stream handler: the nudge gone FAILS' 1 "$check" \
+    "$f=${stream/    channel?.invokeMethod(\"locationLaunch\", arguments: nil)/    _ = channel}"
+  _native_case 'stream handler: the nudge sent from outside notifyLocationLaunch FAILS' 1 "$check" \
+    "$f=${stream/    channel.setMethodCallHandler \{ call, result in result(nil) \}/    channel.setMethodCallHandler \{ call, result in result(nil) \}
+    channel?.invokeMethod(\"locationLaunch\", arguments: nil)}"
+
+  local scene='class SceneDelegate: FlutterSceneDelegate {
+  private var privacyBlurView: UIVisualEffectView?
+
+  private var appDelegate: AppDelegate {
+    UIApplication.shared.delegate as! AppDelegate
+  }
+
+  override func sceneDidEnterBackground(_ scene: UIScene) {
+    super.sceneDidEnterBackground(scene)
+    appDelegate.sceneDidEnterBackground()
+  }
+}'
+  check=check_scene_delegate_holds_no_handler f=SceneDelegate.swift
+  _native_case 'scene delegate: today'"'"'s tree passes' 0 "$check" "$f=${scene}"
+  _native_case 'scene delegate: a held handler FAILS' 1 "$check" \
+    "$f=${scene/  private var privacyBlurView/  private let slcHandler = AppDelegate.sharedSLC
+  private var privacyBlurView}"
+  _native_case 'scene delegate: a handler built in a callback FAILS' 1 "$check" \
+    "$f=${scene/    appDelegate.sceneDidEnterBackground()/    appDelegate.sceneDidEnterBackground()
+    HavenBGTaskHandler().scheduleNextCatchup()}"
+
+  local app='@objc class AppDelegate: FlutterAppDelegate {
+  func sceneDidEnterBackground() {
+    slcHandler.startMonitoring()
+    bgTaskHandler.scheduleNextCatchup()
+  }
+}'
+  check=check_background_rearm
+  _native_case 're-arm: today'"'"'s tree passes' 0 "$check" "AppDelegate.swift=${app}" "SceneDelegate.swift=${scene}"
+  _native_case 're-arm: the scene callback gone FAILS' 1 "$check" "AppDelegate.swift=${app}" \
+    "SceneDelegate.swift=${scene/  override func sceneDidEnterBackground(_ scene: UIScene) \{
+    super.sceneDidEnterBackground(scene)
+    appDelegate.sceneDidEnterBackground()
+  \}
+/}"
+  _native_case 're-arm: the hop nested in a branch FAILS' 1 "$check" "AppDelegate.swift=${app}" \
+    "SceneDelegate.swift=${scene/    appDelegate.sceneDidEnterBackground()/    if scene.activationState == .background \{ appDelegate.sceneDidEnterBackground() \}}"
+  _native_case 're-arm: the hook without startMonitoring FAILS' 1 "$check" \
+    "AppDelegate.swift=${app/    slcHandler.startMonitoring()
+/}" "SceneDelegate.swift=${scene}"
+  _native_case 're-arm: the hook without scheduleNextCatchup FAILS' 1 "$check" \
+    "AppDelegate.swift=${app/    bgTaskHandler.scheduleNextCatchup()
+/}" "SceneDelegate.swift=${scene}"
+  _native_case 're-arm: only in a dead applicationDidEnterBackground FAILS' 1 "$check" \
+    "AppDelegate.swift=${app/  func sceneDidEnterBackground() \{/  override func applicationDidEnterBackground(_ application: UIApplication) \{}" \
+    "SceneDelegate.swift=${scene}"
+
+  if (( checked != EXPECTED_NATIVE_FIXTURES )); then
+    printf '\033[1;31m[check_m7_native_wake_guards] FAIL:\033[0m the 13/14i self-test ran %d fixture(s) and EXPECTED_NATIVE_FIXTURES pins %d. Adding or removing a fixture is a deliberate act: change it here in the same commit.\n' \
+      "${checked}" "${EXPECTED_NATIVE_FIXTURES}" >&2
+    fails=1
+  fi
+  if (( fails )); then
+    printf '\033[1;31m[check_m7_native_wake_guards] FAIL:\033[0m self-test failed — this guard cannot be trusted until it is fixed\n' >&2
+    exit 2
+  fi
+  printf '\033[1;34m[check_m7_native_wake_guards]\033[0m OK: checks 13/14i self-test passed (%d fixtures).\n' "${checked}"
+}
+
 # --- dispatch (before any repo read, so --self-test stays hermetic) --------
 if [[ "${1:-}" == "--self-test" ]]; then
   telemetry_self_test
   log_scan_self_test
+  native_self_test
   exit 0
 fi
 if (( $# != 0 )); then
@@ -1336,7 +1543,7 @@ if (( $# != 0 )); then
   exit 2
 fi
 
-for f in "$WORKER" "$IOS_DART" "$MGR" "$MANIFEST" "$SLC" "$BGT" "$APPDELEGATE" "$PLIST" "$PUBSPEC" "$LIVE_SYNC" "$MAIN"; do
+for f in "$WORKER" "$IOS_DART" "$MGR" "$MANIFEST" "$SLC" "$BGT" "$APPDELEGATE" "$SCENEDELEGATE" "$PLIST" "$PUBSPEC" "$LIVE_SYNC" "$MAIN"; do
   [[ -f "$f" ]] || { echo "FAIL: expected M7 file not found: $f" >&2; exit 1; }
 done
 
@@ -1546,15 +1753,21 @@ done
 #     CLLocationManager and the live event sink would go with it and the iOS
 #     position stream would simply end mid-session).
 #
+#     SceneDelegate holds and builds none: it does not exist on a scene-less
+#     background launch and dies with its scene.
+#
 #     And the location stream handler, the one native file that HOLDS every
 #     coordinate the device produces, must contain NO PUBLISH SITE. Its only
 #     two ways to reach the network are a networking API of its own or a
 #     native→Dart trigger, so both are banned by name: it talks to Dart through
-#     the event sink and its channel replies ONLY. The stream handler has no
-#     publish site; a location relaunch publishes only through Dart's burst
-#     plane (OD-R1, 2026-11-26) — and the SLC and BGTask handlers stay
-#     receive-only, their ONE sanctioned trigger (`invokeMethod("runCatchup",
-#     arguments: nil)`) pinned payload-free by check 12.
+#     the event sink, its channel replies and ONE payload-free nudge,
+#     `invokeMethod("locationLaunch", arguments: nil)` in notifyLocationLaunch()
+#     (D4, 2026-11-28), which carries nothing and starts nothing itself. The
+#     stream handler has no publish site; a location relaunch publishes only
+#     through Dart's burst plane (OD-R1, 2026-11-26) — and the SLC and BGTask
+#     handlers stay receive-only, their ONE sanctioned trigger
+#     (`invokeMethod("runCatchup", arguments: nil)`) pinned payload-free by
+#     check 12.
 # ---------------------------------------------------------------------------
 code_has_e 'private +(lazy +)?(let|var) +bgTaskHandler' "$APPDELEGATE" ||
   fail "AppDelegate does not retain bgTaskHandler as a stored property"
@@ -1566,15 +1779,9 @@ code_has_e 'private +(lazy +)?(let|var) +locationStreamHandler' "$APPDELEGATE" |
 if [[ ! -f "$STREAM_HANDLER" ]]; then
   fail "check 13: expected file not found: $STREAM_HANDLER"
 else
-  stream_view="$(code_view "$STREAM_HANDLER")"
-  if [[ -z "${stream_view//[[:space:]]/}" ]]; then
-    fail "check 13: $(basename "$STREAM_HANDLER") holds no code to scan"
-  fi
-  publish_surface="$(grep -nE 'URLSession|URLRequest|NWConnection|NWListener|NWBrowser|CFStream|URLSessionWebSocketTask|invokeMethod\(' <<<"$stream_view" || true)"
-  if [[ -n "$publish_surface" ]]; then
-    fail "$(basename "$STREAM_HANDLER") gained a network API or a native→Dart invoke: ${publish_surface} — the location stream handler holds every coordinate the device produces and must have NO publish site. It reaches Dart through the event sink and its channel replies only; a networking call would publish from native code that no Dart consent gate can see, and an invokeMethod would be a second wake→work trigger outside the payload-free runCatchup chokepoint (check 12)"
-  fi
+  check_stream_handler_no_publish "$STREAM_HANDLER" || FAILED=1
 fi
+check_scene_delegate_holds_no_handler "$SCENEDELEGATE" || FAILED=1
 
 # ===========================================================================
 # RELEASED-STATE PINS (M7-E + M11 LIVE) — checks 14a-14i, and the Android
@@ -1680,18 +1887,10 @@ code_has 'writeCatchupEnabledMirror()' "$MAIN" ||
 code_has 'registerIosBackgroundCatchupHandler(' "$MAIN" ||
   fail "14h: main.dart no longer calls registerIosBackgroundCatchupHandler() — the iOS runCatchup channel is unhandled"
 
-# 14i. AppDelegate MUST re-arm SLC + BGTask in applicationDidEnterBackground
-#      (A3) — closes the launch-arm-before-mirror-write lag for upgraders and
-#      same-session toggle-enablers. Bound to the enclosing function body.
-appbg_body="$(fn_slice 'func applicationDidEnterBackground' "$APPDELEGATE")"
-if [[ -z "$appbg_body" ]]; then
-  fail "14i: AppDelegate has no applicationDidEnterBackground override — the iOS one-launch arming lag (A3) is not closed"
-else
-  grep -qF -- 'slcHandler.startMonitoring()' <<<"$appbg_body" ||
-    fail "14i: applicationDidEnterBackground does not re-arm SLC (slcHandler.startMonitoring())"
-  grep -qF -- 'bgTaskHandler.scheduleNextCatchup()' <<<"$appbg_body" ||
-    fail "14i: applicationDidEnterBackground does not re-arm the BGTask (bgTaskHandler.scheduleNextCatchup())"
-fi
+# 14i. AppDelegate MUST re-arm SLC + BGTask on every backgrounding (A3),
+#      reached from SceneDelegate.sceneDidEnterBackground — see
+#      check_background_rearm above.
+check_background_rearm "$APPDELEGATE" "$SCENEDELEGATE" || FAILED=1
 # …and didFinishLaunching schedules it on EVERY launch, a location relaunch
 # included (OD-R1, 2026-11-26): a relaunched process that iOS suspends again
 # keeps the BGTask floor. At the body's own depth, so nothing conditional
