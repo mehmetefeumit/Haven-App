@@ -80,7 +80,7 @@ checksum = "e473c725eac862e418e7c3296059e72cdb7bbfb6ffefe625a452be988b2cd44f"
 dependencies = [
  "base64",
  "jni",
- "keyring-core",
+ "keyring-core 0.7.4",
  "ndk-context",
  "thiserror 2.0.18",
  "tracing",
@@ -124,7 +124,7 @@ version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6afd4ee68bf127d37d2eca62ec6ddb5871b58722273c8b6809119a51b4042111"
 dependencies = [
- "keyring-core",
+ "keyring-core 0.7.4",
  "log",
  "security-framework",
 ]
@@ -1115,7 +1115,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1552,7 +1552,7 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "image",
- "keyring-core",
+ "keyring-core 0.7.4",
  "libsqlite3-sys",
  "log",
  "nostr",
@@ -2145,9 +2145,18 @@ dependencies = [
 
 [[package]]
 name = "keyring-core"
-version = "0.7.2"
+version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f668c4c52e5e79879d9ce68b2da363b78a378c4becae267f8cfc26c55db4ed3"
+checksum = "2d8286c3ab222af2fa9e57874fe419893d967f739c7bf1743f98a88678edbf08"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "keyring-core"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29fbf4b551298c67925f38cf341a1ada797a75f1837bdf8ae1fc8e2ebc6efb59"
 dependencies = [
  "log",
 ]
@@ -3262,7 +3271,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3559,7 +3568,7 @@ dependencies = [
  "haven-core",
  "haven-local-relay",
  "hex",
- "keyring-core",
+ "keyring-core 1.0.1",
  "log",
  "nostr",
  "nostr-relay-builder",
@@ -3605,7 +3614,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4097,10 +4106,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0136791f7c95b1f6dd99f9cc786b91bb81c3800b639b3478e561ddb7be95e5f1"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4764,7 +4773,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4821,7 +4830,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a0e26ac29479a4b7f49d46afc9893122fc345430c6307d1fb7ac0d8d066c3f54"
 dependencies = [
  "byteorder",
- "keyring-core",
+ "keyring-core 0.7.4",
  "regex",
  "windows-sys 0.61.2",
  "zeroize",
@@ -5269,7 +5278,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9eaa71bfd72ff7ee11e747174d666ff0b9fcaa4b1df94ca119e7e64703d77f1"
 dependencies = [
- "keyring-core",
+ "keyring-core 0.7.4",
  "secret-service",
  "zbus",
 ]
