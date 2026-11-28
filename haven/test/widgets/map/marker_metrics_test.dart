@@ -207,45 +207,50 @@ void main() {
     // markerGlyph does not exist yet — these tests must fail to compile / link.
     // Once the implementation is added, they document the full contract.
 
-    test('two graphemes when diameter >= 40, uppercased', () {
-      expect(markerGlyph('🎉A', 50), '🎉A');
+    test('two graphemes when diameter >= 60, uppercased', () {
+      expect(markerGlyph('🎉A', 75), '🎉A');
     });
 
-    test('one grapheme when diameter < 40', () {
-      expect(markerGlyph('🎉A', 30), '🎉');
+    test('one grapheme when diameter < 60', () {
+      expect(markerGlyph('🎉A', 45), '🎉');
+    });
+
+    test('the second grapheme appears exactly at diameter 60', () {
+      expect(markerGlyph('jd', 60), 'JD');
+      expect(markerGlyph('jd', 59.9), 'J');
     });
 
     test('single emoji grapheme unchanged regardless of diameter', () {
-      expect(markerGlyph('🎉', 50), '🎉');
+      expect(markerGlyph('🎉', 75), '🎉');
     });
 
     test('Latin initials are uppercased', () {
-      expect(markerGlyph('jd', 50), 'JD');
+      expect(markerGlyph('jd', 75), 'JD');
     });
 
     test('Latin initials truncated to one grapheme when small diameter', () {
-      expect(markerGlyph('jd', 30), 'J');
+      expect(markerGlyph('jd', 45), 'J');
     });
 
     test('Cyrillic initial is uppercased', () {
-      expect(markerGlyph('п', 50), 'П');
+      expect(markerGlyph('п', 75), 'П');
     });
 
     test('ZWJ family emoji is not split across code units', () {
       // '👨‍👩‍👧' must survive toUpperCase() and be taken as a single grapheme.
-      expect(markerGlyph('👨‍👩‍👧', 50), '👨‍👩‍👧');
+      expect(markerGlyph('👨‍👩‍👧', 75), '👨‍👩‍👧');
     });
 
     test('ZWJ family emoji + letter at small diameter yields the family cluster', () {
-      expect(markerGlyph('👨‍👩‍👧F', 30), '👨‍👩‍👧');
+      expect(markerGlyph('👨‍👩‍👧F', 45), '👨‍👩‍👧');
     });
 
     test('regional-indicator flag pair + letter at large diameter yields flag + letter', () {
-      expect(markerGlyph('🇺🇸U', 50), '🇺🇸U');
+      expect(markerGlyph('🇺🇸U', 75), '🇺🇸U');
     });
 
     test('empty string returns empty string', () {
-      expect(markerGlyph('', 50), '');
+      expect(markerGlyph('', 75), '');
     });
   });
 }

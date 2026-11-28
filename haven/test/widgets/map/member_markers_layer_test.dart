@@ -413,9 +413,9 @@ void main() {
         () => createTestImage(width: 8, height: 8),
       ))!;
       // The loader looks up the entry under its display-size key; the test
-      // view's default 3x ratio gives 156 px.
+      // view's default 3x ratio gives 234 px.
       AvatarImageCache.instance.put(
-        AvatarImageCache.keyFor('hash-evict', 156),
+        AvatarImageCache.keyFor('hash-evict', 234),
         img,
       );
 
@@ -675,13 +675,13 @@ void main() {
 
       await pumpWithBytes(tester, bytes);
       await tester.pump();
-      await decoded(tester, AvatarImageCache.keyFor(hash, 104));
+      await decoded(tester, AvatarImageCache.keyFor(hash, 156));
 
       final image = AvatarImageCache.instance.get(
-        AvatarImageCache.keyFor(hash, 104),
+        AvatarImageCache.keyFor(hash, 156),
       )!;
-      expect(image.height, 104);
-      expect(image.width, (400 * 104 / 300).round());
+      expect(image.height, 156);
+      expect(image.width, (400 * 156 / 300).round());
       expect(AvatarImageCache.instance.get(hash), isNull);
       await tester.pump();
       expect(
@@ -703,10 +703,10 @@ void main() {
 
       await pumpWithBytes(tester, bytes);
       await tester.pump();
-      await decoded(tester, AvatarImageCache.keyFor(hash, 104));
+      await decoded(tester, AvatarImageCache.keyFor(hash, 156));
 
       final image = AvatarImageCache.instance.get(
-        AvatarImageCache.keyFor(hash, 104),
+        AvatarImageCache.keyFor(hash, 156),
       )!;
       expect(image.width, 40);
       expect(image.height, 40);
@@ -721,19 +721,19 @@ void main() {
 
       await pumpWithBytes(tester, bytes);
       await tester.pump();
-      await decoded(tester, AvatarImageCache.keyFor(hash, 104));
+      await decoded(tester, AvatarImageCache.keyFor(hash, 156));
 
       tester.view.devicePixelRatio = 3;
       await tester.pump();
       await _awaitDecodes(tester, 2);
 
       final image = AvatarImageCache.instance.get(
-        AvatarImageCache.keyFor(hash, 156),
+        AvatarImageCache.keyFor(hash, 234),
       );
       expect(image, isNotNull);
-      expect(image!.height, 156);
+      expect(image!.height, 234);
       expect(
-        AvatarImageCache.instance.get(AvatarImageCache.keyFor(hash, 104)),
+        AvatarImageCache.instance.get(AvatarImageCache.keyFor(hash, 156)),
         isNotNull,
       );
     });
@@ -872,7 +872,7 @@ void main() {
       final camera = await pumpCamera(tester);
       final size = camera.nonRotatedSize;
       // Three members 2 px apart, 10 px past the right edge: one head is held
-      // at the edge and the spread pushes the others 52 px apart along it.
+      // at the edge and the spread pushes the others 78 px apart along it.
       final points = [
         for (var i = 0; i < 3; i++) Offset(size.width + 10, 300.0 + 2 * i),
       ];

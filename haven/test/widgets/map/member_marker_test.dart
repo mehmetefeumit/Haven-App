@@ -87,7 +87,7 @@ void _expectColorMatches(Color actual, Color expected) {
 
 const _pubkey = 'deadbeef';
 const _white = Color(0xFFFFFFFF);
-const _footprint = 120.0;
+const _footprint = 180.0;
 
 /// The path's true extent. `Path.getBounds` includes the control points of the
 /// arc's conic segments, which stand well outside the circle at the back.
@@ -201,7 +201,7 @@ CustomPaint _teardrop(WidgetTester tester) => tester.widget<CustomPaint>(
 );
 
 void main() {
-  const ringWidthFull = 3.0;
+  const ringWidthFull = 4.5;
   const keyline = kMarkerKeyline;
 
   group('outline contrast (WCAG 1.4.11)', () {
@@ -233,55 +233,74 @@ void main() {
   group('teardropPath', () {
     test('is a plain circle at nub <= 0.5', () {
       for (final nub in [0.0, 0.25, 0.5]) {
-        final b = teardropPath(26, nub, 1.5).getBounds();
-        expect(b.width, closeTo(52, 1e-9), reason: 'nub $nub');
-        expect(b.height, closeTo(52, 1e-9), reason: 'nub $nub');
+        final b = teardropPath(39, nub, 2.25).getBounds();
+        expect(b.width, closeTo(78, 1e-9), reason: 'nub $nub');
+        expect(b.height, closeTo(78, 1e-9), reason: 'nub $nub');
         expect(b.center, Offset.zero);
       }
     });
 
     test('the apex sits at radius + nub - apexInset', () {
-      for (final nub in [3.0, 10.0, 22.0]) {
-        final b = teardropPath(26, nub, 1.5).getBounds();
-        expect(b.right, closeTo(26 + nub - 1.5, 1e-9), reason: 'nub $nub');
+      for (final nub in [4.5, 15.0, 33.0]) {
+        final b = teardropPath(39, nub, 2.25).getBounds();
+        expect(b.right, closeTo(39 + nub - 2.25, 1e-9), reason: 'nub $nub');
       }
     });
 
     test('the painted outer edge of the ring lands exactly on the tip', () {
-      for (final d in [kDropletFullDiameter, 36.0, 20.0]) {
+      for (final d in [kDropletFullDiameter, 54.0, 30.0]) {
         final r = d / 2;
         final ring = markerRingWidthFor(d);
-        const nub = 8.0;
+        const nub = 12.0;
         final apex = teardropPath(r, nub, ring / 2).getBounds().right;
         // Skia paths hold float32, so 1e-9 is below their resolution.
         expect(apex + ring / 2, closeTo(r + nub, 1e-5), reason: 'D $d');
       }
     });
 
-    test('the flanks are concave, pulled toward the axis', () {
-      const r = 26.0;
-      const nub = 10.0;
-      final path = teardropPath(r, nub, ringWidthFull / 2);
-      const apexX = r + nub - ringWidthFull / 2;
-      const cosT = r / apexX;
-      final tangent = Offset(r * cosT, r * math.sqrt(1 - cosT * cosT));
+    // Signed turn, in degrees, between each pair of tangents 0.25 px apart,
+    // skipping 1 px either side of the tip (the one intended corner).
+    List<double> turns(Path path) {
       final metric = path.computeMetrics().first;
-      var checked = 0;
-      for (var o = 0.0; o < metric.length; o += 0.25) {
-        final p = metric.getTangentForOffset(o)!.position;
-        if (p.dy <= 1e-6 || p.dx <= tangent.dx + 0.5 || p.dx >= apexX - 0.5) {
-          continue;
-        }
-        final straightY =
-            tangent.dy * (apexX - p.dx) / (apexX - tangent.dx);
-        expect(p.dy, lessThan(straightY - 0.2), reason: 'x ${p.dx}');
-        checked++;
+      const step = 0.25;
+      final out = <double>[];
+      for (var o = 1.0; o + step < metric.length - 1; o += step) {
+        final t =
+            (metric.getTangentForOffset(o + step)!.angle -
+                metric.getTangentForOffset(o)!.angle) %
+            (2 * math.pi);
+        out.add((t > math.pi ? t - 2 * math.pi : t) * 180 / math.pi);
       }
-      expect(checked, greaterThan(10), reason: 'the flank was sampled');
+      return out;
+    }
+
+    // Head and tail sizes from a short tail to the longest clinging one.
+    const shapes = [(39.0, 4.5), (39.0, 15.0), (39.0, 33.0), (27.0, 22.0)];
+
+    test('the outline has no corner but the tip: each flank leaves the '
+        'circle along its tangent', () {
+      // A corner turns the outline by its whole angle within one step; the
+      // former quadratic flank met the circle at 10 to 22 degrees.
+      for (final (r, nub) in [...shapes, (15.0, 12.0)]) {
+        final worst = turns(
+          teardropPath(r, nub, markerRingWidthFor(2 * r) / 2),
+        ).map((t) => t.abs()).reduce(math.max);
+        expect(worst, lessThan(3), reason: 'r $r nub $nub');
+      }
+    });
+
+    test('the flanks are concave, turning against the circle', () {
+      // A circle with straight (or convex) flanks never turns the other way.
+      for (final (r, nub) in shapes) {
+        final against = turns(
+          teardropPath(r, nub, markerRingWidthFor(2 * r) / 2),
+        ).where((t) => t > 0).fold<double>(0, (a, b) => a + b);
+        expect(against, greaterThan(2 * 15), reason: 'r $r nub $nub');
+      }
     });
 
     test('the apex half-angle at the on-screen tail is 20 to 35 degrees', () {
-      final path = teardropPath(26, 10, ringWidthFull / 2);
+      final path = teardropPath(39, 15, ringWidthFull / 2);
       final v = path.computeMetrics().first.getTangentForOffset(0.05)!.vector;
       final halfAngle = math.atan2(v.dy.abs(), -v.dx) * 180 / math.pi;
       expect(halfAngle, inInclusiveRange(20, 35));
@@ -295,18 +314,18 @@ void main() {
       await tester.pumpWidget(_wrap(_marker()));
       await tester.pump(const Duration(milliseconds: 200));
       final b = _paintMarker(tester).fill.path!.getBounds();
-      expect(b.width, closeTo(52, 1e-3));
-      expect(b.center.dx, closeTo(60, 1e-3));
+      expect(b.width, closeTo(78, 1e-3));
+      expect(b.center.dx, closeTo(90, 1e-3));
     });
 
     testWidgets('grows an outward tail past the radius when nubLength > 0', (
       tester,
     ) async {
-      await tester.pumpWidget(_wrap(_marker(nubLength: 8)));
+      await tester.pumpWidget(_wrap(_marker(nubLength: 12)));
       await tester.pump(const Duration(milliseconds: 200));
       expect(
         _paintMarker(tester).fill.path!.getBounds().right,
-        greaterThan(60 + 29),
+        greaterThan(90 + 43.5),
       );
     });
 
@@ -324,7 +343,7 @@ void main() {
       final strokes = rec.strokes;
       expect(strokes, hasLength(2));
       _expectColorMatches(strokes.first.color!, keyline);
-      expect(strokes.first.width, ringWidthFull + 2);
+      expect(strokes.first.width, ringWidthFull + 3);
       _expectColorMatches(strokes.last.color!, _white);
       expect(strokes.last.width, ringWidthFull);
     });
@@ -413,22 +432,22 @@ void main() {
       tester,
     ) async {
       // Tail direction paired with the painted reach from the head centre
-      // (footprint centre 60) along it.
+      // (footprint centre 90) along it.
       final cases = <(double, double Function(Rect))>[
-        (0, (b) => b.right - 60),
-        (math.pi / 2, (b) => b.bottom - 60),
-        (-math.pi / 2, (b) => 60 - b.top),
-        (math.pi, (b) => 60 - b.left),
+        (0, (b) => b.right - 90),
+        (math.pi / 2, (b) => b.bottom - 90),
+        (-math.pi / 2, (b) => 90 - b.top),
+        (math.pi, (b) => 90 - b.left),
       ];
       for (final (angle, reachOf) in cases) {
-        await tester.pumpWidget(_wrap(_marker(nubLength: 10, angle: angle)));
+        await tester.pumpWidget(_wrap(_marker(nubLength: 15, angle: angle)));
         await tester.pump(const Duration(milliseconds: 200));
         final rec = _paintMarker(tester);
         final b = _tightBounds(rec.shadow.path!);
         final ringWidth = rec.strokes.last.width!;
         expect(
           reachOf(b) + ringWidth / 2,
-          closeTo(36, 1e-4),
+          closeTo(54, 1e-4),
           reason: '$angle',
         );
       }
@@ -447,7 +466,7 @@ void main() {
 
   group('MemberMarker size', () {
     testWidgets('footprint grows with diameter', (tester) async {
-      await tester.pumpWidget(_wrap(_marker(diameter: 20, offScreen: true)));
+      await tester.pumpWidget(_wrap(_marker(diameter: 30, offScreen: true)));
       await tester.pump(const Duration(milliseconds: 200));
       final small = tester.getSize(find.byType(MemberMarker));
 
@@ -460,8 +479,8 @@ void main() {
     });
 
     test('footprint covers the longest tail, ring, keyline and shadow', () {
-      expect(MemberMarker.footprintFor(52), 120);
-      expect(MemberMarker.footprintFor(20), 88);
+      expect(MemberMarker.footprintFor(78), 180);
+      expect(MemberMarker.footprintFor(30), 132);
       expect(MemberMarker.footprintFor(0), greaterThanOrEqualTo(48));
     });
   });
@@ -478,12 +497,12 @@ void main() {
 
     testWidgets('scales about the tip of the tail', (tester) async {
       await tester.pumpWidget(
-        _wrap(_marker(nubLength: 10, angle: math.pi / 2)),
+        _wrap(_marker(nubLength: 15, angle: math.pi / 2)),
       );
       final scale = tester.widget<ScaleTransition>(
         _inMarker(find.byType(ScaleTransition)),
       );
-      // tip = 60 + (26 + 10) = 96 of 120 -> 96 / 120 * 2 - 1 = 0.6.
+      // tip = 90 + (39 + 15) = 144 of 180 -> 144 / 180 * 2 - 1 = 0.6.
       expect(scale.alignment.x, closeTo(0, 1e-9));
       expect(scale.alignment.y, closeTo(0.6, 1e-9));
       await tester.pump(const Duration(milliseconds: 200));
@@ -761,14 +780,14 @@ void main() {
       expect(s.label, isNot(contains('off-screen'))); // not the English string
     });
 
-    testWidgets('the node is the tap-sized box, not the 120 px footprint', (
+    testWidgets('the node is the tap-sized box, not the 180 px footprint', (
       tester,
     ) async {
       await tester.pumpWidget(_wrap(_marker(onTap: () {})));
-      expect(_semantics(tester).rect.size, const Size(52, 52));
+      expect(_semantics(tester).rect.size, const Size(78, 78));
 
       await tester.pumpWidget(
-        _wrap(_marker(diameter: 20, offScreen: true, nubLength: 8)),
+        _wrap(_marker(diameter: 30, offScreen: true, nubLength: 12)),
       );
       expect(
         _semantics(tester).rect.size,
@@ -781,9 +800,9 @@ void main() {
       await tester.pumpWidget(
         _wrap(
           _marker(
-            diameter: 20,
+            diameter: 30,
             offScreen: true,
-            nubLength: 8,
+            nubLength: 12,
             tapOffset: const Offset(-10, 4),
           ),
         ),
@@ -940,8 +959,8 @@ void main() {
       tester,
     ) async {
       const size = Size(400, 400);
-      // The layer holds a full head 30 px (radius + margin) from the edge.
-      const head = Offset(400 - 30, 200);
+      // The layer holds a full head 45 px (radius + margin) from the edge.
+      const head = Offset(400 - 45, 200);
       final lastSeen = DateTime.now().subtract(const Duration(minutes: 5));
       await tester.pumpWidget(
         _placed(_marker(lastSeen: lastSeen), head, size),
@@ -1027,9 +1046,9 @@ void main() {
       await tester.pumpWidget(
         _wrap(
           _marker(
-            diameter: 20,
+            diameter: 30,
             offScreen: true,
-            nubLength: 8,
+            nubLength: 12,
             tapOffset: const Offset(-10, 0),
             onTap: () {},
           ),
@@ -1116,7 +1135,7 @@ void main() {
 
     testWidgets('scales about the tip alignment', (tester) async {
       await tester.pumpWidget(
-        _wrap(_marker(nubLength: 10, angle: math.pi / 2, onTap: () {})),
+        _wrap(_marker(nubLength: 15, angle: math.pi / 2, onTap: () {})),
       );
       final scale = tester.widget<AnimatedScale>(find.byType(AnimatedScale));
       expect(scale.alignment.x, closeTo(0, 1e-9));

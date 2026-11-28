@@ -38,9 +38,9 @@ class AvatarImageCache extends ChangeNotifier {
 
   /// Maximum number of decoded images held simultaneously.
   ///
-  /// A 52 dp head decoded at 3× is 156×156 RGBA ≈ 95 KiB for a square source
+  /// A 78 dp head decoded at 3× is 234×234 RGBA ≈ 214 KiB for a square source
   /// (a non-square one keeps its aspect, so its long side is larger); 20
-  /// entries ≈ 1.9 MiB — still within the 8 MiB privacy cap.
+  /// entries ≈ 4.2 MiB — still within the 8 MiB privacy cap.
   static const int maxEntries = 20;
 
   /// The cache key for [contentHash] decoded with its short side at
