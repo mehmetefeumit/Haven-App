@@ -70,7 +70,7 @@ use haven_core::relay::cursor::{
 use haven_core::relay::live_sync::{Claim, LiveSyncCore, LiveSyncEvent, StopOutcome};
 use nostr::nips::nip59::RANGE_RANDOM_TIMESTAMP_TWEAK;
 use nostr::{
-    Event, EventBuilder, EventId, Filter, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp,
+    Event, EventBuilder, EventId, Filter, JsonUtil, Keys, Kind, PublicKey, RelayUrl, Tag, Timestamp,
 };
 use nostr_relay_builder::prelude::{
     BoxedFuture, MemoryDatabase, MemoryDatabaseOptions, NostrDatabase, PolicyResult, QueryPolicy,
@@ -742,9 +742,9 @@ impl InboxRelay {
     }
 }
 
-/// Starts an engine on `relay` with no circles and waits for the inbox anchor
-/// to redeem its first EOSE, returning the engine and the cursor (ms) it landed
-/// on.
+/// Starts an engine on `relays` with no circles and waits for the inbox anchor
+/// to redeem its first EOSE and for every relay's own EOSE, returning the
+/// engine and the cursor (ms) it landed on.
 ///
 /// `planted_cursor_secs` is written first so the FIRST REQ's floor is an exact
 /// number the caller chose, rather than one derived from `start`'s own clock
@@ -772,6 +772,24 @@ async fn engine_anchored_on(
         anchored > planted_ms,
         "precondition: the inbox REQ's EOSE must have advanced the cursor off \
          the planted value ({planted_ms} ms); got {anchored} ms"
+    );
+    // The first EOSE advances the cursor; every other relay owes the inbox the
+    // `since` it was asked until its own EOSE (Security Rule 12), and the next
+    // REQ asks a relay still owing from there.
+    let every_relay_answered = || {
+        relays.iter().all(|url| {
+            let key = RelayUrl::parse(url).expect("a relay url");
+            circle.inbox_floor_for_test(key.as_str()).is_none()
+        })
+    };
+    assert!(
+        tokio::time::timeout(
+            wait_budget(10),
+            engine.settles_until_for_test(every_relay_answered)
+        )
+        .await
+        .is_ok(),
+        "precondition: every inbox relay must have answered the first REQ to its end"
     );
     (engine, anchored)
 }
