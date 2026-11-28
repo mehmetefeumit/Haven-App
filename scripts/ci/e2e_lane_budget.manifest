@@ -93,6 +93,13 @@ round-cancel-verdict pp_round/_pp_round#1/_pp_await_cancelled#1/pp_focused#1/tim
 # The input-focus read a caller makes on its own (the launch gate's stall
 # verdict): one bounded `dumpsys input`.
 focus pp_focused/timeout:PP_ADB_SECS#1 charge PP_ADB_SECS
+# One read of the activity manager's processes: one bounded adb call.
+error-state pp_error_state/timeout:PP_ADB_SECS#1 charge PP_ADB_SECS
+# The settle: a wall-clock window of passes, each either that read or one
+# bounded CLOSE_SYSTEM_DIALOGS, never both, so the window plus the one pass
+# that can start just before its bound.
+settle-errors pp_settle_errors/pp_error_state#1/timeout:PP_ADB_SECS#1 charge PP_SETTLE_SECS + PP_ADB_SECS
+settle-close pp_settle_errors/timeout:PP_ADB_SECS#1 excluded a pass that broadcasts makes no other read, so the last pass past the window is it or the read settle-errors charges, never both
 # The fixtures out of the media store and off the disk: two bounded adb calls.
 clear-query pp_clear_gallery/timeout:PP_ADB_SECS#1 charge PP_ADB_SECS
 clear-files pp_clear_gallery/timeout:PP_ADB_SECS#2 charge PP_ADB_SECS
@@ -132,6 +139,7 @@ settle sleep:DRIVE_RETRY_SETTLE_SECS#1 charge DRIVE_RETRY_SETTLE_SECS times DRIV
 
 unit tooling/e2e/ci/run-photo-ui-scenario.sh
 device main#1/timeout:DEVICE_SECS#1 charge DEVICE_SECS
+settle-errors main#1/lib:pp_settle_errors#1 charge @
 seed main#1/lib:pp_seed_gallery#1 charge @
 # The sidecar plays the picker and uCrop beside the drive, in a background job
 # never joined with `wait`: the main shell polls it to a stop below, after the
@@ -453,7 +461,7 @@ offline-close main#1/preconditions#1/timeout:ADB_SECS#2 excluded a pass that bro
 # A pass's third read, the activity manager's processes, one of which the boot
 # may have left in an error state: offline's window books every pass that
 # starts inside it, so this is the last pass's, past the window.
-offline-errors main#1/preconditions#1/error_state#1/timeout:ADB_SECS#1 charge ADB_SECS once offline's window books every earlier pass and this is the last pass's process read
+offline-errors main#1/preconditions#1/lib:pp_error_state#1 charge @ once offline's window books every earlier pass and this is the last pass's process read
 install */lib:install_fresh#1 charge @
 upgrade-install */lib:install_app#1 charge @
 launch */launch_app#*/timeout:LAUNCH_SECS#1 charge LAUNCH_SECS

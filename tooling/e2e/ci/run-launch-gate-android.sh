@@ -247,8 +247,6 @@ UPGRADE_SOURCE=0
 APP_PID=''
 PRIV=''
 API_LEVEL=0
-# Set by error_state.
-ERROR_STATE=''
 # Which keys observe() asks for: ALL_KEYS, plus the photo keys on the
 # candidate's photo and Settings screens.
 OBS_KEYSET="${ALL_KEYS}"
@@ -1033,33 +1031,6 @@ leg_upgrade() {
 # no process the boot left in an error state.
 # ---------------------------------------------------------------------------
 
-# error_state — ERROR_STATE: the first process the activity manager holds in an
-# error state, in fixed words (ui-dump.py errors): `none`,
-# `not-responding-<whose>` or `app-error-<whose>`; empty when adb brought back
-# no process list. One bounded adb read, filtered on the device to the lines
-# ui-dump.py reads.
-error_state() {
-  local out
-  ERROR_STATE=''
-  timeout "${ADB_SECS}" adb -s "${DEVICE}" shell \
-    "dumpsys activity processes | grep -E '^ACTIVITY MANAGER RUNNING PROCESSES|^  [*](APP|PERS)[*] UID |mCrashing='" \
-    > "${PRIV}/processes.txt" 2>/dev/null || true
-  out="$(python3 -I "${UI_DUMP}" errors --dumpsys "${PRIV}/processes.txt" --package "${PKG}" 2>/dev/null || true)"
-  rm -f "${PRIV}/processes.txt"
-  [[ "${out}" == 'errors '* && "${out}" != 'errors unknown' ]] || return 0
-  ERROR_STATE="${out#errors }"
-}
-
-# _error_words <state> — an ERROR_STATE value in fixed words, for a message.
-_error_words() {
-  case "$1" in
-    '') echo 'unread (adb brought back no process list)' ;;
-    none) echo 'no process in an error state' ;;
-    not-responding-*) echo "$(_pp_whose "${1#not-responding-}") process held as not responding" ;;
-    *) echo "$(_pp_whose "${1#app-error-}") process held as crashing" ;;
-  esac
-}
-
 preconditions() {
   local start spent boot locale air='' net='' close=0 closes=0
   if ! timeout "${BOOT_SECS}" adb -s "${DEVICE}" wait-for-device; then
@@ -1111,8 +1082,10 @@ preconditions() {
     fi
     air="$(timeout "${ADB_SECS}" adb -s "${DEVICE}" shell settings get global airplane_mode_on 2>/dev/null | tr -d '\r' || true)"
     net="$(timeout "${ADB_SECS}" adb -s "${DEVICE}" shell "dumpsys connectivity | grep -m1 'Active default network:'" 2>/dev/null | tr -d '\r' || true)"
-    error_state
-    case "${ERROR_STATE}" in
+    # The read photo-picker-lib.sh's pp_settle_errors waits on, inside this
+    # window because the offline reads share it.
+    pp_error_state "${DEVICE}" "${PRIV}"
+    case "${PP_ERROR_STATE}" in
       none) ;;
       '') continue ;;
       *) close=1; continue ;;
@@ -1124,7 +1097,7 @@ preconditions() {
     fi
   done
   if [[ "${air}" == 1 && "${net}" =~ Active\ default\ network:\ none$ ]]; then
-    verdict 3 "no read of the activity manager's processes within ${OFFLINE_SECS} s showed none in an error state (last read: $(_error_words "${ERROR_STATE}")), after ${closes} CLOSE_SYSTEM_DIALOGS broadcast(s)"
+    verdict 3 "no read of the activity manager's processes within ${OFFLINE_SECS} s showed none in an error state (last read: $(pp_error_words "${PP_ERROR_STATE}")), after ${closes} CLOSE_SYSTEM_DIALOGS broadcast(s)"
   fi
   verdict 3 "the device did not go offline within ${OFFLINE_SECS} s (airplane_mode_on='${air:-}', '${net:-no default-network line}')"
 }

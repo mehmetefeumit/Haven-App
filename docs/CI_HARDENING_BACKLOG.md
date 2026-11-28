@@ -1397,7 +1397,11 @@ is an aggregate deadline between them, which is what the wrapper now is.
    emulator, with nothing bounding the boot, and boot is the most common
    emulator hang. Measured 91-130 s (Android snapshot, 23 runs) and 136-215 s
    (iOS boot, 32 runs); both now capped at 15 min with a 7-minute
-   `emulator-boot-timeout` on the Android side.
+   `emulator-boot-timeout` on the Android side. (The Android snapshot steps
+   are gone since 2026-11-28, with the AVD cache they filled: with
+   `-no-snapshot-save` the cache held no snapshot, only a booted data
+   partition whose ~9 s restore bought back a ~8 s first boot, and it carried
+   the end state of whichever main run saved it into every lane.)
 
 *Two lanes that HAD a wrapper had it wired so the inner bound could never fire.*
 `e2e-android`'s poll path paired a **20m** `HAVEN_DRIVE_TIMEOUT` with a **16m**

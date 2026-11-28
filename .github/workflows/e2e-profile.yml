@@ -133,16 +133,16 @@ jobs:
     # The job cap must clear the SUM of the step caps: below it, a run whose
     # every step is still inside its own cap can die here, and a job-cap death
     # skips every `if: failure()` step (e2e-android.yml states the rule). So:
-    # Build the runtime log scanner 10 + Fetch 5 and Install 2 this run's Gradle dependencies + Build
+    # Build the runtime log scanner 10 + Fetch 7 and Install 2 this run's Gradle dependencies + Build
     # E2E test APK 25 + Provision the Android SDK 11 (derived in that script) +
-    # Create AVD snapshot (on an AVD-cache miss) 15 + the drive step 45
+    # the drive step 45
     # (derived there) + the most the
     # work no step cap bounds has taken, 12.9 min over 201 runs of this job and
     # of e2e-android.yml's on both paths (ci.yml and e2e-nightly.yml,
     # 2026-07-29..09-11; 11.1 of it one Setup Flutter stall in e2e-android.yml's
-    # job, run 30792258968) = 113 + 12.9 = 125.9 -> 126.
+    # job, run 30792258968) = 100 + 12.9 = 112.9 -> 113.
     # job-uncapped-minutes: 12.9 (201 runs with e2e-android.yml's, worst 30792258968)
-    timeout-minutes: 126
+    timeout-minutes: 113
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       # Profile plane. DISJOINT from HAVEN_E2E_RELAY above by construction —
@@ -245,7 +245,7 @@ jobs:
       # `continue-on-error`: a lane without its set cannot build, and says so
       # here (scripts/ci/check_gradle_build_hardened.sh).
       - name: Fetch this run's Gradle dependencies
-        timeout-minutes: 5
+        timeout-minutes: 7  # sized in android-gradle-deps.yml
         uses: actions/download-artifact@v6
         with:
           name: gradle-deps
@@ -316,9 +316,8 @@ jobs:
       # and the last thing it printed was its teardown's "could not connect to
       # TCP port 5554" — a message about the emulator, from a job that ran no
       # test.
-      # Unconditional, deliberately — the AVD cache holds `~/.android/avd/*`
-      # only, so a cache HIT still needs the emulator binary and the system
-      # image. The arguments MUST equal the api-level/target/arch of every
+      # Unconditional, deliberately. The arguments MUST equal the
+      # api-level/target/arch of every
       # emulator step in this job (check_android_sdk_provisioned.sh). Once the
       # packages are present the action's own installs are no-ops (5 s).
       # The cap is the script's worst case, 9.5 min (its 360 s budget + the one
@@ -327,44 +326,6 @@ jobs:
       - name: Provision the Android SDK
         timeout-minutes: 11
         run: bash tooling/e2e/ci/provision-android-sdk.sh 34 google_apis x86_64
-
-      - name: Restore AVD cache
-        uses: actions/cache/restore@v4
-        id: avd-cache
-        with:
-          path: |
-            ~/.android/avd/*
-            ~/.android/adb*
-          # Shared snapshot key with the other Android e2e lanes (same
-          # api/arch/target/profile), so this lane restores their snapshot.
-          key: avd-api34-x86_64-google_apis-single-v1
-
-      - name: Create AVD snapshot
-        if: steps.avd-cache.outputs.cache-hit != 'true'
-        # This step's entire job is booting an emulator, and until 2026-08-03 it
-        # had no bound of any kind — a wedged boot here ran to the JOB cap,
-        # which SIGKILLs the runner before any if: failure() step, so the lane
-        # died slow and with no artifacts. Measured across 23 successful runs
-        # (ci.yml, 2026-07/08) the snapshot takes 91-130 s; 15 min is ~7x the
-        # observed max, so it can only ever fire on a genuine wedge. The
-        # emulator-boot-timeout below is the action's own inner bound (7 min,
-        # matching the drive steps) and fires first with the action's message.
-        timeout-minutes: 15
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          arch: x86_64
-          target: google_apis
-          profile: pixel_6
-          force-avd-creation: false
-          emulator-options: >-
-            -no-snapshot-save -no-window -gpu swiftshader_indirect
-            -noaudio -no-boot-anim -camera-back none
-          disable-animations: false
-          # Bound the boot itself (the only thing this step does) so a wedged
-          # emulator fails inside the step rather than at the step cap above.
-          emulator-boot-timeout: 420
-          script: echo "Generated AVD snapshot for caching."
 
       # Start EVERY hermetic host (circle relay, profile-plane pool, blossom)
       # BEFORE the emulator boots, so an image-pull/startup failure surfaces as
@@ -467,6 +428,7 @@ jobs:
             -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           emulator-boot-timeout: 420
+          pre-emulator-launch-script: bash tooling/e2e/ci/require-adb.sh
           script: bash tooling/e2e/ci/run-with-deadline.sh 35m "e2e-profile android drive" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh install && HAVEN_DRIVE_TIMEOUT=12m bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_profile_sharing.dart'
 
       # Publish what the guard OBSERVED (CI_HARDENING_BACKLOG C7). Runs BEFORE
@@ -656,45 +618,19 @@ jobs:
         if: always()
         run: bash tooling/e2e/ci/stop-local-blossom.sh 3000
 
-      # Saved from main only (a pull request's run reads main's AVD and writes
-      # none, so it cannot evict one), and as actions/cache's own post step
-      # did: from a run that built the AVD on a miss and passed. A lost save is
-      # a cold snapshot next time, never a red lane.
-      - name: Save AVD cache
-        if: ${{ success() && github.ref == 'refs/heads/main' && steps.avd-cache.outputs.cache-hit != 'true' }}
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ~/.android/avd/*
-            ~/.android/adb*
-          # Shared snapshot key with the other Android e2e lanes (same
-          # api/arch/target/profile), so this lane restores their snapshot.
-          key: avd-api34-x86_64-google_apis-single-v1
-
-  # ==========================================================================
-  # e2e_profile_android_ui — the Identity-page photo trip through the REAL
-  # system Photo Picker and uCrop with background sharing ON, on a debug build
-  # against the same hermetic hosts: the configuration in which a photo picked
-  # on Android could not be saved. The target is e2e_profile_ui_photo.dart; the
-  # runner is run-photo-ui-scenario.sh, whose host sidecar plays the user inside
-  # the system screens. A separate job, not a matrix leg, so the release gate
-  # can name it (check_ci_verdict.sh refuses a computed job name).
-  # ==========================================================================
   e2e_profile_android_ui:
     name: e2e_profile_android_ui
     runs-on: ubuntu-latest
     # The job cap clears the SUM of the step caps (e2e-android.yml states the
     # rule): Build the runtime log scanner 10 + Build E2E test APK 25 +
-    # Fetch 5 and Install 2 this run's Gradle dependencies + Provision the Android SDK 11 + AVD
-    # cache 10 + Create AVD snapshot 15 +
-    # the drive step 59 (derived there) + the uncapped work, taken
+    # Fetch 7 and Install 2 this run's Gradle dependencies + Provision the Android SDK 11 +
+    # the drive step 60 (derived there) + the uncapped work, taken
     # from e2e_profile_android until this job has runs of its own: 12.9 min
     # over 201 runs of that job and e2e-android.yml's (worst 30792258968), plus
     # this job's two blossom starts, under a minute measured locally -> 14
-    # = 137 + 14 = 151.
+    # = 115 + 14 = 129.
     # job-uncapped-minutes: 14 (201 runs of e2e_profile_android's family, worst 30792258968)
-    timeout-minutes: 151
+    timeout-minutes: 129
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       # Profile plane. DISJOINT from HAVEN_E2E_RELAY above by construction —
@@ -790,7 +726,7 @@ jobs:
       # `continue-on-error`: a lane without its set cannot build, and says so
       # here (scripts/ci/check_gradle_build_hardened.sh).
       - name: Fetch this run's Gradle dependencies
-        timeout-minutes: 5
+        timeout-minutes: 7  # sized in android-gradle-deps.yml
         uses: actions/download-artifact@v6
         with:
           name: gradle-deps
@@ -865,9 +801,8 @@ jobs:
       # and the last thing it printed was its teardown's "could not connect to
       # TCP port 5554" — a message about the emulator, from a job that ran no
       # test.
-      # Unconditional, deliberately — the AVD cache holds `~/.android/avd/*`
-      # only, so a cache HIT still needs the emulator binary and the system
-      # image. The arguments MUST equal the api-level/target/arch of every
+      # Unconditional, deliberately. The arguments MUST equal the
+      # api-level/target/arch of every
       # emulator step in this job (check_android_sdk_provisioned.sh). Once the
       # packages are present the action's own installs are no-ops (5 s).
       # The cap is the script's worst case, 9.5 min (its 360 s budget + the one
@@ -876,48 +811,6 @@ jobs:
       - name: Provision the Android SDK
         timeout-minutes: 11
         run: bash tooling/e2e/ci/provision-android-sdk.sh 34 google_apis x86_64
-
-      # Restore-only: the photo rounds put two fixtures in the gallery (the
-      # runner deletes them again), and a saved snapshot must never carry them
-      # into another lane. A miss is created locally below.
-      - name: AVD cache
-        uses: actions/cache/restore@v4
-        id: avd-cache
-        timeout-minutes: 10
-        with:
-          path: |
-            ~/.android/avd/*
-            ~/.android/adb*
-          # Shared snapshot key with the other Android e2e lanes (same
-          # api/arch/target/profile), so this lane restores their snapshot.
-          key: avd-api34-x86_64-google_apis-single-v1
-
-      - name: Create AVD snapshot
-        if: steps.avd-cache.outputs.cache-hit != 'true'
-        # This step's entire job is booting an emulator, and until 2026-08-03 it
-        # had no bound of any kind — a wedged boot here ran to the JOB cap,
-        # which SIGKILLs the runner before any if: failure() step, so the lane
-        # died slow and with no artifacts. Measured across 23 successful runs
-        # (ci.yml, 2026-07/08) the snapshot takes 91-130 s; 15 min is ~7x the
-        # observed max, so it can only ever fire on a genuine wedge. The
-        # emulator-boot-timeout below is the action's own inner bound (7 min,
-        # matching the drive steps) and fires first with the action's message.
-        timeout-minutes: 15
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          arch: x86_64
-          target: google_apis
-          profile: pixel_6
-          force-avd-creation: false
-          emulator-options: >-
-            -no-snapshot-save -no-window -gpu swiftshader_indirect
-            -noaudio -no-boot-anim -camera-back none
-          disable-animations: false
-          # Bound the boot itself (the only thing this step does) so a wedged
-          # emulator fails inside the step rather than at the step cap above.
-          emulator-boot-timeout: 420
-          script: echo "Generated AVD snapshot for caching."
 
       # Start EVERY hermetic host (circle relay, profile-plane pool, blossom)
       # BEFORE the emulator boots, so an image-pull/startup failure surfaces as
@@ -969,14 +862,15 @@ jobs:
       #        downloads. Not measured yet: the API-level drive's p95 is
       #        2.7 min, and each trip a few seconds healthy; re-derive by the
       #        lane's 4.4x rule once runs exist.
-      #   49m  this step's inner deadline: scripts/ci/check_e2e_lane_budget.sh's
+      #   50m  this step's inner deadline: scripts/ci/check_e2e_lane_budget.sh's
       #        sum over run-photo-ui-scenario.sh, photo-picker-lib.sh and
       #        run-single-avd-scenario.sh with the drive timeout above
-      #        (`--explain` prints it: 2912 s, the 180 s allowance included).
-      #   59m  this step's timeout-minutes = deadline + 1 (kill grace) + 7
+      #        (`--explain` prints it: 2952 s, the 180 s allowance included;
+      #        40 s of it the wait for no process in an error state).
+      #   60m  this step's timeout-minutes = deadline + 1 (kill grace) + 7
       #        (emulator-boot-timeout) + 2 (the action's own setup/teardown).
       - name: Run e2e_profile_ui_photo on the emulator
-        timeout-minutes: 59
+        timeout-minutes: 60
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -989,7 +883,8 @@ jobs:
             -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           emulator-boot-timeout: 420
-          script: bash tooling/e2e/ci/run-with-deadline.sh 49m "e2e-profile android photo UI" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh install && HAVEN_DRIVE_TIMEOUT=20m bash tooling/e2e/ci/run-photo-ui-scenario.sh integration_test/e2e/e2e_profile_ui_photo.dart'
+          pre-emulator-launch-script: bash tooling/e2e/ci/require-adb.sh
+          script: bash tooling/e2e/ci/run-with-deadline.sh 50m "e2e-profile android photo UI" -- bash -c 'bash tooling/e2e/ci/setup-network-guard.sh install && HAVEN_DRIVE_TIMEOUT=20m bash tooling/e2e/ci/run-photo-ui-scenario.sh integration_test/e2e/e2e_profile_ui_photo.dart'
 
       # Publish what the guard OBSERVED (CI_HARDENING_BACKLOG C7). Runs BEFORE
       # the teardown: the report cross-checks its parse against the chain's own

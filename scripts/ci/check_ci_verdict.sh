@@ -71,6 +71,7 @@ readonly REQUIRED_JOBS=(
   'E2E Public Profile (Android + iOS) / e2e_profile_android_ui'
   'E2E Public Profile (Android + iOS) / e2e_profile_ios'
   'Launch Gate (iOS) / Simulator launch, relaunch and upgrade'
+  'Repo Guards / E2E harness self-tests'
   'Repo Guards / Static checks'
   'Rust Checks / e2e tooling (hermetic relay + wire proxy)'
   'Rust Checks / haven-core'

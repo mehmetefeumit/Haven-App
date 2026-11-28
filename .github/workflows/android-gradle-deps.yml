@@ -86,6 +86,11 @@ jobs:
       # Already zstd-compressed, so the artifact service adds no compression.
       - name: Upload this run's Gradle dependencies
         timeout-minutes: 10
+        # Every Android-building job downloads this (~2.3 GB) in its "Fetch
+        # this run's Gradle dependencies" step, capped at 7 minutes: 206
+        # downloads in CI runs of 2026-11-26..28 took 19-209 s (p50 44, p95
+        # 161; 11.2 MB/s the slowest), and one ran past the old 5-minute cap
+        # (run 46074271482), a cap 1.4x the slowest that finished. 7 is 2x.
         uses: actions/upload-artifact@v6
         with:
           name: gradle-deps

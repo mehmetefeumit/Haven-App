@@ -12,8 +12,8 @@
 # check_privacy_invariants.sh accepts an absent `if:` on the guards it cites,
 # so nothing else holds this.
 #
-# Rule: in the file's one job, the step with `id: checkout` comes first, and
-# every other step carries exactly
+# Rule: in each of the file's jobs, the step with `id: checkout` comes first,
+# and every other step carries exactly
 #     if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
 #
 # Usage:
@@ -37,8 +37,9 @@ check() { # check <workflow>
       if (!n) return
       if (n == 1) { if (id != "checkout") { first_bad = 1 } }
       else if (cond != want) { printf "FAIL step %d (%s): if: %s\n", n, name, (cond == "" ? "absent (skipped after any earlier failure)" : "`" cond "`"); bad = 1 }
+      if (n > most) most = n
     }
-    /^[[:space:]]*steps:[[:space:]]*$/ { insteps = 1; si = -1; next }
+    /^[[:space:]]*steps:[[:space:]]*$/ { if (insteps) close_step(); insteps = 1; si = -1; n = 0; next }
     !insteps { next }
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
     /^[[:space:]]*-[[:space:]]+[A-Za-z_-]+:/ && (si < 0 || indent($0) == si) {
@@ -57,7 +58,7 @@ check() { # check <workflow>
     }
     END {
       if (insteps) close_step()
-      if (n < 2) { print "ERROR: fewer than two steps found: not a workflow this guard can read" > "/dev/stderr"; exit 2 }
+      if (most < 2) { print "ERROR: fewer than two steps found: not a workflow this guard can read" > "/dev/stderr"; exit 2 }
       if (first_bad) { print "ERROR: the first step is not `id: checkout`: the rule has no anchor" > "/dev/stderr"; exit 2 }
       exit bad
     }
@@ -138,12 +139,31 @@ ${ok}
         uses: actions/checkout@v6"
   _case "a checkout alone is unreadable" 2 "${head}"
   _case "no steps at all is unreadable" 2 "name: Repo Guards"
+  local second="
+  harness:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v6"
+  _case "a second job holds to the same rule from its own checkout" 0 "${head}${second}
+      - name: A harness
+${ok}
+        run: bash tooling/e2e/ci/x.sh --self-test"
+  _case "a second job's step with no if: fails" 1 "${head}${second}
+      - name: A harness
+        run: bash tooling/e2e/ci/x.sh --self-test"
+  _case "a second job that does not start at its checkout is unreadable" 2 "${head}${second/        id: checkout
+/}
+      - name: A harness
+${ok}
+        run: bash tooling/e2e/ci/x.sh --self-test"
 
   if ((failures > 0)); then
     echo "repo-guards step conditions: self-test FAILED (${failures})" >&2
     return 2
   fi
-  echo "repo-guards step conditions: self-test OK (10 fixtures)."
+  echo "repo-guards step conditions: self-test OK (13 fixtures)."
 }
 
 case "${1:-}" in

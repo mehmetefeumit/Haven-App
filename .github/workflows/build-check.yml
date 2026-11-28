@@ -116,7 +116,7 @@ jobs:
       # `continue-on-error`: a lane without its set cannot build, and says so
       # here (scripts/ci/check_gradle_build_hardened.sh).
       - name: Fetch this run's Gradle dependencies
-        timeout-minutes: 5
+        timeout-minutes: 7  # sized in android-gradle-deps.yml
         uses: actions/download-artifact@v6
         with:
           name: gradle-deps
