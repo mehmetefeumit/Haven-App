@@ -5,7 +5,8 @@
 # stages, visible in the job graph:
 #
 #   1. Code quality      — compile, lint, unit-test, coverage, dependency audit
-#   2. Repo guards       — fast grep/bash policy + privacy invariants (one job)
+#   2. Repo guards       — fast grep/bash policy + privacy invariants, and the
+#                          E2E harness self-tests in a second job beside them
 #   3. Localization      — translation parity gate
 #   4. E2E suites        — real app on an Android emulator / iOS simulator
 #                          against hermetic Nostr relays (gated on rust only:
@@ -92,8 +93,9 @@ jobs:
   # Stage 2 — repo guards: every fast, deterministic policy/privacy invariant,
   # consolidated into one job (committed secrets, tile-provider policy,
   # public-profile privacy boundaries, INTERNET permission, background-wake
-  # invariants, locale privacy, E2E-harness self-tests). One red run reports
-  # ALL violated guards. See repo-guards.yml for the per-guard rationale.
+  # invariants, locale privacy), and the E2E harness self-tests in a second
+  # job of the same workflow, run in parallel. One red run reports ALL violated
+  # guards. See repo-guards.yml for the per-guard rationale.
   # ---------------------------------------------------------------------------
 
   guards:

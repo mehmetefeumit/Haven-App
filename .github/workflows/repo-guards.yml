@@ -835,7 +835,7 @@
 #     and every tag name each kind may carry, and anything absent from it is
 #     forbidden. That inverts the forbid-list it replaces, under which a new
 #     kind, a new tag, or an MDK-introduced field reached a relay in silence.
-#     Only the self-test runs in this job — the oracle itself runs in the E2E
+#     Only the self-test runs in this workflow — the oracle itself runs in the E2E
 #     lanes, over the journal the recording proxy writes. What the self-test
 #     protects is the oracle's ability to FAIL: every assertion in it is a set
 #     operation over a file that may be absent, empty or truncated, so without
@@ -1044,18 +1044,6 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         timeout-minutes: 7
         run: bash scripts/ci/ensure_ci_tools.sh xmllint=libxml2-utils jq=jq zstd=zstd
-
-      # The one non-bash guard in this job. `check-wire-canaries.dart` is a
-      # plain Dart program with no package dependencies — it imports
-      # `dart:convert`/`math`/`typed_data` and one relative library — so it
-      # needs an SDK but no `pub get` and no Flutter. setup-dart is ~10 s,
-      # which is why the canary self-test can live here with the other
-      # invariants instead of behind the coverage job's toolchain.
-      - name: Set up Dart
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        uses: dart-lang/setup-dart@v1
-        with:
-          sdk: stable
 
       # Every step after the checkout, the setup above included, carries the
       # same `if:` — run whenever checkout succeeded, even if an earlier step
@@ -2122,8 +2110,8 @@ jobs:
 
       # The POSITIVE half. Everything above proves the wire instrument is
       # SAFE — unreachable from the app, and each oracle able to fail its own
-      # fixtures. None of it proves the instrument is USED. The three oracle
-      # steps in this job are `--self-test` invocations; that is the whole of
+      # fixtures. None of it proves the instrument is USED. The wire oracles'
+      # steps in the `harness` job are `--self-test` invocations; that is the whole of
       # their CI presence, and it is precisely the shape
       # docs/CI_HARDENING_BACKLOG.md catalogues ten times over as "written,
       # reviewed, passes its own self-test, executes nowhere".
@@ -2450,12 +2438,18 @@ jobs:
         uses: actions/checkout@v6
 
       # The same tools as the static checks' job, for the harnesses that parse
-      # XML or JSON or run a Dart canary.
+      # XML or JSON.
       - name: Ensure xmllint, jq and zstd
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         timeout-minutes: 7
         run: bash scripts/ci/ensure_ci_tools.sh xmllint=libxml2-utils jq=jq zstd=zstd
 
+      # The one non-bash step in this workflow. `check-wire-canaries.dart`
+      # is a plain Dart program with no package dependencies — it imports
+      # `dart:convert`/`math`/`typed_data` and one relative library — so it
+      # needs an SDK but no `pub get` and no Flutter. setup-dart is ~10 s,
+      # which is why the canary self-test can live here with the other
+      # harnesses instead of behind the coverage job's toolchain.
       - name: Set up Dart
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         uses: dart-lang/setup-dart@v1

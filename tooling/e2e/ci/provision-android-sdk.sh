@@ -261,6 +261,12 @@ install_package() {
       # action runs its own `sdkmanager --install`) is compared against.
       printf '%s: %s verified on attempt %d/%d (sdkmanager rc %d, revision %s).\n' \
         "${SCRIPT_NAME}" "${pkg}" "${attempt}" "${PACKAGE_ATTEMPTS}" "${rc}" "$(package_revision "${pkg}")"
+      # A package the retry rescued is the fault require-adb.sh stops a lane
+      # on, caught here: an annotation, so recurrences can be counted while
+      # the cause is unknown.
+      if (( attempt > 1 )); then
+        echo "::warning::${SCRIPT_NAME}: ${pkg} verified only on attempt ${attempt}/${PACKAGE_ATTEMPTS}; earlier attempts left it unusable (infrastructure, ridden out)."
+      fi
       return 0
     fi
     # sdkmanager's own words are the evidence for why the package did not land;
@@ -479,6 +485,11 @@ run_self_test() {
   # 3 for platform-tools (2 failures + 1 success), then 1 each for the rest.
   if (( rc != 0 )) || (( n != 6 )) || [[ "${out}" != *"verified on attempt 3/3"* ]]; then
     echo "SELF-TEST FAIL (b): two transient failures must be ridden out on the third attempt; got rc=${rc}, ${n} invocation(s)" >&2
+    fail=1
+  fi
+  if [[ "${out}" != *"::warning::${SCRIPT_NAME}: platform-tools verified only on attempt 3/3"* ]] \
+     || [[ "$(grep -c '::warning::' <<<"${out}")" != 1 ]]; then
+    echo "SELF-TEST FAIL (b): a package the retry rescued must raise exactly one ::warning:: naming it, and one verified on its first attempt none" >&2
     fail=1
   fi
 
@@ -741,7 +752,7 @@ run_self_test() {
     echo "${SCRIPT_NAME}: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${SELF_TEST_FIXTURES}; a fixture was added or removed without moving the pin" >&2
     return 1
   fi
-  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a clean run installs and verifies exactly the four packages the arguments name; two transient failures are ridden out on the third attempt; an sdkmanager that exits 0 having installed nothing fails closed with one ::error:: naming the package, calling it infrastructure and saying no test ran; the fake emulator refuses a probe without -no-window, as a headless runner's does, so the clean run proves the flag is passed; an emulator whose binary does not run is caught by the probe, which says why, and its directory removed before the retry; a system image whose manifest landed without its system.img fails closed naming what is missing, and sdkmanager's download cache does not survive into the retry; platform-tools whose manifest landed without a runnable adb fails closed saying so and is reinstalled on every attempt; a failed attempt shows sdkmanager's own last lines and a verified one its recorded revision; an sdkmanager absent from both the SDK root and PATH exits ${RC_BROKEN}, distinct from that, while one reachable only through PATH still provisions; the fake sdkmanager itself answers ONLY the production argv, \`--install <package> --channel=0\`, refusing a missing --install, a missing package and an extra flag without installing anything, so a production call that drifts reds these fixtures instead of passing against a yes-machine; every wrong argument list prints usage, exits ${RC_BROKEN} and runs nothing; a package that exhausts the attempts stops the run at exactly ${PACKAGE_ATTEMPTS} invocations; a spent budget fails closed without starting another attempt, and an attempt that spends it is followed by no backoff; no operand-less \`return\`, no pipeline ending in a quiet grep, one backoff per pause; and the header's worst case is the one the constants add up to)."
+  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a clean run installs and verifies exactly the four packages the arguments name; two transient failures are ridden out on the third attempt, with one ::warning:: naming the rescued package; an sdkmanager that exits 0 having installed nothing fails closed with one ::error:: naming the package, calling it infrastructure and saying no test ran; the fake emulator refuses a probe without -no-window, as a headless runner's does, so the clean run proves the flag is passed; an emulator whose binary does not run is caught by the probe, which says why, and its directory removed before the retry; a system image whose manifest landed without its system.img fails closed naming what is missing, and sdkmanager's download cache does not survive into the retry; platform-tools whose manifest landed without a runnable adb fails closed saying so and is reinstalled on every attempt; a failed attempt shows sdkmanager's own last lines and a verified one its recorded revision; an sdkmanager absent from both the SDK root and PATH exits ${RC_BROKEN}, distinct from that, while one reachable only through PATH still provisions; the fake sdkmanager itself answers ONLY the production argv, \`--install <package> --channel=0\`, refusing a missing --install, a missing package and an extra flag without installing anything, so a production call that drifts reds these fixtures instead of passing against a yes-machine; every wrong argument list prints usage, exits ${RC_BROKEN} and runs nothing; a package that exhausts the attempts stops the run at exactly ${PACKAGE_ATTEMPTS} invocations; a spent budget fails closed without starting another attempt, and an attempt that spends it is followed by no backoff; no operand-less \`return\`, no pipeline ending in a quiet grep, one backoff per pause; and the header's worst case is the one the constants add up to)."
   return 0
 }
 

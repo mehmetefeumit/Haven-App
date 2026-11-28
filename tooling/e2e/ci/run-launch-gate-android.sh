@@ -1894,8 +1894,11 @@ print(json.dumps({k[0]: "Get Started", k[1]: "Create My Identity", k[2]: "Not no
   _scenario "an error dialog the boot left in front is closed before the first leg" 0 setup-held map \
     "STUB_BOOT_DIALOG=Application Not Responding: com.google.android.apps.nexuslauncher"
   ran=$(( ran + 1 ))
-  if sed -n '/settings get global hide_error_dialogs/,$p' "${tmp}/stub/calls" \
-      | grep -qxF -- '-s emulator-5554 shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS'; then
+  # One process, not `sed | grep -q`: grep -q exits at the match, and under
+  # pipefail the SIGPIPE that then ends sed failed this check at random.
+  if awk -v want='-s emulator-5554 shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS' \
+      'index($0, "settings get global hide_error_dialogs") { after = 1 } after && $0 == want { found = 1; exit } END { exit !found }' \
+      "${tmp}/stub/calls"; then
     echo "  PASS …by CLOSE_SYSTEM_DIALOGS, once hide_error_dialogs reads back 1"
   else echo "  FAIL CLOSE_SYSTEM_DIALOGS never reached the device after hide_error_dialogs read back 1" >&2; fails=1; fi
   _scenario "an error dialog CLOSE_SYSTEM_DIALOGS does not close is infrastructure, before any leg" 3 setup-held map \

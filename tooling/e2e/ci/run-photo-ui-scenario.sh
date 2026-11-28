@@ -750,8 +750,8 @@ self_test() {
   _scenario "a process the boot left not responding is closed before the first round" 0 STUB_BOOT_ANR=1
   ran=$(( ran + 1 ))
   local close_at seed_at
-  close_at="$(grep -n 'CLOSE_SYSTEM_DIALOGS' "${tmp}/stub/calls" | head -n 1 | cut -d: -f1)"
-  seed_at="$(grep -n '^-s [^ ]* push ' "${tmp}/stub/calls" | head -n 1 | cut -d: -f1)"
+  close_at="$(grep -n -m 1 'CLOSE_SYSTEM_DIALOGS' "${tmp}/stub/calls" | cut -d: -f1)"
+  seed_at="$(grep -n -m 1 '^-s [^ ]* push ' "${tmp}/stub/calls" | cut -d: -f1)"
   if [[ -n "${close_at}" && -n "${seed_at}" ]] && (( close_at < seed_at )) && grep -qF 'errors=settled' <<<"${out}"; then
     echo '  PASS …by CLOSE_SYSTEM_DIALOGS, before the gallery is seeded'
   else

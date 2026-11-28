@@ -234,7 +234,7 @@ check_dir() {
       jobs_seen[${job}]=1
       if is_emulator_step "${uses}"; then
         EMU_STEPS=$((EMU_STEPS + 1))
-        # P7 — per step, not per job: the snapshot step boots an emulator too.
+        # P7 — per step, not per job: every step that uses the action boots one.
         case "${headless}" in
           no) note_violation "P7 ${base} :: ${job}: '${name}' (step ${idx}) passes emulator-options without \`-no-window\`. ${PROVISION_SH} verifies the HEADLESS emulator binary (\`emulator -no-window -version\`); without the flag this step boots the windowed one, which nothing verified and which links desktop libraries a runner does not have." ;;
           -) note_violation "P7 ${base} :: ${job}: '${name}' (step ${idx}) declares no emulator-options. The action's default options happen to include \`-no-window\`, but a default this repo does not pin is a default that can change — declare the options and keep \`-no-window\` among them." ;;

@@ -26,6 +26,16 @@
 # which adb PATH resolves, the platform-tools revision on disk (compare it with
 # the one provision-android-sdk.sh logged) and the directory's contents.
 #
+# That report must not die with the action. What this script prints reaches the
+# log only through the action, which reads it from a pipe and writes it on; a
+# line still in that pipe when the action is killed is lost (a harness modelled
+# on @actions/exec lost the `::error::` once in 260 runs). Flushing cannot help:
+# bash's echo is already a write(2), and the bytes are lost in the reader. So
+# the report is written straight to the action's own standard output, the pipe
+# the runner reads (/proc/<pid>/fd/1, opened for append): once that write
+# returns, the runner holds it whatever happens to the action, and only then is
+# the action stopped. It is also appended to $GITHUB_STEP_SUMMARY, a file.
+#
 # Usage:
 #   require-adb.sh               (the action's pre-emulator-launch-script)
 #   require-adb.sh --self-test
@@ -92,7 +102,7 @@ evidence() {
 }
 
 require_adb() {
-  local adb probe_out probe_rc=0 why pid
+  local adb probe_out probe_rc=0 why pid verdict report=""
   # bash's lookup falls back to a NON-executable match, so -x decides.
   adb="$(command -v adb || true)"
   if [[ -z "${adb}" || ! -x "${adb}" ]]; then
@@ -105,24 +115,30 @@ require_adb() {
       return 0
     fi
     why="\`${adb} version\` exited ${probe_rc}"
-    echo "${SCRIPT_NAME}: its last lines:"
-    tail -n "${PROBE_TAIL_LINES}" <<<"${probe_out}" | sed 's/^/    | /'
+    report="${SCRIPT_NAME}: its last lines:"$'\n'"$(tail -n "${PROBE_TAIL_LINES}" <<<"${probe_out}" | sed 's/^/    | /')"$'\n'
   fi
-  evidence
-  echo "::error::${SCRIPT_NAME}: ${why}. This is INFRASTRUCTURE, not a product failure: the emulator action would poll adb for its whole boot timeout and then hang on a teardown it cannot run, so it is stopped here, before it starts an emulator; no test ran."
+  verdict="${SCRIPT_NAME}: ${why}. This is INFRASTRUCTURE, not a product failure: the emulator action would poll adb for its whole boot timeout and then hang on a teardown it cannot run, so it is stopped here, before it starts an emulator; no test ran."
+  report+="$(evidence)"$'\n'"::error::${verdict}"$'\n'
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    printf '### Emulator step stopped: no runnable adb\n\n%s\n\n```\n%s```\n' "${verdict}" "${report}" >> "${GITHUB_STEP_SUMMARY}" || true
+  fi
   pid="$(action_pid "${FROM_PID}")"
-  if [[ -n "${pid}" ]]; then
-    stop_action "${pid}"
-  else
+  if [[ -z "${pid}" ]]; then
+    printf '%s' "${report}"
     echo "::error::${SCRIPT_NAME}: no ancestor process is the emulator action, so nothing was stopped."
+    return "${RC_NO_ADB}"
   fi
+  # Past the action's relay, so the kill cannot drop it; where the action's
+  # descriptor cannot be opened, through the relay as before.
+  { printf '%s' "${report}" >> "${PROC_ROOT}/${pid}/fd/1"; } 2>/dev/null || printf '%s' "${report}"
+  stop_action "${pid}"
   return "${RC_NO_ADB}"
 }
 
 # ---------------------------------------------------------------------------
 # Self-test: a stub adb on a PATH of its own, and a fake process table.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=6
+readonly SELF_TEST_FIXTURES=8
 
 # fake_proc <root> <pid> <ppid> <cmdline…> — one process of the fake table.
 fake_proc() {
@@ -135,6 +151,8 @@ fake_proc() {
 
 run_self_test() {
   local tmp ran=0 fail=0 rc out
+  # The CI step running this has a summary of its own, which no fixture writes.
+  unset GITHUB_STEP_SUMMARY
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}'" RETURN
@@ -156,12 +174,24 @@ run_self_test() {
   fake_proc "${PROC_ROOT}" 4100 1 /home/runner/externals/node24/bin/node \
     /home/runner/work/_actions/reactivecircus/android-emulator-runner/v2/lib/main.js
   fake_proc "${PROC_ROOT}" 4200 4100 /usr/bin/sh -c "bash tooling/e2e/ci/require-adb.sh"
-  stop_action() { printf '%s\n' "$1" >> "${tmp}/stopped"; }
+  # The action's standard output, the runner's pipe, is a file here.
+  mkdir -p "${PROC_ROOT}/4100/fd"
+  # Records the stop, as `unreported` when the ::error:: was not yet in the
+  # action's output: a kill sent before it would lose it.
+  stop_action() {
+    if grep -qF '::error::' "${PROC_ROOT}/$1/fd/1" 2>/dev/null; then printf '%s\n' "$1"; else echo unreported; fi >> "${tmp}/stopped"
+  }
 
-  # _run <sdk dir> — the check, with that SDK's platform-tools as the only adb.
+  # _run <sdk dir> — the check, with that SDK's platform-tools as the only adb:
+  # `relayed` is what it printed (what the action passes on), `direct` what it
+  # wrote to the action's own standard output, `out` both.
+  local relayed direct
   _run() {
-    rc=0; rm -f "${tmp}/stopped"
-    out="$(ANDROID_HOME="$1" PATH="${tmp}/bin:$1/platform-tools" FROM_PID=4200 require_adb 2>&1)" || rc=$?
+    rc=0; rm -f "${tmp}/stopped" "${tmp}/summary"; : > "${PROC_ROOT}/4100/fd/1"
+    relayed="$(ANDROID_HOME="$1" PATH="${tmp}/bin:$1/platform-tools" FROM_PID=4200 \
+      GITHUB_STEP_SUMMARY="${tmp}/summary" require_adb 2>&1)" || rc=$?
+    direct="$(cat "${PROC_ROOT}/4100/fd/1")"
+    out="${relayed}${direct}"
   }
 
   # (a) A runnable adb passes, says which one and its revision, and stops
@@ -169,6 +199,9 @@ run_self_test() {
   ran=$(( ran + 1 )); _run "${tmp}/ok"
   if (( rc != 0 )) || [[ "${out}" != *"OK — ${tmp}/ok/platform-tools/adb: Android Debug Bridge version 1.0.41; platform-tools revision on disk: 36.0.1"* ]] || [[ -e "${tmp}/stopped" ]]; then
     echo "SELF-TEST FAIL (a): a runnable adb must pass, name itself and stop nothing; got rc=${rc}: ${out}" >&2; fail=1
+  fi
+  if [[ -e "${tmp}/summary" || -n "${direct}" ]]; then
+    echo "SELF-TEST FAIL (a): a runnable adb must write no step summary and nothing past the action" >&2; fail=1
   fi
 
   # (b) No adb PATH resolves (here the file is there, not executable): rc 3,
@@ -182,6 +215,19 @@ run_self_test() {
   if [[ "${out}" != *"platform-tools revision on disk: 36.0.2"* ]] || [[ "${out}" != *"    | "*"adb"* ]] \
      || [[ "${out}" != *"${tmp}/none/platform-tools"* ]]; then
     echo "SELF-TEST FAIL (b): a missing adb must print the evidence — the PATH entry, the revision on disk and the directory listing; got: ${out}" >&2; fail=1
+  fi
+
+  # (b2) That report goes to the action's own standard output, once, and none
+  #      of it through the action's relay, which the kill would cut; and the
+  #      step summary holds the verdict and the evidence.
+  ran=$(( ran + 1 ))
+  if [[ "${direct}" != *"::error::${SCRIPT_NAME}: no executable adb"* || "${direct}" != *"revision on disk: 36.0.2"* ]] \
+     || [[ "$(grep -c '::error::' <<<"${direct}")" != 1 || -n "${relayed}" ]]; then
+    echo "SELF-TEST FAIL (b2): the verdict and evidence must be written once to the action's standard output and nothing relayed; relayed '${relayed}', direct '${direct}'" >&2; fail=1
+  fi
+  if ! grep -qF "${SCRIPT_NAME}: no executable adb on the PATH" "${tmp}/summary" 2>/dev/null \
+     || ! grep -qF "revision on disk: 36.0.2" "${tmp}/summary"; then
+    echo "SELF-TEST FAIL (b2): \$GITHUB_STEP_SUMMARY must hold the verdict and the evidence; got: $(cat "${tmp}/summary" 2>/dev/null)" >&2; fail=1
   fi
 
   # (c) An adb that does not run: its exit code and last lines, then the same.
@@ -209,6 +255,8 @@ run_self_test() {
   # (f) End to end on the real process table: the script, run with no adb
   #     under a process whose command line names the action, ends that
   #     process with SIGTERM before the process could print "survived".
+  #     The script's own output is discarded, the worst a relay cut by the
+  #     kill can do, and the ::error:: must still be in the action's output.
   ran=$(( ran + 1 ))
   rc=0
   out="$(ANDROID_HOME="${tmp}/none" PATH="${tmp}/bin:${tmp}/none/platform-tools" \
@@ -216,6 +264,10 @@ run_self_test() {
     "${BASH_SOURCE[0]}" 2>&1)" || rc=$?
   if (( rc != 143 )) || [[ "${out}" == *survived* ]]; then
     echo "SELF-TEST FAIL (f): a missing adb under the action must end the action's process with SIGTERM (rc 143); got rc=${rc}: ${out}" >&2; fail=1
+  fi
+  ran=$(( ran + 1 ))
+  if [[ "${out}" != *"::error::${SCRIPT_NAME}: no executable adb on the PATH"* ]]; then
+    echo "SELF-TEST FAIL (f2): the ::error:: must reach the action's own output before the kill, not depend on the action relaying it; got: ${out}" >&2; fail=1
   fi
 
   if (( fail != 0 )); then
@@ -226,7 +278,7 @@ run_self_test() {
     echo "${SCRIPT_NAME}: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${SELF_TEST_FIXTURES}" >&2
     return 1
   fi
-  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a runnable adb passes and names itself; one PATH does not resolve, or one whose \`version\` fails, is rc ${RC_NO_ADB} as infrastructure with the PATH entry, the revision on disk and the directory listing, and stops the emulator action's process — never the shell between; outside the action nothing is stopped and that is said; the ancestor walk survives a command name with spaces and parentheses; and, on the real process table, the action's process ends on a SIGTERM)."
+  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a runnable adb passes and names itself; one PATH does not resolve, or one whose \`version\` fails, is rc ${RC_NO_ADB} as infrastructure with the PATH entry, the revision on disk and the directory listing, and stops the emulator action's process — never the shell between — having first written that report to the action's own standard output, past the relay the kill would cut, and to the step summary; outside the action nothing is stopped and that is said; the ancestor walk survives a command name with spaces and parentheses; and, on the real process table, the action's process ends on a SIGTERM with the ::error:: already in its output)."
 }
 
 if [[ "${1:-}" == "--self-test" && $# -eq 1 ]]; then
