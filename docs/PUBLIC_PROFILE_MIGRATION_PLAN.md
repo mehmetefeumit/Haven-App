@@ -265,7 +265,7 @@ CREATE TABLE IF NOT EXISTS profile_pictures (
     url        TEXT NOT NULL,      -- never crosses the FFI (D2)
     sha256     BLOB NOT NULL,      -- raw-download hash (Blossom commitment)
     canonical  BLOB NOT NULL,      -- re-encoded 512px JPEG (render source)
-    thumbnail  BLOB NOT NULL,      -- 96px (markers)
+    thumbnail  BLOB NOT NULL,      -- 256px (markers)
     updated_at INTEGER NOT NULL
 );
 ```

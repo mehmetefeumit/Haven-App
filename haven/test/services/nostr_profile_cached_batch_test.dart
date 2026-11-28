@@ -132,7 +132,7 @@ void main() {
 
     test('never reads picture bytes, even when the cache holds them',
         () async {
-      // The picker keeps only the hash: a roster's worth of 96px thumbnails
+      // The picker keeps only the hash: a roster's worth of 256px thumbnails
       // is tens of megabytes decrypted, marshalled across FFI and dropped
       // for a list whose visible window is a handful of rows.
       final manager = _FakeCircleManager({

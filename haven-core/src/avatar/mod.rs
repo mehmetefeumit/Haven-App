@@ -31,5 +31,6 @@ pub use config::{
 };
 pub use error::{AvatarError, Result};
 pub use image::{
-    content_hash, process_inbound_avatar, process_own_avatar, ProcessedAvatar, StagedPicture,
+    content_hash, process_inbound_avatar, process_own_avatar, rederive_thumbnail,
+    thumbnail_is_current, ProcessedAvatar, StagedPicture,
 };

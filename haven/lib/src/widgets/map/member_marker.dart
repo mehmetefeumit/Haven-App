@@ -196,11 +196,11 @@ class MemberMarker extends StatefulWidget {
   static const Duration _appearDuration = Duration(milliseconds: 180);
 
   /// The square paint-box size for a bubble of [diameter] — large enough that
-  /// the longest tail (reach 22 from the rim), ring, keyline and shadow never
+  /// the longest tail (reach 33 from the rim), ring, keyline and shadow never
   /// clip. The layer positions the marker centred on its head using this, so
   /// the two stay in agreement.
   static double footprintFor(double diameter) =>
-      math.max(diameter + 2 * kDropletMaxTailOnScreen + 24, kMinTapTarget);
+      math.max(diameter + 2 * kDropletMaxTailOnScreen + 36, kMinTapTarget);
 
   @override
   State<MemberMarker> createState() => _MemberMarkerState();
@@ -422,7 +422,7 @@ class _MemberMarkerState extends State<MemberMarker>
                 textScaler: textScaler,
               ),
             ),
-          // The semantics node is the tap-sized box, not the 120 px footprint,
+          // The semantics node is the tap-sized box, not the 180 px footprint,
           // so a screen reader's focus ring matches what a finger can hit.
           Transform.translate(
             offset: widget.tapOffset,
@@ -508,11 +508,11 @@ class _AgePill extends StatelessWidget {
   }
 }
 
-/// Ring stroke width for a head of [diameter]: 3 px at full size, easing to
-/// 1.5 px at the far bead.
+/// Ring stroke width for a head of [diameter]: 4.5 px at full size, easing to
+/// 2.25 px at the far bead.
 @visibleForTesting
 double markerRingWidthFor(double diameter) =>
-    1.5 + 1.5 * (diameter / kDropletFullDiameter).clamp(0.0, 1.0);
+    2.25 + 2.25 * (diameter / kDropletFullDiameter).clamp(0.0, 1.0);
 
 /// Paints the pin pointing along [angle].
 ///
@@ -549,7 +549,7 @@ class _MarkerTeardropPainter extends CustomPainter {
     final center = Offset(size.width / 2, size.height / 2);
     final scale = (diameter / kDropletFullDiameter).clamp(0.0, 1.0);
     final ringWidth = markerRingWidthFor(diameter);
-    final elevation = 1.0 + 1.0 * scale;
+    final elevation = 1.5 + 1.5 * scale;
     final headRect = Rect.fromCircle(center: center, radius: radius);
 
     final shape = teardropPath(radius, nubLength, ringWidth / 2).transform(
@@ -567,7 +567,7 @@ class _MarkerTeardropPainter extends CustomPainter {
         Paint()
           ..color = kMarkerKeyline
           ..style = PaintingStyle.stroke
-          ..strokeWidth = ringWidth + 2
+          ..strokeWidth = ringWidth + 3
           ..strokeJoin = StrokeJoin.round
           ..isAntiAlias = true,
       )
@@ -656,11 +656,13 @@ class _MarkerTeardropPainter extends CustomPainter {
 /// origin with its apex [nub] pixels past the rim along `+x`, pulled back by
 /// [apexInset] so a ring stroked on the outline reaches `radius + nub` exactly.
 ///
-/// The flanks are concave: a quadratic from each tangent point whose control
-/// sits 30% of the way to the apex and 35% as far from the axis as the tangent
-/// point, giving a ~30° apex half-angle at the on-screen tail rather than the
-/// stubby ~46° of straight tangents. It is a plain circle when [nub] is
-/// negligible, or when the inset leaves no tail to draw.
+/// Each flank is a cubic that leaves the circle along the circle's own tangent,
+/// so the join has no corner, then bows inward (concave) to the apex at a
+/// half-angle of 0.6 × that of straight tangents (~29° at the on-screen tail).
+/// A flank can only leave tangentially and still be concave if it leaves
+/// AHEAD of the straight-tangent point (theta), so it leaves at phi with
+/// cos(phi) = √cos(theta), which also shrinks to the apex as [nub] does. It is
+/// a plain circle when [nub] is negligible, or when the inset leaves no tail.
 @visibleForTesting
 Path teardropPath(double radius, double nub, double apexInset) {
   final apexX = radius + nub - apexInset;
@@ -668,24 +670,31 @@ Path teardropPath(double radius, double nub, double apexInset) {
     return Path()
       ..addOval(Rect.fromCircle(center: Offset.zero, radius: radius));
   }
-  // Tangent point angle: cos(theta) = radius / distance-to-apex.
-  final theta = math.acos((radius / apexX).clamp(-1.0, 1.0));
-  final tangent = Offset(radius * math.cos(theta), radius * math.sin(theta));
-  final control = Offset(
-    tangent.dx + 0.3 * (apexX - tangent.dx),
-    tangent.dy * 0.35,
-  );
+  final cosTheta = radius / apexX;
+  final phi = math.acos(math.sqrt(cosTheta));
+  final halfAngle = 0.6 * (math.pi / 2 - math.acos(cosTheta));
+  final apex = Offset(apexX, 0);
+  final join = Offset(radius * math.cos(phi), radius * math.sin(phi));
+  final joinDir = Offset(math.sin(phi), -math.cos(phi));
+  final apexDir = Offset(-math.cos(halfAngle), math.sin(halfAngle));
+  double cross(Offset a, Offset b) => a.dx * b.dy - a.dy * b.dx;
+  // Where the join's tangent meets the apex's flank line; both handles lie
+  // on those lines, which fixes the direction at each end.
+  final corner =
+      join + joinDir * (cross(apex - join, apexDir) / cross(joinDir, apexDir));
+  final c1 = Offset.lerp(join, corner, 0.75)!;
+  final c2 = Offset.lerp(apex, corner, 0.6)!;
   return Path()
     ..moveTo(apexX, 0)
-    ..quadraticBezierTo(control.dx, control.dy, tangent.dx, tangent.dy)
-    // Arc the long way around the back of the circle to the mirrored tangent
-    // point, leaving the front wedge for the two flanks and the tip.
+    ..cubicTo(c2.dx, c2.dy, c1.dx, c1.dy, join.dx, join.dy)
+    // Arc the long way around the back of the circle to the mirrored join,
+    // leaving the front wedge for the two flanks and the tip.
     ..arcTo(
       Rect.fromCircle(center: Offset.zero, radius: radius),
-      theta,
-      2 * math.pi - 2 * theta,
+      phi,
+      2 * math.pi - 2 * phi,
       false,
     )
-    ..quadraticBezierTo(control.dx, -control.dy, apexX, 0)
+    ..cubicTo(c1.dx, -c1.dy, c2.dx, -c2.dy, apexX, 0)
     ..close();
 }

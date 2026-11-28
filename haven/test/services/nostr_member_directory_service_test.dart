@@ -215,7 +215,7 @@ void main() {
     test('never asks for picture bytes it would immediately drop', () async {
       // A [MemberCandidate] keeps only [MemberCandidate.pictureHash]; the
       // bytes a per-person `getMemberProfile` fetches are decrypted,
-      // marshalled across FFI and thrown away, one 96px thumbnail per
+      // marshalled across FFI and thrown away, one 256px thumbnail per
       // person with a picture.
       final profileService = MockProfileService(
         memberProfiles: {

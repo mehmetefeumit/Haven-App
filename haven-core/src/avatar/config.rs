@@ -23,7 +23,13 @@ pub const AVATAR_TIER_EDGE_PX: u32 = 512;
 /// Local thumbnail square edge length, in pixels.
 ///
 /// Derived on-device for map markers and member tiles (the hot display path).
-pub const AVATAR_THUMB_EDGE_PX: u32 = 96;
+/// A full-size map marker shows it 78 dp across (`kDropletFullDiameter`), so
+/// it must hold at least 3 × 78 = 234 px to stay sharp at 3x; half the
+/// canonical edge clears that with an exact 2:1 downscale.
+pub const AVATAR_THUMB_EDGE_PX: u32 = AVATAR_TIER_EDGE_PX / 2;
+
+// 78 is `kDropletFullDiameter` in the Flutter app's `marker_geometry.dart`.
+const _: () = assert!(AVATAR_THUMB_EDGE_PX >= 3 * 78);
 
 /// MIME type of the canonical (and thumbnail) encode (DEC-1b).
 ///

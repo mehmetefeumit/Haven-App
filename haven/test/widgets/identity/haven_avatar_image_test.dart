@@ -75,15 +75,56 @@ void main() {
           )),
         );
 
-        // Image.memory must be present.
+        // Image.memory must be present: local bytes, decoded at display size.
         expect(find.byType(Image), findsOneWidget);
         final imageWidget = tester.widget<Image>(find.byType(Image));
-        expect(imageWidget.image, isA<MemoryImage>());
+        expect(imageWidget.image, isA<ResizeImage>());
+        expect(
+          (imageWidget.image as ResizeImage).imageProvider,
+          isA<MemoryImage>(),
+        );
 
         // Image.network must never appear.
         expect(find.byType(NetworkImage), findsNothing);
       },
     );
+
+    testWidgets('decodes the picture at its on-screen size, never larger', (
+      tester,
+    ) async {
+      Future<ResizeImage> decodeOf({
+        required double ratio,
+        HavenAvatarSize size = HavenAvatarSize.medium,
+        double? diameter,
+      }) async {
+        tester.view.devicePixelRatio = ratio;
+        await tester.pumpWidget(
+          _app(HavenAvatar(
+            imageBytes: _kMinimalJpegBytes,
+            publicKey: 'deadbeef0123',
+            size: size,
+            diameter: diameter,
+          )),
+        );
+        return tester.widget<Image>(find.byType(Image)).image as ResizeImage;
+      }
+
+      addTearDown(tester.view.resetDevicePixelRatio);
+      for (final (ratio, size, diameter, px) in [
+        (3.0, HavenAvatarSize.medium, null, 144),
+        (2.0, HavenAvatarSize.xlarge, null, 192),
+        (2.75, HavenAvatarSize.small, 40.0, 110),
+      ]) {
+        final decode = await decodeOf(
+          ratio: ratio,
+          size: size,
+          diameter: diameter,
+        );
+        expect(decode.width, px, reason: '$size $diameter @$ratio');
+        expect(decode.height, px, reason: '$size $diameter @$ratio');
+        expect(decode.allowUpscaling, isFalse);
+      }
+    });
 
     testWidgets('renders initials when imageBytes is null', (tester) async {
       await tester.pumpWidget(

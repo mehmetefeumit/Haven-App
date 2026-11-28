@@ -30,10 +30,10 @@ void main() {
     return t > math.pi ? t - 2 * math.pi : t;
   }
 
-  // The head can sit on the point at the top edge, ~52 px under the inset.
-  bool inTopBand(Offset p) => p.dy - vp.safeRect.top < 56 + 1e-6;
+  // The head can sit on the point at the top edge, ~78 px under the inset.
+  bool inTopBand(Offset p) => p.dy - vp.safeRect.top < 84 + 1e-6;
 
-  // Every on-screen grid point, plus the 4 px band at each edge at 0.5 px.
+  // Every on-screen grid point, plus the 6 px band at each edge at 0.5 px.
   List<Offset> onScreenGrid() {
     final r = vp.safeRect;
     final pts = <Offset>[];
@@ -42,7 +42,7 @@ void main() {
         pts.add(Offset(x, y));
       }
     }
-    for (var o = 0.0; o <= 4; o += 0.5) {
+    for (var o = 0.0; o <= 6; o += 0.5) {
       for (var t = 0.0; t <= 1; t += 1 / 40) {
         final x = r.left + t * r.width;
         final y = r.top + t * r.height;
@@ -74,7 +74,7 @@ void main() {
       expect(p.diameter, kDropletFullDiameter);
       expect(p.nubLength, closeTo(kDropletOnScreenTail, 1e-9));
       expect(p.angle, closeTo(math.pi / 2, 1e-9));
-      expect(p.bubbleCenter, center - const Offset(0, 36));
+      expect(p.bubbleCenter, center - const Offset(0, 54));
       expect((tipOf(p) - center).distance, lessThan(1e-6));
     });
 
@@ -89,13 +89,13 @@ void main() {
 
     test('on-screen near the edge holds the head and keeps the tip on it', () {
       // 5px inside the right edge: on-screen, so not off-screen, full size,
-      // the head held 30 px in and the tail stretched to reach the point.
+      // the head held 45 px in and the tail stretched to reach the point.
       final pt = Offset(vp.safeRect.right - 5, vp.safeRect.center.dy);
       final p = project(pt);
       expect(p.offScreen, isFalse);
       expect(p.bearing, 0);
       expect(p.diameter, kDropletFullDiameter);
-      expect(p.bubbleCenter.dx, vp.safeRect.right - 30);
+      expect(p.bubbleCenter.dx, vp.safeRect.right - 45);
       expect(p.nubLength, greaterThan(kDropletOnScreenTail));
       expect((tipOf(p) - pt).distance, lessThan(1e-6));
     });
@@ -116,7 +116,7 @@ void main() {
       for (final pt in onScreenGrid()) {
         final p = project(pt);
         final r = p.diameter / 2;
-        final inner = vp.safeRect.deflate(r + 4);
+        final inner = vp.safeRect.deflate(r + 6);
         expect(p.bubbleCenter.dx, greaterThanOrEqualTo(inner.left - 1e-9));
         expect(p.bubbleCenter.dx, lessThanOrEqualTo(inner.right + 1e-9));
         expect(p.bubbleCenter.dy, greaterThanOrEqualTo(inner.top - 1e-9));
@@ -156,7 +156,7 @@ void main() {
       }
       expect(sawZero, isTrue);
       expect(regrewUp, isTrue);
-      expect(firstZeroDepth, lessThanOrEqualTo(56 + 1e-6));
+      expect(firstZeroDepth, lessThanOrEqualTo(84 + 1e-6));
     });
   });
 
@@ -210,25 +210,25 @@ void main() {
       expect(p.bearing, 0);
     });
 
-    test('far from an edge: bead welded 4 px in, 8 px tail at the point', () {
+    test('far from an edge: bead welded 6 px in, 12 px tail at the point', () {
       final r = vp.safeRect;
       final mid = r.center;
       final cases = <(Offset, Offset)>[
         (
           Offset(r.right + vp.falloff + 40, mid.dy),
-          Offset(r.right - 14, mid.dy),
+          Offset(r.right - 21, mid.dy),
         ),
         (
           Offset(r.left - vp.falloff - 40, mid.dy),
-          Offset(r.left + 14, mid.dy),
+          Offset(r.left + 21, mid.dy),
         ),
         (
           Offset(mid.dx, r.top - vp.falloff - 40),
-          Offset(mid.dx, r.top + 14),
+          Offset(mid.dx, r.top + 21),
         ),
         (
           Offset(mid.dx, r.bottom + vp.falloff + 40),
-          Offset(mid.dx, r.bottom - 14),
+          Offset(mid.dx, r.bottom - 21),
         ),
       ];
       for (final (pt, head) in cases) {
@@ -321,9 +321,9 @@ void main() {
     });
 
     test('the cap eases from the clinging cap to the far cap', () {
-      expect(tailCapFor(0), 22);
-      expect(tailCapFor(1), 8);
-      expect(tailCapFor(0.5), closeTo(15, 1e-12));
+      expect(tailCapFor(0), 33);
+      expect(tailCapFor(1), 12);
+      expect(tailCapFor(0.5), closeTo(22.5, 1e-12));
     });
 
     test('a projection carries the cap of its own shrink progress', () {
@@ -425,9 +425,9 @@ void main() {
     });
 
     test('has zero slope at the edge (smoothstep, not ease-out)', () {
-      // Smoothstep loses 32 * (3e-4 - 2e-6) = 0.0095 px at 1% of the falloff;
-      // the old ease-out cubic lost 0.95 px.
-      expect(52 - dropletDiameter(3, 300), lessThan(0.02));
+      // Smoothstep loses 48 * (3e-4 - 2e-6) = 0.0143 px at 1% of the falloff;
+      // the old ease-out cubic lost 1.43 px.
+      expect(78 - dropletDiameter(3, 300), lessThan(0.02));
       expect(dropletProgress(0, 300), 0);
       expect(dropletProgress(300, 300), 1);
       expect(dropletProgress(150, 300), closeTo(0.5, 1e-12));

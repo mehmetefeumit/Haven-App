@@ -12,12 +12,12 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 /// Diameter of a marker's avatar disc, in logical pixels.
-const double kAvatarSize = 44;
+const double kAvatarSize = 66;
 
-/// Diameter of a marker bubble at full (on-screen) size — the avatar plus an
-/// 8dp surround. Equals `kDropletFullDiameter` in `marker_geometry.dart`
+/// Diameter of a marker bubble at full (on-screen) size — the avatar plus a
+/// 12dp surround. Equals `kDropletFullDiameter` in `marker_geometry.dart`
 /// (a test guards the match) so the on-screen and edge sizes are identical.
-const double kRingDiameter = kAvatarSize + 8;
+const double kRingDiameter = kAvatarSize + 12;
 
 /// One initials-disc palette entry: a barely-visible vertical gradient from
 /// [top] to [bottom] (screen space).
@@ -124,6 +124,6 @@ String markerInitials(String? displayName, String pubkey) {
 String markerGlyph(String initials, double diameter) {
   if (initials.isEmpty) return '';
   final graphemes = initials.toUpperCase().characters;
-  final count = diameter >= 40 ? math.min(2, graphemes.length) : 1;
+  final count = diameter >= 60 ? math.min(2, graphemes.length) : 1;
   return graphemes.take(count).string;
 }

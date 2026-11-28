@@ -16,30 +16,30 @@ import 'dart:ui';
 /// size it returns to at the viewport edge).
 ///
 /// MUST equal the avatar ring diameter (`kRingDiameter`); a test guards it.
-const double kDropletFullDiameter = 52;
+const double kDropletFullDiameter = 78;
 
 /// Radius of a marker bubble at full (on-screen) size.
 const double kDropletFullRadius = kDropletFullDiameter / 2;
 
 /// Smallest bubble diameter, used when a member is far off-screen. Large enough
 /// to still carry a single legible initial.
-const double kDropletMinDiameter = 20;
+const double kDropletMinDiameter = 30;
 
 /// Gap, in logical pixels, kept between a bubble's outer rim and the safe
 /// viewport edge — so a small bubble "merges" with the border while a full one
 /// stays wholly on-screen.
-const double kDropletEdgeMargin = 4;
+const double kDropletEdgeMargin = 6;
 
 /// Tail length, measured from the rim, of a marker free on screen.
-const double kDropletOnScreenTail = 10;
+const double kDropletOnScreenTail = 15;
 
 /// Tail cap while the marker clings at full size to an edge, wide enough that
 /// the tip stays on the point for every on-screen point at the side and bottom
-/// edges (a head held 30 px in needs 20.9 px at the worst).
-const double kDropletMaxTailOnScreen = 22;
+/// edges (a head held 45 px in needs 31.3 px at the worst).
+const double kDropletMaxTailOnScreen = 33;
 
 /// Tail cap at the far bead.
-const double kDropletMaxTailFar = 8;
+const double kDropletMaxTailFar = 12;
 
 /// Minimum interactive target size (Material 48dp / WCAG 2.5.5).
 const double kMinTapTarget = 48;
@@ -223,7 +223,7 @@ MarkerProjection projectMarker({
   // Top edge, unavoidable: around the safe rect's boundary the head must lie
   // above the point at the bottom, inward at the sides and below it at the top
   // corners, one full turn, so any continuous placement puts the head over the
-  // point somewhere inside. That is a ~52 px band under the top inset, where
+  // point somewhere inside. That is a ~78 px band under the top inset, where
   // the tail shrinks to 0 and regrows pointing up. Do not try to remove it.
   final lifted = Offset(
     point.dx,
