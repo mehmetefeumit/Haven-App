@@ -971,6 +971,7 @@ void main() {
   // claim rests on whether the engine's own lifecycle message has arrived.
   // See `_lib/app_lifecycle.dart`.
   resumeAppBeforeEachTest();
+  setUpAll(awaitPlatformResumed);
 
   late ScenarioContext ctx;
   late SyntheticUser bob;

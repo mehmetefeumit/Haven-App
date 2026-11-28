@@ -25,12 +25,13 @@
 ///     consulted anywhere on that path.
 ///
 /// What "Always" actually buys is the location relaunch after iOS has
-/// terminated the app, which resumes sharing after movement (owner-directed
-/// 2026-11-26): `HavenSLCHandler.startMonitoring`
-/// (`haven/ios/Runner/HavenSLCHandler.swift`) refuses to arm unless
-/// `authorizationStatus == .authorizedAlways`, and the stream handler starts a
-/// session from a relaunch only under Always. A simulator cannot relaunch a
-/// terminated app, so that half is device-only.
+/// terminated the app, which can resume sharing when iOS next starts Haven in
+/// the background — after movement, or at a background app refresh
+/// (owner-directed 2026-11-26; D4, 2026-11-28):
+/// `HavenSLCHandler.startMonitoring` (`haven/ios/Runner/HavenSLCHandler.swift`)
+/// refuses to arm unless `authorizationStatus == .authorizedAlways`, and the
+/// stream handler starts a session from a relaunch only under Always. A
+/// simulator cannot relaunch a terminated app, so that half is device-only.
 ///
 /// So the honest oracle is: **publishing continues across a pause under BOTH
 /// tiers**, and that is correct rather than a defect. What legitimately
@@ -156,6 +157,7 @@ import 'package:haven/src/test_keys.dart' show WidgetKeys;
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'e2e/_lib/app_lifecycle.dart' show awaitPlatformResumed;
 import 'e2e/_lib/circle_creation.dart'
     show DeliveredCircle, createCircleDelivered, settleLiveSession;
 import 'e2e/_lib/coordination.dart' show waitForKeyPackage;
@@ -316,6 +318,7 @@ Future<void> _heartbeatWhile(
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  setUpAll(awaitPlatformResumed);
 
   testWidgets(
     'B7: observes the granted CoreLocation tier and renders honest copy '

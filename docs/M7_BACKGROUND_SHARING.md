@@ -18,7 +18,10 @@ milestone; the former M3/M6/M8 docs are now appendices in that master plan). Sib
 Architecture at a glance: **OS-scheduled-wake, single-process; every wake handler is receive-only.
 MIP-05 push REJECTED on privacy.** Since 2026-11-26 (owner-directed, OD-R1) a process iOS relaunches
 for a LOCATION event, under Always and the current background disclosure, also resumes the user's own
-sharing — not from a wake handler, but through MapShell's burst plane (`haven-core/SECURITY.md`
+sharing — not from a wake handler, but through MapShell's burst plane. Since 2026-11-28 (owner
+decision D4, with the UIScene migration) a location launch is any process no scene has brought to the
+front at its first location event, which includes the fix iOS delivers when a background-refresh
+launch restarts significant-change monitoring, so such a launch can resume sharing without movement (`haven-core/SECURITY.md`
 "Scheduled background wakes (M7)"). The device wakes itself and fetches from the same relays it already uses — zero new
 observer, zero new metadata channel. The one hard problem — writer-exclusion — is solved by a
 process-global Rust `WRITER_LOCK` (§B). Nothing runs in the background after the user opts out (§C).
@@ -538,7 +541,7 @@ xmllint checks:
 | 14f | Worker terminates in the chokepoint: `runCatchup(isBackgroundWake: true` in executable worker code (stub gone) |
 | 14g | Pending-wipe gate present: `kPendingMlsWipeKey` read in executable worker code, positioned BEFORE the `runCatchup(` line |
 | 14h | (A8) pin `writeCatchupEnabledMirror()` + `registerIosBackgroundCatchupHandler(` call-sites in executable `main.dart` |
-| 14i | (A8) pin the new `applicationDidEnterBackground` re-arm in `AppDelegate.swift` |
+| 14i | (A8) pin the new `applicationDidEnterBackground` re-arm in `AppDelegate.swift` — *rewritten 2026-11-28 (UIScene): UIKit sends the backgrounding to the scene only, so the re-arm is `AppDelegate.sceneDidEnterBackground()`, which `SceneDelegate.sceneDidEnterBackground` must call; both calls pinned at their own statement depth* |
 
 Not pinned: `maxDurationSecs: 25` (a tuning value). Existing checks 1–13 untouched.
 
@@ -717,6 +720,8 @@ because external code cites them.
   `applicationDidEnterBackground` to call `slcHandler.startMonitoring()` +
   `bgTaskHandler.scheduleNextCatchup()` — both idempotent, `isEnabled()`-gated at call time. Scope
   therefore INCLUDES `ios/Runner/AppDelegate.swift` (plan §2 item 5's "iOS doc-only" is superseded).
+  *(2026-11-28, UIScene migration: the hook is now `AppDelegate.sceneDidEnterBackground()`, called
+  from `SceneDelegate.sceneDidEnterBackground`; check 14i pins both.)*
 - **A4 (ARCH, DEFECT lane-fatal — JobScheduler namespace):** androidx.work 2.10.x schedules into
   namespace `androidx.work.systemjobscheduler` on API 34+. Every force-run must be `cmd jobscheduler
   run -f -n androidx.work.systemjobscheduler com.oblivioustech.haven <jobId>`; dumpsys id extraction
@@ -911,8 +916,8 @@ treated as satisfied in the meantime.
 
 **Prerequisites:** a physical iPhone; a debug/Release-like build installed from Xcode; background
 sharing enabled in Haven (Settings → Location); at least one circle with a peer who will publish a
-location. The authorization tier is per row — items 1, 2, 2b and 3 want Always; item 0 has one row per
-tier and says which.
+location. The authorization tier is per row — items 1, 2, 2b, 2m–2q and 3 want Always; item 0 has one
+row per tier and says which, and item 2r works under either.
 
 0. **Background PUBLISH continuity — four rows: 0a, 0a-provisional, 0b, 0c.**
    **DEFERRED — no iPhone available (see `docs/POWER_EFFICIENCY_PLAN.md` §2.5); STILL
@@ -1026,8 +1031,10 @@ tier and says which.
      exact object added after the 2026-08-20 failure.
    * Publishing does not stop across the instant the prompt is answered. `arm()` never withdraws
      an in-use claim from a background callback, so the session survives the upgrade.
-   * The bar clears at the NEXT foreground — the deferred invalidate runs from
-     `applicationWillEnterForeground` — and not before.
+   * The bar clears at the NEXT foreground — the deferred invalidate runs from the scene's
+     `sceneWillEnterForeground` (`SceneDelegate` → `AppDelegate.sceneWillEnterForeground()` →
+     `arm()`; `applicationWillEnterForeground` until the 2026-11-28 UIScene migration) — and not
+     before.
    This row is what closes the provisional half of V-P3-3 and all of V-P3-4. Nothing in CI can
    produce a provisional grant, so nothing in CI can stand in for it.
 
@@ -1060,7 +1067,9 @@ tier and says which.
    Force-quit (swipe-kill): no iOS app continues timer-cadence publishing after termination.
    Since 2026-11-26 (owner-directed, OD-R1) a process iOS RELAUNCHES for a location event —
    items 2 and 2b, and only under Always — resumes this device's own sharing through the burst
-   plane when background sharing is on and the current (v2) background disclosure is accepted;
+   plane when background sharing is on and the current background disclosure (version 3 on iPhone
+   since 2026-11-28) is accepted; since 2026-11-28 (D4) a background-refresh launch counts too, at
+   the fix iOS delivers when it restarts significant-change monitoring (item 2n);
    the native owner refuses every other background start, and the cold-cache shortcut still never
    reaches the plugin one-shot. Under When-In-Use (this row) nothing is relaunched, so after a
    force-quit sharing stays stopped until Haven is opened (item 2f). Whether iOS relaunches at all
@@ -1082,7 +1091,9 @@ tier and says which.
 
 1. **BGAppRefreshTask fires and runs a real catch-up.** Run from Xcode on the device; enable
    background sharing; confirm a peer can publish. Background the app (Home) — this calls
-   `applicationDidEnterBackground`, which arms `scheduleNextCatchup()` (submits a
+   `SceneDelegate.sceneDidEnterBackground` → `AppDelegate.sceneDidEnterBackground()` (it was
+   `applicationDidEnterBackground` until the 2026-11-28 UIScene migration), which arms
+   `scheduleNextCatchup()` (submits a
    `BGAppRefreshTaskRequest` for `app.haven.catchup`). In the LLDB console pause and simulate launch:
    ```
    e -l objc -- (void)[[BGTaskScheduler sharedScheduler] _simulateLaunchForTaskWithIdentifier:@"app.haven.catchup"]
@@ -1098,12 +1109,15 @@ tier and says which.
    ```
    **Expected:** clean expiration (`setTaskCompleted`), no crash, no watchdog kill.
 2. **SLC relaunch after termination — and a publish lands (amended 2026-11-26, OD-R1).**
-   **DEFERRED — no iPhone; STILL AUTHORITATIVE.** With bg-sharing on + Always granted + the v2
-   background disclosure accepted, end the process the way the SYSTEM does — a debug `exit(0)` hook,
+   **DEFERRED — no iPhone; STILL AUTHORITATIVE.** With bg-sharing on + Always granted + the current
+   (v3 since 2026-11-28) background disclosure accepted, end the process the way the SYSTEM does — a debug `exit(0)` hook,
    not a swipe (a user force-quit is item 2c). Move ~500 m+ (or Xcode *Debug → Simulate Location* / a
    GPX route).
-   **Expected:** iOS relaunches Haven in the background with `launchOptions[.location]`; AppDelegate
-   restarts SLC monitoring, sets `launchedForLocation` and opens the `haven.launch.share` window; the
+   **Expected:** iOS relaunches Haven in the background (under UIScene, since 2026-11-28, UIKit
+   passes no launch options and every launch starts in the background, so the event itself is the
+   only witness); AppDelegate runs the engine and restarts SLC monitoring; the first location
+   delivery to `HavenSLCHandler` calls `AppDelegate.noteLocationLaunch()`, which sets
+   `launchedForLocation`, opens the `haven.launch.share` window and sends Dart `locationLaunch`; the
    pending event drives a catch-up sweep, and a backgrounded peer update is applied; **and a kind-445
    from this device lands on the relay within that wake** (MapShell's background-launch pause starts
    the native session and bursts). Record the iOS build, the commit, the time from trigger to first
@@ -1121,9 +1135,14 @@ tier and says which.
    released by the same `stopSLC`, and it reaches Dart through the same receive-only
    `runCatchup` channel. To test: with bg-sharing on + Always granted, swipe-kill the app,
    then use Xcode *Debug → Simulate Location* (or a real drive) to move **out of** the circle
-   around where the app was last running. **Expected:** iOS relaunches Haven with
-   `launchOptions[.location]`, `locationManager(_:didExitRegion:)` fires, a catch-up sweep
-   runs and a kind-445 from this device lands — same observable as item 2. Then verify the teardown: disable background sharing and
+   around where the app was last running. **Expected:** iOS relaunches Haven into the background,
+   `locationManager(_:didExitRegion:)` fires, a catch-up sweep
+   runs and a kind-445 from this device lands — same observable as item 2. Record whether the
+   exit is delivered at all (amended 2026-11-28): `startMonitoring()` re-registers `haven.relaunch`
+   around CoreLocation's cached fix before the exit can arrive, and Apple does not document whether
+   a queued exit for a replaced region is still delivered. The significant-change fix iOS delivers
+   when monitoring restarts makes the process a location launch either way (D4); note which of the
+   two reached `HavenSLCHandler` first. Then verify the teardown: disable background sharing and
    confirm the region is released (Xcode's *Debug → Location* with the app relaunched shows no
    further wakes; `stopMonitoring()` iterates `monitoredRegions` so an OS-restored region is
    released too).
@@ -1136,11 +1155,12 @@ tier and says which.
    in CI asserts that this region ever fires — only that it is armed and torn down with SLC
    (static guard + host tests). Treat item 2b as unverified until it is run here.
 2c. **Force-quit (swipe) then movement (new 2026-11-26).** **DEFERRED — no iPhone; STILL
-   AUTHORITATIVE.** Always, v2 accepted, sharing on; swipe Haven away, then move ≥ 500 m.
+   AUTHORITATIVE.** Always, the current (v3) disclosure accepted, sharing on; swipe Haven away,
+   then move ≥ 500 m.
    Best effort: record whether iOS relaunches at all (forum thread 826964 reports never on 26.4.2;
    Apple's March 2026 statement says significant-change does) and, if it does, whether a publish
    lands. The copy promises "not guaranteed"; this row decides nothing about the code.
-2d. **Battery dead or reboot (new).** **DEFERRED — no iPhone; STILL AUTHORITATIVE.** Always, v2,
+2d. **Battery dead or reboot (new).** **DEFERRED — no iPhone; STILL AUTHORITATIVE.** Always, v3,
    sharing on; power the phone off and on. **Expected:** before the first unlock nothing runs (no
    launch, no publish: `resumeConsented()` reads empty UserDefaults); after the unlock plus movement,
    a relaunch and a publish.
@@ -1152,7 +1172,9 @@ tier and says which.
 2g. **v1-consent cohort (new).** **DEFERRED — no iPhone; STILL AUTHORITATIVE.** Install the
    pre-2026-11-26 build, enable sharing, update, kill, move. **Expected:** the relaunch receives and
    **publishes nothing** (no session: `LaunchSession.receiveOnly`, and the native predicate refuses);
-   the next open shows the re-confirm dialog once; after Agree, item 2 passes next time.
+   the next open shows the re-confirm dialog once; after Agree, item 2 passes next time. Since
+   2026-11-28 the same is owed by a v2 cohort: run it again from a build that recorded version 2
+   (2026-11-26 to 2026-11-28), whose acceptance never said sharing could start without movement.
 2h. **Low Power Mode, and Background App Refresh off (new).** **DEFERRED — no iPhone; STILL
    AUTHORITATIVE.** Record whether relaunches happen (an archived Apple document says they are
    suppressed; UNCONFIRMED).
@@ -1161,7 +1183,7 @@ tier and says which.
 2j. **Lifetime of a session started from the background (new).** **DEFERRED — no iPhone; STILL
    AUTHORITATIVE.** Does the process stay executable (`"Location subscription"` held), or suspend
    when `haven.launch.share` ends? It decides whether "starts sharing again" means continuously or
-   once per wake; the copy ("starts sharing again by itself … not guaranteed") covers both, and no
+   once per wake; the copy ("sharing can start again by itself … not guaranteed") covers both, and no
    doc claims that a later wake of a suspended relaunched process publishes.
 2k. **`CLServiceSession(.always)` re-taken inside the launch window (new, iOS 18).** **DEFERRED — no
    iPhone; STILL AUTHORITATIVE.** The diagnostics confirm Always after a relaunch.
@@ -1170,6 +1192,57 @@ tier and says which.
    five-minute floor), and the region still re-centres, so a relaunch at the next stop works.
    **Battery:** ESTIMATED only (`docs/POWER_EFFICIENCY_PLAN.md` §6.5a); `docs/POWER_MEASUREMENT.md`
    gets no row.
+
+**UIScene rows (new 2026-11-28, with the Xcode 27 / UIScene migration and owner decision D4).** Each is
+**DEFERRED — no iPhone; STILL AUTHORITATIVE.** The simulator's `RunnerTests` (launch gate, G11) proves
+what one foregrounded process shows: the scene's window holds the controller `AppDelegate` keeps on
+its one engine, a frame is drawn, the blur covers the window while inactive, and a location event after
+the foreground is no location launch. The host tests of `ForegroundStartUpGate`
+(`foreground_start_up_gate_test.dart`, groups "a location launch no scene has connected to" and "the
+native report of a location launch") prove the Dart half of 2q. None of them terminates, relaunches or
+suspends a process, or disconnects a scene, so none stands in for a row below.
+2m. **Scene connect on a location relaunch.** Run item 2 and record, from a breakpoint on
+   `SceneDelegate.scene(_:willConnectTo:options:)`, whether iOS connects a scene to the relaunched
+   process before or after the first location delivery, or not at all (Apple: the system "might launch
+   the scene in the background to process a location event"). **Expected** either way: one engine
+   (the window, if any, shows `AppDelegate.flutterViewController`), no `sceneWillEnterForeground`, so
+   `launchedForLocation` stays set; the background-capable session start is allowed and a kind-445
+   lands, as in item 2. The app-switcher card of that never-opened process shows the launch screen or
+   the blur, never the map (iOS draws no Flutter frame in the background).
+2n. **A background-refresh launch resumes sharing without movement (D4).** Always, v3 accepted,
+   sharing on; end the process the way the system does (item 2), keep the phone still, then let iOS
+   launch Haven for `app.haven.catchup` (Xcode scheme: *Wait for the executable to be launched*, or
+   iOS's own refresh hours later). **Expected:** the immediate fix iOS delivers when
+   `startMonitoring()` restarts significant-change monitoring reaches `HavenSLCHandler`, the process
+   becomes a location launch, and a kind-445 from this device lands although the phone did not move.
+   Record the fix's age and horizontal accuracy (a cached or cell-grade fix is what such a launch
+   gets), whether any fix arrives at all (none means no resume, which is not a failure), and how often
+   iOS grants such launches over a day. **Battery:** ESTIMATED only (`docs/POWER_EFFICIENCY_PLAN.md`
+   §6.5a, the 2026-11-28 note); `docs/POWER_MEASUREMENT.md` gets no row.
+2o. **Scene disconnect while sharing, then reopen (the kept controller).** With sharing on, open
+   Haven, press Home, and make iOS disconnect the backgrounded scene (heavy memory pressure from other
+   apps; confirm the disconnect with a symbolic breakpoint on `sceneDidDisconnect:`). **Expected:**
+   publishing continues on its cadence through the disconnect (the controller outlives the scene, so
+   the engine sends Dart no `detached` and live sync is not stopped); reopening Haven connects a new
+   scene whose window shows the same controller, the map renders, and Dart is dispatched `resumed`.
+2p. **The cold user launch's transient flag.** Always, sharing on, Haven terminated; tap its icon.
+   A significant-change fix can reach `HavenSLCHandler` before the scene's `sceneWillEnterForeground`
+   and mark the process a location launch for that instant. **Expected:** nothing the user can see —
+   `sceneWillEnterForeground` clears `launchedForLocation` and ends `haven.launch.share`, Dart's first
+   lifecycle message hands the shell to the resume, the foreground consent step shows if owed, and no
+   background-launch pause is left standing (check `launchedForLocation` reads false in the debugger
+   once the map is up). Repeat ten times and record any start that did not reach a live map.
+2q. **The `locationLaunch` re-read.** In item 2's relaunch, record with breakpoints on
+   `AppDelegate.noteLocationLaunch()` and the Dart gate's `_relaunch` whether the first location
+   delivery lands before or after MapShell's mount read the flag. **Expected** in both orders: the
+   launch's pause is taken once, the session starts and a kind-445 lands; after the late order, the
+   gate's second read (sent by `locationLaunch`) is the one that takes it.
+2r. **The app-switcher blur under scenes.** Open Haven on the map with members visible, swipe up into
+   the app switcher, and look at Haven's card; return to Haven. **Expected:** the card is blurred
+   (`SceneDelegate.sceneWillResignActive`; also installed when a scene connects), the blur is gone
+   once Haven is active again (`sceneDidBecomeActive`), and the card is blurred after a scene that
+   iOS reconnected in the background (item 2o), with no blurred flash on a normal open. In-app
+   screenshots are not blocked (iOS has no `FLAG_SECURE`).
 3. **Opt-out + rollback sanity.** Disable background sharing. **Expected:** `stopSLC` +
    `cancelAllBGTasks` fire; repeat steps 1/2 and confirm nothing runs (no wake, no relay contact).
    Re-enable → resumes.
@@ -1254,7 +1327,7 @@ opt-out remains enforced even on stale builds.
 | BootResumeReceiver resolvable for BOOT_COMPLETED + MY_PACKAGE_REPLACED, plugin RebootReceiver absent | Phase B query-receivers + guard 14c + `check_apk_resume_wiring.sh` (release APK) |
 | A reboot/update resumes the FGS only under the resume rule, else one notice | `e2e-android-resume.yml` legs U1 U2 B1 B2 U3 + `BootResumeTest.kt` + `background_resume_gate_test.dart` |
 | A sticky restart after a kill passes the same gate | lane leg K (with the background grant + battery exemption only) + gate unit tests |
-| An iOS location relaunch resumes sharing only under Always + v2 consent | host tests + `check_ios_background_publish.sh` 4d/6d/9b/20; device: §6 items 2–2l (DEFERRED) |
+| An iOS location launch (since 2026-11-28, D4: the first location event in a process no scene has brought to the front) resumes sharing only under Always + the current consent (v3 on iPhone) | host tests (incl. `foreground_start_up_gate_test.dart`'s `locationLaunch` re-read) + `check_ios_background_publish.sh` 4d/6d/9b/9c/20 + `RunnerTests` (the launch rule's truth table, and no launch after the foreground); device: §6 items 2–2l and 2m–2r (DEFERRED) |
 | FGS-vs-worker & authoring-vs-sweep exclusion | Rust tests `write_lock.rs:128` / `manager.rs:9765` + gates 3–4 |
 | iOS mirror true + Swift handlers reachable | D7 sim target + plist assert |
 | iOS BGTask fires on hardware | owner checklist §6 (explicitly out of CI) |
@@ -1728,3 +1801,24 @@ nostr_group_id_hex=?` in the `delete_circle` cascade (`storage.rs:824-877`) = wi
   acceptance sees the updated text once, at a foreground, and "Not now" keeps sharing while Haven
   runs but never resumes it by itself. §5 runbook steps 7–8 and §6 items 0b, 2 and 2b rewritten;
   items 2c–2l and the Android rows A1–A5 added, all DEFERRED for want of hardware.
+- 2026-11-28 — **Xcode 27 toolchain, iOS 15.0 floor, UIScene (owner decisions D1–D4).** An app
+  built with the iOS 27 SDK must adopt UIScene to launch, so Haven does: `SceneDelegate`
+  (`FlutterSceneDelegate`) shows the one `FlutterViewController` that `AppDelegate` keeps for the
+  process's life on the one `FlutterEngine` it runs from `didFinishLaunching` (a controller freed with
+  a disconnected scene would send Dart `detached` and stop live sync in a process still sharing); the
+  main storyboard is gone and `Info.plist` carries `UIApplicationSceneManifest` (one scene). The UI
+  hooks moved to the scene: the foreground re-arm and the A3 background re-arm are
+  `AppDelegate.sceneWillEnterForeground()` / `sceneDidEnterBackground()`, called from
+  `SceneDelegate`, and the app-switcher blur is installed at scene connect and on
+  `SceneDelegate.sceneWillResignActive`, removed on `sceneDidBecomeActive`. UIKit passes a scene-based app no launch options, so `launchOptions[.location]`
+  is no longer read: under D4 (owner-chosen, consequences accepted) a process no scene has brought to
+  the front becomes a location launch at the first location event delivered to `HavenSLCHandler`
+  (`onLocationEvent` → `AppDelegate.noteLocationLaunch()`, once per process, cleared by
+  `sceneWillEnterForeground`) and tells Dart with the fieldless `locationLaunch` call on
+  `haven.app/ios_location_stream`, which `ForegroundStartUpGate` answers by reading the launch again
+  until a lifecycle change reaches the shell. That event includes the fix iOS delivers whenever
+  significant-change monitoring restarts, so a background-refresh launch can now resume sharing
+  without movement; the iPhone background disclosure says so and is version 3 (Android stays at 2, its
+  behaviour unchanged), so iPhone users re-accept once. `BGTaskScheduler.register` now delivers on the
+  main queue. §6 items 0a-provisional, 0b, 1, 2, 2b, 2c, 2d and 2g amended; UIScene rows 2m–2r added,
+  DEFERRED for want of hardware.

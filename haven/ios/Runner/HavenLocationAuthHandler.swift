@@ -16,7 +16,7 @@ import Flutter
 /// example when it grants provisional "Always" without a status change), so the
 /// Dart future can never hang.
 ///
-/// Deployment target is iOS 15.5, so the iOS 14+ delegate
+/// Deployment target is iOS 15.0, so the iOS 14+ delegate
 /// (`locationManagerDidChangeAuthorization`) and `authorizationStatus` property
 /// are used directly.
 final class HavenLocationAuthHandler: NSObject, CLLocationManagerDelegate {

@@ -684,7 +684,8 @@ eleven independent diagnosticians, not a reconstruction of the owner's phone.
   **Fix:** drop the object, never reuse it (`ddc029c`, tracker `T-POOL-TERMINATE-PERMIT`).
 - **W4 — the iOS position stream, once ended, was never reopened.** The native side ends it only when
   it refuses a start made in the background. That can happen on a background relaunch whose window
-  loads (`inactive` fails open: the embedder seeds `detached`, so V-P1-1's premise was wrong), on a
+  loads (`inactive` fails open: the embedder seeds `detached`, so V-P1-1's premise was wrong; under UIScene,
+  since 2026-11-28, a window loads only when iOS connects a scene to the launch), on a
   glance-away resume, or on a rebuild before Dart handles `paused`. The service then closed its own
   stream for good, so no `CLLocationManager` ran in any later background window, and iOS suspended the
   process every time.
@@ -807,7 +808,11 @@ eleven independent diagnosticians, not a reconstruction of the owner's phone.
   cold-cache shortcut still reads the native lifecycle and still never reaches the plugin one-shot
   (it may now wait up to `kOneShotLocationTimeout` for that session's next Best fix); and the wake
   handlers still carry no publish call site. The `_foregroundActive` hole described above stays
-  closed.
+  closed. **Widened 2026-11-28 (owner decision D4, with the UIScene migration):** a scene-based app
+  is given no launch options, so `launchedForLocation` is now set at the first location event
+  delivered to a process no scene has brought to the front — including the fix iOS delivers when a
+  background-refresh launch restarts significant-change monitoring — and the current background
+  disclosure that admits the start is version 3 on iPhone, which says so.
 
 ## 5. Mapping to the field evidence, and how to distinguish the causes
 
@@ -1911,7 +1916,7 @@ F above; the Android and clock halves are untouched.**
   post-date the crossing, and centring on a place the device has already left would silence the
   NEXT departure — skipping leaves the previous circle in place and lets the next SLC delivery
   re-centre. The iOS-17 `CLMonitor` deprecation is noted at the call site (warnings only; no
-  `SWIFT_TREAT_WARNINGS_AS_ERRORS`, deployment target 15.5). The resume re-assert documents that
+  `SWIFT_TREAT_WARNINGS_AS_ERRORS`, deployment target 15.5 then, 15.0 since 2026-11-28). The resume re-assert documents that
   it can land inside `requestSessionHandover`'s stop-then-poll window, bounded by unit A's
   force-release-and-retry — narrowing it here would reintroduce the silently-dead FGS. The guard
   gained a real `--self-test` (19 fixtures, wired into `repo-guards.yml` as its own step) after

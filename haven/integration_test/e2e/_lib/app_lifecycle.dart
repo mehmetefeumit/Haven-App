@@ -15,6 +15,9 @@
 /// would notice.
 library;
 
+import 'dart:async';
+import 'dart:io' show Platform;
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/services/mls_session_handover.dart'
@@ -50,4 +53,61 @@ void expectAppResumed() {
         'of main(), and nothing may have taken the test activity out of the '
         'foreground',
   );
+}
+
+/// How long [awaitPlatformResumed] waits for the platform.
+const Duration kPlatformResumedWithin = Duration(seconds: 60);
+
+/// On iOS, waits until the platform itself has the app in front: the view
+/// controller has sent `resumed`, and a scene's window has given the implicit
+/// view a size. Returns at once elsewhere.
+///
+/// iOS runs the engine before any scene connects, so a target's first test can
+/// start while the scene's own `inactive` and `resumed` are still on their
+/// way, and that `inactive`, landing mid-test, takes away the `resumed`
+/// [resumeAppBeforeEachTest] set. Call it from `setUpAll`, which runs before
+/// that `setUp`: what the binding reads there is the platform's. [isIOS] is
+/// a host-test seam.
+Future<void> awaitPlatformResumed({bool? isIOS}) async {
+  if (!(isIOS ?? Platform.isIOS)) return;
+  final binding = WidgetsBinding.instance;
+  bool resumed() => binding.lifecycleState == AppLifecycleState.resumed;
+  bool sized() =>
+      !(binding.platformDispatcher.implicitView?.physicalSize.isEmpty ?? true);
+  final observer = _PlatformInFront(() => resumed() && sized());
+  binding.addObserver(observer);
+  try {
+    if (!observer.ready()) {
+      await observer.reached.future.timeout(
+        kPlatformResumedWithin,
+        onTimeout: () => fail(
+          'the platform did not put the app in front within '
+          '${kPlatformResumedWithin.inSeconds} s (resumed: ${resumed()}, '
+          'view sized: ${sized()}): no scene connected, or its view '
+          'controller never sent `resumed`',
+        ),
+      );
+    }
+  } finally {
+    binding.removeObserver(observer);
+  }
+}
+
+class _PlatformInFront with WidgetsBindingObserver {
+  _PlatformInFront(this.ready);
+
+  final bool Function() ready;
+  final Completer<void> reached = Completer<void>();
+
+  // Read once the message has been walked whole: one leaving the `detached`
+  // seed is dispatched a synthesized `resumed` on its way to `inactive`.
+  void _check() => scheduleMicrotask(() {
+    if (!reached.isCompleted && ready()) reached.complete();
+  });
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) => _check();
+
+  @override
+  void didChangeMetrics() => _check();
 }

@@ -34,10 +34,10 @@ import UIKit
 ///   - A new session may only become ACTIVE while the app is in use, with one
 ///     exception: a session held when the app was previously terminated can
 ///     be retaken for a few seconds after a background relaunch. `arm()` must
-///     therefore run SYNCHRONOUSLY inside `didFinishLaunchingWithOptions`
-///     (both the normal and the SLC-relaunch branch) — never in a deferred
-///     task. A session created in background with no predecessor merely stays
-///     inactive until the next foreground; creation itself never fails.
+///     therefore run SYNCHRONOUSLY inside `didFinishLaunchingWithOptions`, on
+///     every launch — never in a deferred task. A session created in
+///     background with no predecessor merely stays inactive until the next
+///     foreground; creation itself never fails.
 ///
 /// ## Consent + authorization gates
 ///
@@ -81,10 +81,11 @@ final class HavenBackgroundSessionHandler: NSObject {
     "flutter.haven.location.disclosure_background_version"
 
   /// The version whose acceptance lets sharing start again in a process iOS
-  /// launched for a location event. Equal to Dart's
+  /// started in the background that received a fix before any scene came to
+  /// the front (D4). Equal to Dart's
   /// `kBackgroundDisclosureVersion` (check 20 of
   /// `check_ios_background_publish.sh`).
-  private static let kBgDisclosureResumeVersion = 2
+  private static let kBgDisclosureResumeVersion = 3
 
   /// Whether sharing may start again without the user opening Haven: the
   /// toggle on, both disclosures accepted, the background one at the current

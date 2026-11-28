@@ -456,6 +456,11 @@ class GeolocatorLocationService implements LocationService {
   Future<bool> launchedForLocation() async =>
       _isIOS && (await _iosSource.status()).launchedForLocation;
 
+  /// Fires when the native side sets that flag after the process started
+  /// ([IosLocationSource.locationLaunches]); never off iOS.
+  Stream<void> get locationLaunches =>
+      _isIOS ? _iosSource.locationLaunches : const Stream<void>.empty();
+
   /// Starts the native session background-capable in a process iOS launched
   /// into the background for a location event, with no provider listening.
   ///
@@ -1000,9 +1005,9 @@ class GeolocatorLocationService implements LocationService {
       // (`INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT`).
       //
       // The lifecycle is read from the NATIVE session, not from
-      // [_foregroundActive]: a background-launched process (an SLC/region
-      // relaunch, which builds this service before any lifecycle callback)
-      // would otherwise look foregrounded and start a one-shot that cannot
+      // [_foregroundActive]: a background-launched process (which builds this
+      // service before any lifecycle callback, and may never get one) would
+      // otherwise look foregrounded and start a one-shot that cannot
       // complete. An unreadable status counts as backgrounded — fail closed.
       if (_isIOS && (await _iosSource.status()).backgrounded) {
         Position? lastPosition;

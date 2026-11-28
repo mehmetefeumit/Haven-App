@@ -52,18 +52,19 @@ jobs:
     # HAVEN_LIVE_SYNC-INTENT: production-default — the gate starts the app as
     # it ships, so it compiles live_sync_provider.dart's defaultValue and
     # passes no define (scripts/ci/check_live_sync_define_declared.sh).
-    runs-on: macos-15
+    runs-on: xcode-27
     # The job cap clears every step cap it can run plus the uncapped work:
-    #   scanner 10 + app 45 + UI tests 15 + load check 5 + SQLCipher probe 5
-    #   + package 5 + boot 15 + drive 115 + egress release 5 + verdict 5
-    #   + scan 5 = 230 + uncapped 6 = 236 -> 240.
+    #   scanner 10 + app 45 + UI tests 15 + load check 5 + SDK check 5
+    #   + SQLCipher probe 5 + package 5 + boot 15 + drive 115 + egress release 5
+    #   + verdict 5 + XCTest bundle 35 + scan 5 = 270 + uncapped 6 = 276 -> 280.
     # The uncapped work (job set-up, checkout, Xcode/Rust/Flutter set-up, pub
     # get, uploads, post steps) is not yet measured on this job. The figure is
     # release-build.yml's iOS job, which runs the same set-up steps on the same
     # image: 2.9 minutes outside its build, probe and upload in run
-    # 43585389047, doubled. Re-measure from this job's own runs.
+    # 43585389047 (both jobs then on macos-15), doubled. Re-measure from this
+    # job's own runs on xcode-27.
     # job-uncapped-minutes: 6 (1 runs of release-build.yml's iOS job with the same set-up steps, worst 43585389047)
-    timeout-minutes: 240
+    timeout-minutes: 280
     env:
       FLUTTER_SUPPRESS_ANALYTICS: "true"
       # The runner gates its summary through logscan-gate.sh with the scanner.
@@ -72,7 +73,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # Same Xcode as release-build.yml's TestFlight build.
+      # Same Xcode as release-build.yml's TestFlight build
+      # (check_release_launch_gated.sh G10).
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
@@ -89,7 +91,7 @@ jobs:
           workspaces: |
             haven-core
             tooling/logscan
-          key: launch-gate-ios
+          key: launch-gate-ios-xcode27
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build the runtime log scanner
@@ -148,6 +150,12 @@ jobs:
         timeout-minutes: 5
         run: bash scripts/ci/check_ios_app_loadable.sh "${CANDIDATE_APP}"
 
+      # The gate launches what TestFlight receives: the same iOS SDK floor,
+      # read from the simulator build's own Info.plist.
+      - name: Check the candidate's iOS SDK
+        timeout-minutes: 5
+        run: bash scripts/ci/check_ios_app_sdk.sh --simulator "${CANDIDATE_APP}"
+
       # Security Rule 15: this build becomes a public release asset.
       - name: Probe the candidate for SQLCipher's logger
         timeout-minutes: 5
@@ -173,7 +181,7 @@ jobs:
       - name: Boot iOS simulator
         id: sim
         timeout-minutes: 15
-        run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 16"
+        run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 17"
 
       # One attempt is three xcodebuild runs of at most 900 s each, their
       # kill grace and crash-report settle, the probes and the unbounded-work
@@ -221,6 +229,68 @@ jobs:
             5) echo "No iOS predecessor build to upgrade from; the fresh and relaunch legs passed." ;;
             *) echo "::error::iOS launch gate failed with rc ${rc} (1 product, 2 misuse or a malformed yanked list, 3 infrastructure, 4 upgrade source unusable)"; exit 1 ;;
           esac
+
+      # The app's own XCTest bundle (haven/ios/RunnerTests): the scene, the one
+      # engine and the privacy blur as UIKit wires them, which only a run on a
+      # simulator shows. After the legs, in the scheme's Debug test
+      # configuration and derived data of its own, so it cannot touch the
+      # Release-native app they launched; their install and Keychain
+      # identity are removed first, so the test host starts as a fresh install
+      # that no identity exists for. Only xcodebuild's result lines leave the
+      # transcript (paths cut to their file name, UUIDs masked), and they are
+      # scanned before they are echoed. 35 min is e2e-ios.yml's cold debug
+      # build bound (worst 1649 s with a simulator resident, run 41492770461).
+      - name: Run the app's XCTest bundle
+        if: ${{ !cancelled() && steps.sim.outcome == 'success' && steps.drive.outcome != 'skipped' }}
+        timeout-minutes: 35
+        env:
+          UDID: ${{ steps.sim.outputs.udid }}
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          chmod 0700 "${work}"
+          summary=/tmp/runner-tests-ios/runner-tests-summary.log
+          mkdir -p "$(dirname "${summary}")" /tmp/ios-logscan
+          xcrun simctl uninstall "${UDID}" com.oblivioustech.haven >/dev/null 2>&1 || true
+          if xcrun simctl get_app_container "${UDID}" com.oblivioustech.haven >/dev/null 2>&1; then
+            echo "::error::the simulator still holds the gate's install"
+            exit 1
+          fi
+          xcrun simctl keychain "${UDID}" reset
+          rc=0
+          (cd haven/ios && xcodebuild test -workspace Runner.xcworkspace -scheme Runner \
+            -destination "id=${UDID}" -only-testing:RunnerTests -parallel-testing-enabled NO \
+            -derivedDataPath "${RUNNER_TEMP}/runner-tests-dd" COMPILER_INDEX_STORE_ENABLE=NO) \
+            >"${work}/xcodebuild.out" 2>&1 || rc=$?
+          python3 -I -c '
+          import re, sys
+          uuid = re.compile(r"\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b")
+          path = re.compile(r"(?<![\w.])/(?:[^\s/:\x27\"]+/)+([^\s/:\x27\"]+)")
+          keep = re.compile(r"^\s*Test [Cc]ase \x27.*\x27 (started|passed|failed)|: error: |^\*\* [A-Z -]+ \*\*$|^\s*Executed \d+ tests?,|^Testing failed:")
+          tail = False
+          for raw in open(sys.argv[1], encoding="utf-8", errors="replace"):
+              line = raw.rstrip("\n")
+              if keep.search(line) or (tail and line.startswith("\t")):
+                  tail = line.startswith("Testing failed:") or (tail and line.startswith("\t"))
+                  print(uuid.sub("<uuid>", path.sub(r"\1", line))[:300])
+              else:
+                  tail = False
+          ' "${work}/xcodebuild.out" >"${summary}"
+          passed="$(grep -cE "^[[:space:]]*Test [Cc]ase '.*' passed" "${summary}" || true)"
+          failed="$(grep -cE "^[[:space:]]*Test [Cc]ase '.*' failed" "${summary}" || true)"
+          rm -rf "${work}"
+          printf 'RunnerTests: xcodebuild rc %s, %s passed, %s failed\n' "${rc}" "${passed}" "${failed}" >>"${summary}"
+          bash tooling/e2e/ci/scan-logs.sh --manifest-dir /tmp/haven-soak/needles \
+            --sink diag="${summary}" --report /tmp/ios-logscan/runner-tests.ndjson
+          cat "${summary}"
+          if (( rc != 0 || failed != 0 )); then
+            echo "::error::RunnerTests failed (xcodebuild rc ${rc}, ${failed} failed)"
+            exit 1
+          fi
+          if (( passed == 0 )); then
+            echo "::error::RunnerTests ran no test case"
+            exit 1
+          fi
 
       # Scanned again here because a drive the retry action killed may have
       # left the summary before the runner's own gate finished with it.

@@ -577,7 +577,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get locationSettingsIntroIos =>
-      'Ist der Standortzugriff auf „Immer“ gesetzt, startet das Teilen von selbst wieder, nachdem Haven geschlossen wurde, sobald du dich ein paar hundert Meter bewegt hast und iOS es zulässt. Nach einem Neustart deines Telefons geschieht das erst, wenn du es auch entsperrt hast. iOS entscheidet, wann das geschieht, daher ist es nicht garantiert. Mit „Beim Verwenden der App“ stoppt das Teilen, wenn Haven geschlossen wird, und startet wieder, wenn du die App öffnest.';
+      'Ist der Standortzugriff auf „Immer“ gesetzt, kann das Teilen von selbst wieder starten, nachdem Haven geschlossen wurde, auch wenn du dich nicht bewegt hast; iOS entscheidet, wann das geschieht, daher ist es nicht garantiert. iOS kann Haven aufwecken, nachdem du dich ein paar hundert Meter bewegt hast, und auch dann, wenn iOS Apps im Hintergrund aktualisiert. Nach einem Neustart deines Telefons geschieht das erst, wenn du es auch entsperrt hast. Mit „Beim Verwenden der App“ stoppt das Teilen, wenn Haven geschlossen wird, und startet wieder, wenn du die App öffnest.';
 
   @override
   String get locationSettingsToggleTitle => 'Im Hintergrund teilen';
@@ -588,7 +588,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'Das Teilen läuft mit deiner aktuellen Berechtigung auch im Hintergrund weiter, und iOS zeigt dabei oben am Bildschirm seine blaue Standortleiste. Wird Haven geschlossen, stoppt das Teilen, bis du die App wieder öffnest. Wähle in den Einstellungen für Haven „Immer“, damit das Teilen von selbst wieder startet, nachdem Haven geschlossen wurde, sobald du dich ein paar hundert Meter bewegt hast und iOS es zulässt. Unter „Immer“ zeigt iOS statt der blauen Leiste möglicherweise seinen Standortpfeil in der Statusleiste.';
+      'Das Teilen läuft mit deiner aktuellen Berechtigung auch im Hintergrund weiter, und iOS zeigt dabei oben am Bildschirm seine blaue Standortleiste. Wird Haven geschlossen, stoppt das Teilen, bis du die App wieder öffnest. Ist für Haven in den Einstellungen „Immer“ gewählt, kann das Teilen von selbst wieder starten, nachdem Haven geschlossen wurde, auch wenn du dich nicht bewegt hast; iOS entscheidet, wann. Unter „Immer“ zeigt iOS statt der blauen Leiste möglicherweise seinen Standortpfeil in der Statusleiste.';
 
   @override
   String get locationSettingsResumeConsentNote =>
@@ -657,7 +657,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get locationDisclosureBackgroundIos =>
-      'Diese App nutzt Standortdaten, um das Teilen mit deinen Kreisen zu ermöglichen, auch wenn Haven im Hintergrund läuft und du die App gerade nicht benutzt. Ist der Standortzugriff auf „Immer“ gesetzt und wird Haven geschlossen, auch durch dich, startet Haven das Teilen von selbst wieder, sobald du dich ein paar hundert Meter bewegt hast und iOS es zulässt. Nach einem Neustart geschieht das erst, wenn du dein Telefon auch entsperrt hast. iOS entscheidet, wann, daher ist es nicht garantiert. Mit „Beim Verwenden der App“ stoppt das Teilen, wenn Haven geschlossen wird, und bleibt gestoppt, bis du die App wieder öffnest.';
+      'Diese App nutzt Standortdaten, um das Teilen mit deinen Kreisen zu ermöglichen, auch wenn Haven im Hintergrund läuft und du die App gerade nicht benutzt. Ist der Standortzugriff auf „Immer“ gesetzt und wird Haven geschlossen, auch von dir, kann das Teilen von selbst wieder starten, auch wenn du dich nicht bewegt hast; iOS entscheidet, wann das geschieht, daher ist es nicht garantiert. iOS kann Haven aufwecken, nachdem du dich ein paar hundert Meter bewegt hast, und auch dann, wenn iOS Apps im Hintergrund aktualisiert. Nach einem Neustart geschieht das erst, wenn du dein Telefon auch entsperrt hast. Mit „Beim Verwenden der App“ stoppt das Teilen, wenn Haven geschlossen wird, und bleibt gestoppt, bis du die App wieder öffnest.';
 
   @override
   String get locationDisclosureManage =>

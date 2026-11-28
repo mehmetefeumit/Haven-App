@@ -183,8 +183,10 @@ reader has to skip the other phone's claims.
 Since the owner's 2026-11-26 decisions (OD-R1/R2/R3) the location strings carry
 a resume claim that is conditional on each platform, and the conditions are the
 invariants. On iPhone, sharing starts again by itself after
-Haven is closed only under 'Always', after movement, and when iOS relaunches
-Haven — never under 'While Using the App'
+Haven is closed only under 'Always', with the current background disclosure
+accepted, and when iOS starts Haven in the background — after movement, or at
+a background app refresh with no movement at all (owner decision D4,
+2026-11-28) — never under 'While Using the App'
 (`INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT`, which
 replaced the deleted `INV-L-IOS-WAKES-RECEIVE-ONLY` under a stated
 `ratchet_override`). On Android, sharing resumes by itself after a restart or

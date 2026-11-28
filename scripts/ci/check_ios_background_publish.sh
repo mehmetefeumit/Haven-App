@@ -109,6 +109,8 @@ PLIST="${REPO_ROOT}/haven/ios/Runner/Info.plist"
 LIB_DIR="${REPO_ROOT}/haven/lib"
 SESSION_HANDLER="${REPO_ROOT}/haven/ios/Runner/HavenBackgroundSessionHandler.swift"
 APP_DELEGATE="${REPO_ROOT}/haven/ios/Runner/AppDelegate.swift"
+SCENE_DELEGATE="${REPO_ROOT}/haven/ios/Runner/SceneDelegate.swift"
+RUNNER_DIR="${REPO_ROOT}/haven/ios/Runner"
 BG_PROVIDER="${REPO_ROOT}/haven/lib/src/providers/background_location_provider.dart"
 BG_PUBLISH_DRIVE="${REPO_ROOT}/haven/integration_test/ios_bg_publish_test.dart"
 BG_PUBLISH_WORKFLOW="${REPO_ROOT}/.github/workflows/e2e-ios-background-publish.yml"
@@ -137,7 +139,7 @@ lfail() {
   _lf=1
 }
 
-for f in "$SERVICE" "$PROVIDER" "$MAP_SHELL" "$PLIST" "$SESSION_HANDLER" "$APP_DELEGATE" "$BG_PROVIDER" "$BG_PUBLISH_DRIVE" "$BG_PUBLISH_WORKFLOW" "$STREAM_HANDLER" "$IOS_SOURCE" "$PBXPROJ"; do
+for f in "$SERVICE" "$PROVIDER" "$MAP_SHELL" "$PLIST" "$SESSION_HANDLER" "$APP_DELEGATE" "$SCENE_DELEGATE" "$BG_PROVIDER" "$BG_PUBLISH_DRIVE" "$BG_PUBLISH_WORKFLOW" "$STREAM_HANDLER" "$IOS_SOURCE" "$PBXPROJ"; do
   [[ -f "$f" ]] || { echo "FAIL: expected file not found: $f" >&2; exit 1; }
 done
 command -v xmllint >/dev/null 2>&1 || { echo "FAIL: xmllint (libxml2-utils) is required by this guard" >&2; exit 1; }
@@ -720,7 +722,7 @@ check_native_stream_handler() { # <HavenLocationStreamHandler.swift>
     lfail "allowsBackgroundLocationUpdates is assigned something other than the derived allowsBg (onListen) or false (onCancel) in $(basename "$sh"): ${bad_bg}"
   fi
   grep -qE 'applicationState == \.background' <<<"$onlisten" ||
-    lfail "onListen no longer refuses a start while applicationState == .background — iOS rejects a background-capable start issued from the background, and a refused start is indistinguishable from a running one until peers stop receiving. The test must be '== .background', never '!= .active': Flutter's 'resumed' is delivered from applicationDidBecomeActive, so a legitimate foreground start can land while UIKit still reports .inactive"
+    lfail "onListen no longer refuses a start while applicationState == .background — iOS rejects a background-capable start issued from the background, and a refused start is indistinguishable from a running one until peers stop receiving. The test must be '== .background', never '!= .active': Flutter's 'resumed' follows UIKit's did-become-active notification, so a legitimate foreground start can land while UIKit still reports .inactive"
   if grep -qE 'applicationState *!= *\.active' <<<"$onlisten"; then
     lfail "onListen tests applicationState != .active — that refuses legitimate foreground starts delivered while UIKit is still .inactive (the instant Flutter reports 'resumed'), silently leaving the app with no location session at all"
   fi
@@ -1257,7 +1259,8 @@ check_arm_tier_policy() { # <HavenBackgroundSessionHandler.swift>
   # backgrounded: a WIU->Always upgrade delivered in the background (the
   # authorization delegate DOES fire there) would otherwise drop the only
   # keep-alive the process has, while its replacement cannot start outside the
-  # foreground. The AppDelegate's foreground re-arm performs it later.
+  # foreground. The scene's foreground re-arm (AppDelegate.sceneWillEnterForeground)
+  # performs it later.
   local drop_block
   drop_block="$(brace_block 'else if UIApplication.shared.applicationState != .background' <<<"$arm_body")"
   if [[ -z "$drop_block" ]]; then
@@ -2068,6 +2071,11 @@ check_pbxproj_network_change_handler() { # <project.pbxproj>
     5E10CA760000000000000001 5E10CA760000000000000002
 }
 
+check_pbxproj_scene_delegate() { # <project.pbxproj>
+  check_pbxproj_swift_member "$1" SceneDelegate.swift \
+    5E10CA780000000000000001 5E10CA780000000000000002
+}
+
 
 # ---------------------------------------------------------------------------
 # OD-R1 (owner-directed 2026-11-26): a process iOS launched into the background
@@ -2207,39 +2215,297 @@ check_relaunch_start_gate() { # <HavenLocationStreamHandler.swift>
   grep -qF '"launchedForLocation": launchedForLocation' <<<"$(fn_slice 'private func status()' "$sh")" ||
     lfail "status() no longer exports launchedForLocation — Dart routes a relaunch from that read alone, so the session would never start"
   if grep -qE 'launchedForLocation *= *true' <<<"$view"; then
-    lfail "$(basename "$sh") sets launchedForLocation itself — only AppDelegate may, from launchOptions[.location] in .background"
+    lfail "$(basename "$sh") sets launchedForLocation itself — only AppDelegate may, in noteLocationLaunch(): the first location event of a process no scene has brought to the front"
   fi
   return "$_lf"
 }
 
-# 9b. AppDelegate's half of the relaunch fact: set only from a location launch
-#     in the background, cleared at the first foreground with the window, and
-#     the BGTask floor scheduled on every launch.
-check_appdelegate_relaunch() { # <AppDelegate.swift>
-  local ad="$1"
+# "<line>: <statement>" for each line of a function slice (stdin) at the
+# function's own statement depth — the signature line is depth 0, so a line
+# inside an `if`, a closure or a nested type is not one — trimmed, with its
+# line number in the slice.
+stmt_lines() { awk "${LITERAL_FREE}"'
+  { d = depth; lfree = literal_free($0); depth += gsub(/[{]/, "&", lfree) - gsub(/[}]/, "&", lfree)
+    if (d == 1) { t = $0; sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t); print NR ": " t } }'; }
+# The slice line number of the first statement (stmt_lines on stdin) that
+# STARTS with <ERE>, or empty.
+stmt_at() { grep -E -- "^[0-9]+: $1" | head -n1 | cut -d: -f1; }
+
+# 9b. AppDelegate's half of the relaunch fact (OD-R1, D4 owner-directed
+#     2026-11-28): a process becomes a location launch at the first location
+#     event CoreLocation delivers to the SLC handler before any scene came to
+#     the front, once per process, and never after one has. Under scenes UIKit
+#     hands the app delegate no launch options and starts every launch in
+#     .background, so that event is the only witness, and the rule is pinned
+#     where each half of it lives: the rule (a pure function RunnerTests
+#     drives, handed the process's own two facts), the set (in
+#     noteLocationLaunch, behind its guard, then the window, then the nudge to
+#     Dart), the one caller (the SLC
+#     hook, wired unconditionally at launch), the hook's two call sites (after
+#     the enable check, before the catch-up floor that would hide a delivery),
+#     the clear at the scene's first foreground, and the BGTask floor kept on
+#     every launch.
+check_appdelegate_relaunch() { # <Runner dir>
+  local dir="$1"
+  local ad="${dir}/AppDelegate.swift" slc="${dir}/HavenSLCHandler.swift"
   _lf=0
-  local view launch launch_flat block fg
+  local view all launch fg n
+
   view="$(code_view "$ad")"
-  launch="$(fn_slice 'didFinishLaunchingWithOptions' "$ad")"
-  launch_flat="$(flat_code <<<"$launch")"
-  grep -qF 'let launchedForLocation = launchOptions?[.location] != nil && application.applicationState == .background' <<<"$launch_flat" ||
-    lfail "didFinishLaunching no longer derives launchedForLocation from launchOptions[.location] AND applicationState == .background — anything wider lets the stream handler start a background session in a process the user launched"
-  block="$(brace_block 'if launchedForLocation' <<<"$launch")"
-  if [[ "$(grep -cE 'launchedForLocation *= *true' <<<"$view" || true)" != "1" ]] ||
-    ! grep -qF 'locationStreamHandler.launchedForLocation = true' <<<"$block"; then
-    lfail "locationStreamHandler.launchedForLocation = true must be set exactly once, inside 'if launchedForLocation { … }'"
+  all="$(for f in "$dir"/*.swift; do code_view "$f"; done)"
+
+  local note rule guard_line set_line begin_line notify_line
+  # The rule is a pure function so RunnerTests can drive both of its halves;
+  # what it is handed is pinned here, beside what it decides.
+  rule="$(fn_slice 'static func startsLocationLaunch(foregroundSeen: Bool, noted: Bool) -> Bool {' "$ad" | stmt_lines | sed -E 's/^[0-9]+: //' | grep -vxF '}' || true)"
+  [[ "$rule" == '!foregroundSeen && !noted' ]] ||
+    lfail "AppDelegate.startsLocationLaunch(foregroundSeen:noted:) is no longer exactly '!foregroundSeen && !noted' — without the first conjunct a location event in a process the user opened makes it a location launch, without the second the rule is no longer once per process"
+  note="$(fn_slice 'func noteLocationLaunch()' "$ad" | stmt_lines)"
+  [[ -n "$(stmt_at 'let noted = locationStreamHandler\.launchedForLocation$' <<<"$note")" ]] ||
+    lfail "noteLocationLaunch() no longer hands the rule the stream handler's own launchedForLocation as 'noted' (let noted = locationStreamHandler.launchedForLocation) — any other value lets a second location event in the same process note the launch again"
+  guard_line="$(stmt_at 'guard Self\.startsLocationLaunch\(foregroundSeen: foregroundSeen, noted: noted\) else \{ return \}$' <<<"$note")"
+  set_line="$(stmt_at 'locationStreamHandler\.launchedForLocation = true$' <<<"$note")"
+  begin_line="$(stmt_at 'locationStreamHandler\.beginLaunchWindow\(\)$' <<<"$note")"
+  notify_line="$(stmt_at 'locationStreamHandler\.notifyLocationLaunch\(\)$' <<<"$note")"
+  [[ -n "$guard_line" ]] ||
+    lfail "noteLocationLaunch() no longer guards with exactly 'guard Self.startsLocationLaunch(foregroundSeen: foregroundSeen, noted: noted) else { return }' — the rule handed anything but the process's own foregroundSeen lets a process the user opened become a location launch"
+  if [[ -z "$guard_line" || -z "$set_line" || -z "$begin_line" || -z "$notify_line" ]] ||
+    (( guard_line >= set_line || set_line >= begin_line || begin_line >= notify_line )); then
+    lfail "noteLocationLaunch() does not, at its own statement depth and in this order, pass its guard (line ${guard_line:-none}), set launchedForLocation (line ${set_line:-none}), open the launch window (line ${begin_line:-none}) and tell Dart (line ${notify_line:-none}) — a nudge before the set reads false, and a set without the window lets iOS suspend the process before the first publish"
   fi
-  grep -qF 'locationStreamHandler.beginLaunchWindow()' <<<"$block" ||
-    lfail "the location-launch branch no longer opens the launch window — iOS can suspend the process between the catch-up sweep and the first publish"
+  n="$(grep -cE 'launchedForLocation *= *true' <<<"$all" || true)"
+  [[ "$n" == "1" ]] ||
+    lfail "launchedForLocation = true is assigned ${n} time(s) across the Runner sources, want exactly once, in noteLocationLaunch() — a second site is a location launch by another rule"
+
+  # The one caller: the SLC hook, wired at launch, unconditionally.
+  local hook
+  hook="$(brace_block 'slcHandler.onLocationEvent = {' <<<"$view")"
+  n="$(grep -vF 'func noteLocationLaunch()' <<<"$all" | grep -cF 'noteLocationLaunch()' || true)"
+  if [[ "$n" != "1" ]] || ! grep -qF 'noteLocationLaunch()' <<<"$hook"; then
+    lfail "noteLocationLaunch() is called ${n} time(s) across the Runner sources, want exactly once, from the slcHandler.onLocationEvent closure — a call from anywhere else marks a launch no location event caused"
+  fi
+  launch="$(fn_slice 'didFinishLaunchingWithOptions' "$ad")"
+  [[ -n "$(stmt_at 'slcHandler\.onLocationEvent = \{' <<<"$(stmt_lines <<<"$launch")")" ]] ||
+    lfail "didFinishLaunching no longer wires slcHandler.onLocationEvent at its own statement depth — a hook wired conditionally, or elsewhere, leaves a process iOS launched for a location event unrecognised"
+  n="$(grep -cE 'onLocationEvent *= *[^=]' <<<"$all" || true)"
+  [[ "$n" == "1" ]] ||
+    lfail "onLocationEvent is assigned ${n} time(s) across the Runner sources, want exactly once (the launch-time wiring) — a second assignment replaces or clears the hook"
+
+  # The hook's two call sites in the SLC handler.
+  local sig body call_line enabled_line floor_line
+  for sig in 'didUpdateLocations locations: [CLLocation]) {' 'didExitRegion region: CLRegion) {'; do
+    body="$(fn_slice "$sig" "$slc")"
+    call_line="$(stmt_lines <<<"$body" | stmt_at 'onLocationEvent\?\(\)$')"
+    enabled_line="$(stmt_lines <<<"$body" | stmt_at 'guard isEnabled\(\)')"
+    floor_line="$(grep -nF 'guard catchupDue() else { return }' <<<"$body" | head -n1 | cut -d: -f1)"
+    if [[ "$(grep -cF 'onLocationEvent?()' <<<"$body" || true)" != "1" ||
+      -z "$call_line" || -z "$enabled_line" || -z "$floor_line" ]] ||
+      (( enabled_line >= call_line || call_line >= floor_line )); then
+      lfail "'${sig}' does not call onLocationEvent?() exactly once, at its own statement depth, after its isEnabled() guard (line ${enabled_line:-none}) and before the catch-up floor (line ${floor_line:-none}; call at ${call_line:-none}) — the floor would hide the event a location launch is recognised by, and a call before the enable check makes one for a user who turned background sharing off"
+    fi
+  done
+  n="$(code_view "$slc" | grep -cF 'onLocationEvent?()' || true)"
+  [[ "$n" == "2" ]] ||
+    lfail "$(basename "$slc") calls onLocationEvent?() ${n} time(s), want 2, one per delivery callback — every call is a location event to the launch rule"
+
+  # No second derivation.
+  if grep -qE '\.location\]' <<<"$view" ||
+    sed -E 's/didFinishLaunchingWithOptions:? launchOptions//g' <<<"$view" | grep -qF 'launchOptions'; then
+    lfail "AppDelegate reads launchOptions — a location launch is noteLocationLaunch()'s rule alone, and a second derivation beside it decides the same fact twice"
+  fi
+
+  # The clear at the scene's first foreground, which nothing later undoes.
+  fg="$(fn_slice 'func sceneWillEnterForeground()' "$ad" | stmt_lines | sed -E 's/^[0-9]+: //')"
+  local stmt
+  for stmt in 'foregroundSeen = true' 'locationStreamHandler.launchedForLocation = false' 'locationStreamHandler.endLaunchWindow()'; do
+    grep -qxF -- "$stmt" <<<"$fg" ||
+      lfail "AppDelegate.sceneWillEnterForeground() no longer runs '${stmt}' at its own statement depth — a process the user opened would stay a location launch, or become one at its next location event, and keep permitting background starts after it is backgrounded again (the case CI run 32661622879 recorded iOS refusing)"
+  done
+  if ! grep -qE '^ *private var foregroundSeen = false$' <<<"$view" ||
+    [[ "$(grep -E '\bforegroundSeen *= *[^=]' <<<"$view" | grep -cvE 'var +foregroundSeen' || true)" != "1" ]]; then
+    lfail "foregroundSeen must start false and be assigned only once, to true, in sceneWillEnterForeground() — set back to false, a process the user has opened becomes a location launch at its next location event"
+  fi
+
   # The slice starts mid-signature, after `application(`: the leading `(`
   # balances the `)` it would otherwise begin with.
   { echo '('; cat <<<"$launch"; } | fn_body | has_unconditional 'bgTaskHandler.scheduleNextCatchup()' ||
     lfail "didFinishLaunching schedules the BGTask only conditionally — a location relaunch must keep the catch-up floor too"
-  fg="$(fn_slice 'applicationWillEnterForeground' "$ad")"
-  grep -qF 'locationStreamHandler.launchedForLocation = false' <<<"$fg" ||
-    lfail "applicationWillEnterForeground no longer clears launchedForLocation — a process the user opened would keep permitting background starts after it is backgrounded again (the case CI run 32661622879 recorded iOS refusing)"
-  grep -qF 'locationStreamHandler.endLaunchWindow()' <<<"$fg" ||
-    lfail "applicationWillEnterForeground no longer ends the launch window"
+  return "$_lf"
+}
+
+# 9. The registrations every launch reaches (AppDelegate.swift). The app's
+#    one engine runs from didFinishLaunching, scene or no scene: a location or
+#    BGTask launch reaches Dart before any scene connects, or with none at all.
+#    So, at the method's own statement depth and in this order: the BGTask
+#    registration, the engine's run (a handler set on an engine not yet
+#    running is dropped), the plugins, the messenger bound from that engine,
+#    every Haven registration on it, and only then super. Nothing may hang a
+#    registration off a window's root controller (nil when no scene connected:
+#    it compiles and never runs) or on Flutter's implicit-engine callback
+#    (whose engine is a second one beside this). The foreground re-arm runs
+#    from the scene's hook.
+check_launch_registration() { # <AppDelegate.swift>
+  local ad="$1"
+  _lf=0
+  local view launch top l_bg l_run l_gpr l_msg l_super n_all n_top line
+  view="$(code_view "$ad")"
+  launch="$(fn_slice 'didFinishLaunchingWithOptions' "$ad")"
+  top="$(stmt_lines <<<"$launch")"
+  l_bg="$(stmt_at 'bgTaskHandler\.registerBGTask\(\)$' <<<"$top")"
+  l_run="$(stmt_at 'flutterEngine\.run\(\)$' <<<"$top")"
+  l_gpr="$(stmt_at 'GeneratedPluginRegistrant\.register\(with: self\)$' <<<"$top")"
+  l_msg="$(stmt_at 'let messenger = flutterEngine\.binaryMessenger$' <<<"$top")"
+  l_super="$(stmt_at '(let result = |return )?super\.application\(' <<<"$top")"
+  if [[ -z "$l_bg" || -z "$l_run" || -z "$l_gpr" || -z "$l_msg" || -z "$l_super" ]] ||
+    (( l_bg >= l_run || l_run >= l_gpr || l_gpr >= l_msg || l_msg >= l_super )); then
+    lfail "didFinishLaunching no longer runs, at its own statement depth and in this order, bgTaskHandler.registerBGTask() (line ${l_bg:-none}), flutterEngine.run() (${l_run:-none}), GeneratedPluginRegistrant.register(with: self) (${l_gpr:-none}), 'let messenger = flutterEngine.binaryMessenger' (${l_msg:-none}) and super.application( (${l_super:-none}) — a registration on an engine not yet running is dropped, a messenger from anywhere else is not the engine every launch runs, and the BGTask must be registered before super returns"
+  fi
+  # Every Haven registration on the messenger: at statement depth, between the
+  # binding and super, and nowhere else in the file.
+  n_all="$(grep -cF '.register(with: messenger)' <<<"$view" || true)"
+  n_top=0
+  while IFS=: read -r line _; do
+    [[ -n "$line" ]] || continue
+    n_top=$(( n_top + 1 ))
+    if [[ -z "$l_msg" || -z "$l_super" ]] || (( line <= l_msg || line >= l_super )); then
+      lfail "didFinishLaunching registers a handler at slice line ${line}, outside 'let messenger = flutterEngine.binaryMessenger' (${l_msg:-none}) … super.application( (${l_super:-none})"
+    fi
+  done < <(grep -E '^[0-9]+: .*\.register\(with: messenger\)$' <<<"$top")
+  if [[ "$n_all" != "$n_top" ]]; then
+    lfail "AppDelegate.swift registers ${n_all} handler(s) on the messenger, ${n_top} of them at didFinishLaunching's own statement depth — a registration nested in a branch, or in a method only some launches reach, leaves its channel unserved: every Dart call raises MissingPluginException"
+  fi
+  # Any other registration (a plugin registrar's) follows the plugins and
+  # precedes super, inside didFinishLaunching.
+  n_all="$(grep -F '.register(with:' <<<"$view" | grep -vF '.register(with: messenger)' | grep -cvF 'GeneratedPluginRegistrant.register(with: self)' || true)"
+  n_top=0
+  while IFS=: read -r line _; do
+    [[ -n "$line" ]] || continue
+    n_top=$(( n_top + 1 ))
+    if [[ -z "$l_gpr" || -z "$l_super" ]] || (( line <= l_gpr || line >= l_super )); then
+      lfail "didFinishLaunching registers on a plugin registrar at slice line ${line}, outside GeneratedPluginRegistrant.register(with: self) (${l_gpr:-none}) … super.application( (${l_super:-none}) — before the engine runs, the registration is dropped"
+    fi
+  done < <(grep -nF '.register(with:' <<<"$launch" | grep -vF '.register(with: messenger)' | grep -vF 'GeneratedPluginRegistrant.register(with: self)')
+  if [[ "$n_all" != "$n_top" ]]; then
+    lfail "AppDelegate.swift registers on a plugin registrar outside didFinishLaunching (${n_all} in the file, ${n_top} there)"
+  fi
+  local reg stmts
+  stmts="$(sed -E 's/^[0-9]+: //' <<<"$top")"
+  for reg in 'backgroundSessionHandler.register(with: messenger)' 'locationStreamHandler.register(with: messenger)'; do
+    grep -qxF -- "$reg" <<<"$stmts" ||
+      lfail "didFinishLaunching no longer runs '${reg}' — the channel would never be served, every Dart call would raise MissingPluginException, and iOS would have no background session or position stream at all"
+  done
+  if grep -qF 'rootViewController' <<<"$view"; then
+    lfail "AppDelegate.swift names rootViewController — under scenes the app delegate's window is nil, so whatever hangs off it compiles and never runs; the engine is AppDelegate's own"
+  fi
+  if grep -qF 'FlutterImplicitEngineDelegate' <<<"$view"; then
+    lfail "AppDelegate.swift adopts FlutterImplicitEngineDelegate — Flutter's implicit engine would be a second engine (a second main(), Rule 14) beside the one AppDelegate runs, and a launch with no scene never gets it"
+  fi
+  grep -qxF 'backgroundSessionHandler.arm()' <<<"$(fn_slice 'func sceneWillEnterForeground()' "$ad" | stmt_lines | sed -E 's/^[0-9]+: //')" ||
+    lfail "AppDelegate.sceneWillEnterForeground() no longer re-arms the background sessions at its own statement depth — it is also where arm()'s DEFERRED invalidate lands, the one an Always confirmation delivered while backgrounded had to leave undone"
+  return "$_lf"
+}
+
+# 9c. The scene hops (SceneDelegate.swift). Under scenes UIKit stops sending
+#     the app delegate its foreground and background callbacks, so the scene's
+#     own reach the handlers AppDelegate keeps, and every override calls super:
+#     FlutterSceneDelegate forwards each callback to the engine and the
+#     plugins, and the one that connects the scene registers the engine of
+#     the window's root controller, so the window — AppDelegate's kept
+#     controller on AppDelegate's engine — is in place before it runs.
+check_scene_hops() { # <SceneDelegate.swift> <AppDelegate.swift>
+  local sd="$1" ad="$2"
+  _lf=0
+  local view name body top connect l_win l_super cb
+  view="$(code_view "$sd")"
+  grep -qE 'class +SceneDelegate *: *FlutterSceneDelegate\b' <<<"$view" ||
+    lfail "$(basename "$sd") no longer declares 'class SceneDelegate: FlutterSceneDelegate' — another base class forwards nothing to the engine or the plugins, and Info.plist names this class"
+  while read -r name; do
+    [[ -n "$name" ]] || continue
+    top="$(fn_slice "override func ${name}(" "$sd" | stmt_lines)"
+    [[ -n "$(stmt_at "super\\.${name}\\(" <<<"$top")" ]] ||
+      lfail "SceneDelegate.${name} does not call super.${name} at its own statement depth — FlutterSceneDelegate forwards it to the engine and the plugins, so without it Dart's lifecycle stops following the scene"
+  done < <(grep -oE 'override +func +[A-Za-z_]+\(' <<<"$view" | sed -E 's/^override +func +//; s/\($//' | sort -u)
+  connect="$(fn_slice 'override func scene(' "$sd")"
+  top="$(stmt_lines <<<"$connect")"
+  l_win="$(stmt_at 'self\.window = window$' <<<"$top")"
+  l_super="$(stmt_at 'super\.scene\(' <<<"$top")"
+  if [[ -z "$l_win" || -z "$l_super" ]] ||
+    (( l_win >= l_super )) || [[ -z "$(stmt_at 'window\.rootViewController = appDelegate\.flutterViewController$' <<<"$top")" ]]; then
+    lfail "SceneDelegate.scene(_:willConnectTo:options:) no longer sets the window's root to appDelegate.flutterViewController and assigns self.window (line ${l_win:-none}) before super (line ${l_super:-none}) — super registers the root controller's engine with the scene, and finding none it forwards the scene's events to no engine"
+  fi
+  (( $(grep -cE 'rootViewController *= *[^=]' <<<"$view" || true) <= 1 )) ||
+    lfail "$(basename "$sd") assigns rootViewController more than once — the one root is AppDelegate's kept controller, set once, when the scene connects"
+  for cb in WillEnterForeground DidEnterBackground; do
+    top="$(fn_slice "override func scene${cb}(" "$sd" | stmt_lines)"
+    [[ -n "$(stmt_at "appDelegate\\.scene${cb}\\(\\)$" <<<"$top")" ]] ||
+      lfail "SceneDelegate.scene${cb} no longer calls appDelegate.scene${cb}() at its own statement depth — the app delegate's handlers miss every $([[ "$cb" == WillEnterForeground ]] && echo 'foreground: the launch fact is never cleared and the sessions never re-armed' || echo 'backgrounding: SLC and the BGTask are never re-armed (A3)')"
+  done
+  for cb in WillEnterForeground DidEnterBackground WillResignActive DidBecomeActive; do
+    code_has "func application${cb}(" "$ad" &&
+      lfail "AppDelegate.swift overrides application${cb} — UIKit never calls it under scenes, so what it holds reads as live and runs never"
+  done
+  return "$_lf"
+}
+
+# 9d. One engine, one kept controller, no storyboard. A second FlutterEngine —
+#     a storyboard's view controller, a scene's own controller, the app
+#     delegate's fallback engine — is a second main() beside the first (Rule
+#     14: two sessions on one MLS database). So: one `FlutterEngine(` in the
+#     Runner sources, in AppDelegate; one `FlutterViewController(`, the lazy
+#     stored controller AppDelegate keeps on that engine; the registry
+#     overrides answer from it; Info.plist names no storyboard for the app or
+#     a scene and supports one scene (one controller cannot be two windows'
+#     root); and Main.storyboard is gone from the project and the disk.
+check_one_engine() { # <Runner dir> <Info.plist> <project.pbxproj>
+  local dir="$1" plist="$2" pbx="$3"
+  _lf=0
+  local ad="${dir}/AppDelegate.swift" f n view kept
+  n=0
+  for f in "$dir"/*.swift; do n=$(( n + $(code_view "$f" | grep -cF 'FlutterEngine(' || true) )); done
+  if [[ "$n" != "1" ]] || [[ "$(code_view "$ad" | grep -cE 'let +flutterEngine *= *FlutterEngine\(' || true)" != "1" ]]; then
+    lfail "the Runner sources construct FlutterEngine( ${n} time(s), want exactly once, as AppDelegate's 'let flutterEngine = FlutterEngine(' — a second engine runs a second main() (Rule 14)"
+  fi
+  n=0
+  for f in "$dir"/*.swift; do n=$(( n + $(code_view "$f" | grep -cF 'FlutterViewController(' || true) )); done
+  view="$(code_view "$ad")"
+  kept="$(brace_block 'lazy var flutterViewController: FlutterViewController = {' <<<"$view")"
+  if [[ "$n" != "1" ]] || ! grep -qE 'FlutterViewController\(engine: *(self\.)?flutterEngine,' <<<"$kept"; then
+    lfail "FlutterViewController( must be constructed exactly once (found ${n}), in AppDelegate's lazy stored flutterViewController, on flutterEngine — a controller built without that engine starts its own, and one built per scene is freed with the scene, sending Dart 'detached' in a process still sharing"
+  fi
+  local sig call
+  for sig in 'registrar(forPlugin' 'hasPlugin(' 'valuePublished(byPlugin'; do
+    call="$(fn_slice "override func ${sig}" "$ad" | fn_body)"
+    if ! grep -qF "flutterEngine.${sig}" <<<"$call" || grep -qF 'super.' <<<"$call"; then
+      lfail "AppDelegate's override of ${sig%(*}… no longer answers from flutterEngine — FlutterAppDelegate answers from its own window, nil under scenes, by starting an engine of its own"
+    fi
+  done
+  if ! xmllint --nonet --noout "$plist" 2>/dev/null; then
+    lfail "$(basename "$plist") is not well-formed XML"
+    return "$_lf"
+  fi
+  n="$(xmllint --nonet --xpath "count(//key[starts-with(., 'UIMainStoryboardFile') or starts-with(., 'UISceneStoryboardFile')])" "$plist" 2>/dev/null || echo 0)"
+  [[ "$n" == "0" ]] ||
+    lfail "$(basename "$plist") names a storyboard for the app or a scene — its initial view controller starts an engine of its own beside AppDelegate's"
+  n="$(xmllint --nonet --xpath "local-name(/plist/dict/key[.='UIApplicationSceneManifest']/following-sibling::*[1]/key[.='UIApplicationSupportsMultipleScenes']/following-sibling::*[1])" "$plist" 2>/dev/null || true)"
+  [[ "$n" == "false" ]] ||
+    lfail "$(basename "$plist") does not set UIApplicationSupportsMultipleScenes to false (found ${n:-nothing}) — Haven runs on iPad, where a second scene would make the one kept controller a second window's root"
+  if grep -qF 'Main.storyboard' "$pbx" || [[ -e "${dir}/Base.lproj/Main.storyboard" ]]; then
+    lfail "Main.storyboard is back in the project or on disk — the template's storyboard holds a FlutterViewController that starts its own engine"
+  fi
+  return "$_lf"
+}
+
+# 9e. The BGTask launch handler runs on the main queue: it calls a Flutter
+#     channel, which must be called on the platform thread, and a nil queue
+#     runs the handler on a background one.
+check_bgtask_main_queue() { # <HavenBGTaskHandler.swift>
+  local view
+  _lf=0
+  view="$(code_view "$1" | flat_code)"
+  if [[ "$(grep -oF 'BGTaskScheduler.shared.register(' <<<"$view" | wc -l | tr -d ' ')" != "1" ]] ||
+    ! grep -qE 'BGTaskScheduler\.shared\.register\( ?forTaskWithIdentifier: [^,]+, using: \.main ?\)' <<<"$view"; then
+    lfail "$(basename "$1") must register its one BGTask launch handler 'using: .main' — the handler invokes the Flutter catch-up channel, which off the platform thread is undefined behaviour"
+  fi
   return "$_lf"
 }
 
@@ -2551,10 +2817,11 @@ check_arm_tier_policy "$SESSION_HANDLER" || FAILED=1
 check_indicator_predicate "$SESSION_HANDLER" || FAILED=1
 
 # ---------------------------------------------------------------------------
-# 9. AppDelegate: both native handlers registered on the messenger; the session
-#    handler armed SYNCHRONOUSLY in didFinishLaunching (a session held at
-#    previous termination can only be retaken for a few seconds after a
-#    background relaunch) and re-armed on every foreground return (covers the
+# 9. AppDelegate: every launch's registrations, in order, on the one engine's
+#    messenger (check_launch_registration, above); the session handler armed
+#    SYNCHRONOUSLY in didFinishLaunching (a session held at previous
+#    termination can only be retaken for a few seconds after a background
+#    relaunch) and re-armed on every foreground return (covers the
 #    Always-downgrade drop and a toggle-enable whose Dart arm call raced engine
 #    teardown); and the two-way tier wiring assigned AFTER the session handler
 #    is registered.
@@ -2566,10 +2833,7 @@ check_indicator_predicate "$SESSION_HANDLER" || FAILED=1
 #    reach arm() before the documented synchronous arm() site, and that site
 #    would stop meaning what its comment says.
 # ---------------------------------------------------------------------------
-code_has 'backgroundSessionHandler.register(with: messenger)' "$APP_DELEGATE" ||
-  fail "AppDelegate no longer registers the background-session channel"
-code_has 'locationStreamHandler.register(with: messenger)' "$APP_DELEGATE" ||
-  fail "AppDelegate no longer registers the location-stream channels — the EventChannel would never be served, every Dart listen would raise MissingPluginException, and iOS would have no position stream at all"
+check_launch_registration "$APP_DELEGATE" || FAILED=1
 appdelegate_view="$(code_view "$APP_DELEGATE")"
 session_reg_line="$(code_line_of 'backgroundSessionHandler\.register\(with:' <<<"$appdelegate_view")"
 for wiring in 'locationStreamHandler\.sessionHandler *=' 'locationStreamHandler\.onAuthorizationChanged *=' 'backgroundSessionHandler\.onAlwaysConfirmedChanged *='; do
@@ -2585,12 +2849,18 @@ grep -qF 'applyIndicatorPolicy()' <<<"$appdelegate_view" ||
 launch_body="$(fn_slice 'didFinishLaunchingWithOptions' "$APP_DELEGATE")"
 grep -qF 'backgroundSessionHandler.arm()' <<<"$launch_body" ||
   fail "AppDelegate didFinishLaunching no longer arms the background sessions (the relaunch-retake window is only a few seconds)"
-foreground_body="$(fn_slice 'applicationWillEnterForeground' "$APP_DELEGATE")"
-grep -qF 'backgroundSessionHandler.arm()' <<<"$foreground_body" ||
-  fail "AppDelegate applicationWillEnterForeground no longer re-arms the background sessions — it is also where arm()'s DEFERRED invalidate lands, the one an Always confirmation delivered while backgrounded had to leave undone"
-# 9b. The relaunch fact: set from a background location launch only, cleared
-#     at the first foreground, and the BGTask floor kept on a relaunch.
-check_appdelegate_relaunch "$APP_DELEGATE" || FAILED=1
+# 9b. The relaunch fact: set at a location event before any scene came to the
+#     front, once per process, cleared at the first foreground, and the BGTask
+#     floor kept on a relaunch.
+check_appdelegate_relaunch "$RUNNER_DIR" || FAILED=1
+# 9c. The scene hops: every SceneDelegate override calls super, the window is
+#     AppDelegate's kept controller and in place before super, and the
+#     foreground and background hooks reach the app delegate.
+check_scene_hops "$SCENE_DELEGATE" "$APP_DELEGATE" || FAILED=1
+# 9d. One engine, one kept controller, no storyboard, one scene.
+check_one_engine "$RUNNER_DIR" "$PLIST" "$PBXPROJ" || FAILED=1
+# 9e. The BGTask launch handler runs on the main queue.
+check_bgtask_main_queue "$BGTASK_HANDLER" || FAILED=1
 
 # ---------------------------------------------------------------------------
 # 10. BackgroundSharingNotifier: the Dart side must AWAIT arm() (the awaited
@@ -2716,6 +2986,14 @@ check_pbxproj_stream_handler "$PBXPROJ" || FAILED=1
 check_pbxproj_network_change_handler "$PBXPROJ" || FAILED=1
 
 # ---------------------------------------------------------------------------
+# 14c. SceneDelegate.swift must be IN the Xcode project too. Out of it, UIKit
+#      finds no class for the name Info.plist's scene manifest gives, the
+#      scene has no delegate, and nothing shows Haven's window: no blur, no
+#      foreground re-arm, no background re-arm.
+# ---------------------------------------------------------------------------
+check_pbxproj_scene_delegate "$PBXPROJ" || FAILED=1
+
+# ---------------------------------------------------------------------------
 # 15. The lane's timeout LADDER, across the two files that own its ends, and
 #     PER LEG since OD4-d — both ends are now expressions with one value per
 #     receive plane, compared in source order, with a count mismatch treated as
@@ -2835,7 +3113,7 @@ fi
 # hide under the slack.
 # ---------------------------------------------------------------------------
 self_test() {
-  local -r SELF_TEST_FIXTURES=293
+  local -r SELF_TEST_FIXTURES=370
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -5878,6 +6156,25 @@ EOF
   _pbxnet 'pbxproj: the network-change handler absent, the stream handler present' 1 \
     "${pbx_good}"
 
+  # SceneDelegate.swift (14c), through the same counter: present passes; the
+  # silent drop of its Sources entry fails; and another file's four lines do
+  # not answer for it.
+  local pbx_sd='		5E10CA780000000000000002 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E10CA780000000000000001 /* SceneDelegate.swift */; };
+		5E10CA780000000000000001 /* SceneDelegate.swift */ = {isa = PBXFileReference; path = SceneDelegate.swift; sourceTree = "<group>"; };
+				5E10CA780000000000000001 /* SceneDelegate.swift */,
+				5E10CA780000000000000002 /* SceneDelegate.swift in Sources */,'
+  _pbxsd() { # <label> <want-rc> <body>
+    local got=0
+    printf '%s\n' "$3" >"${tmp}/project.pbxproj"
+    ( check_pbxproj_scene_delegate "${tmp}/project.pbxproj" ) >/dev/null 2>&1 || got=$?
+    _record "$1" "$2" "${got}"
+  }
+  _pbxsd 'pbxproj: the scene delegate, all four references present' 0 "${pbx_sd}"
+  _pbxsd 'pbxproj: the scene delegate, Sources entry dropped' 1 \
+    "$(head -n 3 <<<"${pbx_sd}")"
+  _pbxsd 'pbxproj: the scene delegate absent, the network-change handler present' 1 \
+    "${pbx_net}"
+
   # --- check_p3_host_wire_oracle --------------------------------------------
   #
   # Every fixture below leaves all four files readable and internally sensible
@@ -6179,55 +6476,495 @@ P3_PROVEN_BY_HOST=1" "${p3_probe}" "${p3_drive}" "${p3_constants}"
     "${sg_status}
   func markLaunched() { launchedForLocation = true }"
 
-  # --- check_appdelegate_relaunch (9b) ---------------------------------------
-  local ad_launch='  override func application(
+  # --- the native launch and scene shape (9, 9b, 9c, 9d, 9e) -----------------
+  #
+  # One committed shape per file, trimmed to what the checks read, and every
+  # mutation a literal edit of it (`_lit`: no glob, no `&` in the replacement,
+  # which bash 5.2 would expand), so each fixture differs from the passing one
+  # by exactly the edit it is named after.
+  _lit() { # <text> <old> <new>: <text> with its first <old> replaced by <new>
+    LIT_T="$1" LIT_O="$2" LIT_N="$3" awk 'BEGIN {
+      t = ENVIRON["LIT_T"]; o = ENVIRON["LIT_O"]; i = index(t, o)
+      if (i == 0) { printf "%s", t; exit }
+      printf "%s", substr(t, 1, i - 1) ENVIRON["LIT_N"] substr(t, i + length(o)) }'
+  }
+  local fx_ad='@main
+@objc class AppDelegate: FlutterAppDelegate {
+  @objc let flutterEngine = FlutterEngine(name: "io.flutter")
+  @objc private(set) lazy var flutterViewController: FlutterViewController = {
+    let controller = FlutterViewController(engine: self.flutterEngine, nibName: nil, bundle: nil)
+    controller.loadDefaultSplashScreenView()
+    return controller
+  }()
+  private var foregroundSeen = false
+  private let bgTaskHandler = HavenBGTaskHandler()
+  private lazy var slcHandler: HavenSLCHandler = HavenSLCHandler(bgTaskHandler: bgTaskHandler)
+  private let backgroundSessionHandler = HavenBackgroundSessionHandler()
+  private let locationStreamHandler = HavenLocationStreamHandler()
+  private let qrScannerHandler = HavenQrScannerHandler()
+
+  override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    if let controller = window?.rootViewController as? FlutterViewController {
-      locationStreamHandler.register(with: controller.binaryMessenger)
+    bgTaskHandler.registerBGTask()
+    flutterEngine.run()
+    GeneratedPluginRegistrant.register(with: self)
+    if let registrar = self.registrar(forPlugin: "HavenQrScanner") {
+      qrScannerHandler.register(with: registrar)
+    }
+    let messenger = flutterEngine.binaryMessenger
+    bgTaskHandler.register(with: messenger)
+    slcHandler.register(with: messenger)
+    backgroundSessionHandler.register(with: messenger)
+    locationStreamHandler.sessionHandler = backgroundSessionHandler
+    locationStreamHandler.register(with: messenger)
+    slcHandler.onLocationEvent = { [weak self] in
+      self?.noteLocationLaunch()
     }
     let result = super.application(application, didFinishLaunchingWithOptions: launchOptions)
-    let launchedForLocation = launchOptions?[.location] != nil
-      && application.applicationState == .background
     slcHandler.startMonitoring()
     bgTaskHandler.scheduleNextCatchup()
-    if launchedForLocation {
-      locationStreamHandler.launchedForLocation = true
-      locationStreamHandler.beginLaunchWindow()
-    }
     backgroundSessionHandler.arm()
     return result
-  }'
-  local ad_fg='  override func applicationWillEnterForeground(_ application: UIApplication) {
-    super.applicationWillEnterForeground(application)
+  }
+
+  override func registrar(forPlugin pluginKey: String) -> FlutterPluginRegistrar? {
+    flutterEngine.registrar(forPlugin: pluginKey)
+  }
+
+  override func hasPlugin(_ pluginKey: String) -> Bool {
+    flutterEngine.hasPlugin(pluginKey)
+  }
+
+  override func valuePublished(byPlugin pluginKey: String) -> NSObject? {
+    flutterEngine.valuePublished(byPlugin: pluginKey)
+  }
+
+  @objc func noteLocationLaunch() {
+    let noted = locationStreamHandler.launchedForLocation
+    guard Self.startsLocationLaunch(foregroundSeen: foregroundSeen, noted: noted) else { return }
+    locationStreamHandler.launchedForLocation = true
+    locationStreamHandler.beginLaunchWindow()
+    locationStreamHandler.notifyLocationLaunch()
+  }
+
+  @objc(startsLocationLaunchWithForegroundSeen:noted:)
+  static func startsLocationLaunch(foregroundSeen: Bool, noted: Bool) -> Bool {
+    !foregroundSeen && !noted
+  }
+
+  func sceneWillEnterForeground() {
+    foregroundSeen = true
     locationStreamHandler.launchedForLocation = false
     locationStreamHandler.endLaunchWindow()
     backgroundSessionHandler.arm()
-  }'
-  _appdel() { # <label> <want-rc> <launch> <foreground>
+  }
+
+  func sceneDidEnterBackground() {
+    slcHandler.startMonitoring()
+    bgTaskHandler.scheduleNextCatchup()
+  }
+}'
+  local fx_slc='final class HavenSLCHandler: NSObject, CLLocationManagerDelegate {
+  var onLocationEvent: (() -> Void)?
+
+  func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+    guard isEnabled() else { return }
+    onLocationEvent?()
+    refreshRelaunchRegion(around: locations.last)
+    guard catchupDue() else { return }
+    triggerDartCatchup()
+  }
+
+  func locationManager(_ manager: CLLocationManager, didExitRegion region: CLRegion) {
+    guard isEnabled(), region.identifier == Self.relaunchRegionIdentifier else { return }
+    onLocationEvent?()
+    refreshRelaunchRegion(around: manager.location)
+    guard catchupDue() else { return }
+    triggerDartCatchup()
+  }
+}'
+  local fx_sd='class SceneDelegate: FlutterSceneDelegate {
+  private var privacyBlurView: UIVisualEffectView?
+
+  private var appDelegate: AppDelegate {
+    UIApplication.shared.delegate as! AppDelegate
+  }
+
+  override func scene(
+    _ scene: UIScene,
+    willConnectTo session: UISceneSession,
+    options connectionOptions: UIScene.ConnectionOptions
+  ) {
+    guard let windowScene = scene as? UIWindowScene else { return }
+    let window = UIWindow(windowScene: windowScene)
+    window.rootViewController = appDelegate.flutterViewController
+    self.window = window
+    window.makeKeyAndVisible()
+    super.scene(scene, willConnectTo: session, options: connectionOptions)
+  }
+
+  override func sceneWillEnterForeground(_ scene: UIScene) {
+    super.sceneWillEnterForeground(scene)
+    appDelegate.sceneWillEnterForeground()
+  }
+
+  override func sceneDidEnterBackground(_ scene: UIScene) {
+    super.sceneDidEnterBackground(scene)
+    appDelegate.sceneDidEnterBackground()
+  }
+
+  override func sceneWillResignActive(_ scene: UIScene) {
+    super.sceneWillResignActive(scene)
+    privacyBlurView = nil
+  }
+
+  override func sceneDidBecomeActive(_ scene: UIScene) {
+    super.sceneDidBecomeActive(scene)
+    privacyBlurView = nil
+  }
+}'
+
+  # --- check_launch_registration (9) ------------------------------------------
+  _reg() { # <label> <want-rc> <AppDelegate>
     local got=0
-    printf 'class AppDelegate: FlutterAppDelegate {\n%s\n%s\n}\n' "$3" "$4" >"${tmp}/AppDelegate.swift"
-    ( check_appdelegate_relaunch "${tmp}/AppDelegate.swift" ) >/dev/null 2>&1 || got=$?
+    printf '%s\n' "$3" >"${tmp}/AppDelegate.swift"
+    ( check_launch_registration "${tmp}/AppDelegate.swift" ) >/dev/null 2>&1 || got=$?
     _record "$1" "$2" "${got}"
   }
-  _appdel 'app delegate: today'"'"'s tree passes' 0 "${ad_launch}" "${ad_fg}"
-  _appdel 'app delegate: the launch fact without the background state' 1 \
-    "${ad_launch/
-      \&\& application.applicationState == .background/}" "${ad_fg}"
-  _appdel 'app delegate: the fact set outside the location-launch branch' 1 \
-    "${ad_launch/    slcHandler.startMonitoring()/    locationStreamHandler.launchedForLocation = true
-    slcHandler.startMonitoring()}" "${ad_fg}"
-  _appdel 'app delegate: the BGTask back inside a launch branch' 1 \
-    "${ad_launch/    bgTaskHandler.scheduleNextCatchup()
-    if launchedForLocation \{/    if launchedForLocation \{
-      bgTaskHandler.scheduleNextCatchup()}" "${ad_fg}"
-  _appdel 'app delegate: the window never opened' 1 \
-    "${ad_launch/      locationStreamHandler.beginLaunchWindow()
-/}" "${ad_fg}"
-  _appdel 'app delegate: the first foreground keeps the launch fact' 1 \
-    "${ad_launch}" "${ad_fg/    locationStreamHandler.launchedForLocation = false
-/}"
+  _reg 'launch registration: today'"'"'s tree passes' 0 "${fx_ad}"
+  # Each adjacent pair of the order, swapped alone.
+  _reg 'launch registration: the BGTask registered after the engine runs' 1 \
+    "$(_lit "${fx_ad}" '    bgTaskHandler.registerBGTask()
+    flutterEngine.run()' '    flutterEngine.run()
+    bgTaskHandler.registerBGTask()')"
+  _reg 'launch registration: the plugins registered before the engine runs' 1 \
+    "$(_lit "${fx_ad}" '    flutterEngine.run()
+    GeneratedPluginRegistrant.register(with: self)' '    GeneratedPluginRegistrant.register(with: self)
+    flutterEngine.run()')"
+  _reg 'launch registration: the messenger bound before the plugins' 1 \
+    "$(_lit "$(_lit "${fx_ad}" '    let messenger = flutterEngine.binaryMessenger
+' '')" '    GeneratedPluginRegistrant.register(with: self)' '    let messenger = flutterEngine.binaryMessenger
+    GeneratedPluginRegistrant.register(with: self)')"
+  _reg 'launch registration: the messenger taken from a registrar' 1 \
+    "$(_lit "${fx_ad}" 'let messenger = flutterEngine.binaryMessenger' 'let messenger = self.registrar(forPlugin: "Haven")!.messenger()')"
+  _reg 'launch registration: a handler registered above the messenger binding' 1 \
+    "$(_lit "$(_lit "${fx_ad}" '    bgTaskHandler.register(with: messenger)
+' '')" '    let messenger = flutterEngine.binaryMessenger' '    bgTaskHandler.register(with: messenger)
+    let messenger = flutterEngine.binaryMessenger')"
+  _reg 'launch registration: a handler registered after super' 1 \
+    "$(_lit "$(_lit "${fx_ad}" '    slcHandler.register(with: messenger)
+' '')" '    slcHandler.startMonitoring()
+    bgTaskHandler.scheduleNextCatchup()
+    backgroundSessionHandler.arm()' '    slcHandler.register(with: messenger)
+    slcHandler.startMonitoring()
+    bgTaskHandler.scheduleNextCatchup()
+    backgroundSessionHandler.arm()')"
+  _reg 'launch registration: a plugin registrar used before the engine runs' 1 \
+    "$(_lit "${fx_ad}" '    flutterEngine.run()' '    qrScannerHandler.register(with: self.registrar(forPlugin: "Early")!)
+    flutterEngine.run()')"
+  _reg 'launch registration: a registration nested in a branch' 1 \
+    "$(_lit "${fx_ad}" '    slcHandler.register(with: messenger)' '    if application.applicationState != .background {
+      slcHandler.register(with: messenger)
+    }')"
+  _reg 'launch registration: a registration in a method only a scene reaches' 1 \
+    "$(_lit "$(_lit "${fx_ad}" '    slcHandler.register(with: messenger)
+' '')" '  func sceneDidEnterBackground() {' '  func sceneDidEnterBackground() {
+    let messenger = flutterEngine.binaryMessenger
+    slcHandler.register(with: messenger)')"
+  _reg 'launch registration: a plugin registrar used outside didFinishLaunching' 1 \
+    "$(_lit "${fx_ad}" '  func sceneDidEnterBackground() {' '  func sceneDidEnterBackground() {
+    qrScannerHandler.register(with: self.registrar(forPlugin: "Late")!)')"
+  _reg 'launch registration: the session channel no longer registered' 1 \
+    "$(_lit "${fx_ad}" '    backgroundSessionHandler.register(with: messenger)
+' '')"
+  _reg 'launch registration: the stream channel no longer registered' 1 \
+    "$(_lit "${fx_ad}" '    locationStreamHandler.register(with: messenger)
+' '')"
+  _reg 'launch registration: the root controller named' 1 \
+    "$(_lit "${fx_ad}" '    let result = super' '    _ = window?.rootViewController
+    let result = super')"
+  _reg 'launch registration: the implicit-engine delegate adopted' 1 \
+    "$(_lit "${fx_ad}" 'class AppDelegate: FlutterAppDelegate {' 'class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {')"
+  _reg 'launch registration: the foreground no longer re-arms' 1 \
+    "$(_lit "${fx_ad}" '    locationStreamHandler.endLaunchWindow()
+    backgroundSessionHandler.arm()' '    locationStreamHandler.endLaunchWindow()')"
+
+  # --- check_appdelegate_relaunch (9b) ---------------------------------------
+  _relaunch() { # <label> <want-rc> <AppDelegate> [<HavenSLCHandler>] [<SceneDelegate>]
+    local got=0 d="${tmp}/runner9b"
+    rm -rf "$d"
+    mkdir -p "$d"
+    printf '%s\n' "$3" >"$d/AppDelegate.swift"
+    printf '%s\n' "${4:-$fx_slc}" >"$d/HavenSLCHandler.swift"
+    printf '%s\n' "${5:-$fx_sd}" >"$d/SceneDelegate.swift"
+    ( check_appdelegate_relaunch "$d" ) >/dev/null 2>&1 || got=$?
+    _record "$1" "$2" "${got}"
+  }
+  _relaunch 'location launch: today'"'"'s tree passes' 0 "${fx_ad}"
+  _relaunch 'location launch: a process the user opened can become one' 1 \
+    "$(_lit "${fx_ad}" '    !foregroundSeen && !noted' '    !noted')"
+  _relaunch 'location launch: no longer once per process' 1 \
+    "$(_lit "${fx_ad}" '    !foregroundSeen && !noted' '    !foregroundSeen')"
+  _relaunch 'location launch: the rule handed no foreground' 1 \
+    "$(_lit "${fx_ad}" '(foregroundSeen: foregroundSeen, noted: noted)' '(foregroundSeen: false, noted: noted)')"
+  _relaunch 'location launch: the rule handed no earlier launch' 1 \
+    "$(_lit "${fx_ad}" '    let noted = locationStreamHandler.launchedForLocation' '    let noted = false')"
+  _relaunch 'location launch: the fact set above its guard' 1 \
+    "$(_lit "$(_lit "${fx_ad}" '    locationStreamHandler.launchedForLocation = true
+' '')" '    guard Self.startsLocationLaunch(' '    locationStreamHandler.launchedForLocation = true
+    guard Self.startsLocationLaunch(')"
+  _relaunch 'location launch: the window never opened' 1 \
+    "$(_lit "${fx_ad}" '    locationStreamHandler.beginLaunchWindow()
+' '')"
+  _relaunch 'location launch: Dart never told' 1 \
+    "$(_lit "${fx_ad}" '    locationStreamHandler.notifyLocationLaunch()
+' '')"
+  _relaunch 'location launch: Dart told before the fact is set' 1 \
+    "$(_lit "$(_lit "${fx_ad}" '    locationStreamHandler.notifyLocationLaunch()
+' '')" '    locationStreamHandler.launchedForLocation = true' '    locationStreamHandler.notifyLocationLaunch()
+    locationStreamHandler.launchedForLocation = true')"
+  _relaunch 'location launch: the fact set at a second site' 1 \
+    "$(_lit "${fx_ad}" '    backgroundSessionHandler.arm()
+    return result' '    backgroundSessionHandler.arm()
+    if application.applicationState == .background { locationStreamHandler.launchedForLocation = true }
+    return result')"
+  _relaunch 'location launch: noted from the scene delegate too' 1 "${fx_ad}" "${fx_slc}" \
+    "$(_lit "${fx_sd}" '    appDelegate.sceneDidEnterBackground()' '    appDelegate.sceneDidEnterBackground()
+    appDelegate.noteLocationLaunch()')"
+  _relaunch 'location launch: the hook no longer wired' 1 \
+    "$(_lit "${fx_ad}" '    slcHandler.onLocationEvent = { [weak self] in
+      self?.noteLocationLaunch()
+    }
+' '')"
+  _relaunch 'location launch: noted at launch instead of by the hook' 1 \
+    "$(_lit "$(_lit "${fx_ad}" '      self?.noteLocationLaunch()' '      self?.backgroundSessionHandler.arm()')" '    backgroundSessionHandler.arm()
+    return result' '    backgroundSessionHandler.arm()
+    noteLocationLaunch()
+    return result')"
+  _relaunch 'location launch: the hook wired in a branch' 1 \
+    "$(_lit "$(_lit "${fx_ad}" '    slcHandler.onLocationEvent = { [weak self] in' '    if HavenBackgroundSessionHandler.resumeConsented() {
+    slcHandler.onLocationEvent = { [weak self] in')" '      self?.noteLocationLaunch()
+    }' '      self?.noteLocationLaunch()
+    }
+    }')"
+  _relaunch 'location launch: the hook cleared in the foreground' 1 \
+    "$(_lit "${fx_ad}" '    foregroundSeen = true' '    foregroundSeen = true
+    slcHandler.onLocationEvent = nil')"
+  _relaunch 'location launch: a region exit no longer reported' 1 "${fx_ad}" \
+    "$(_lit "${fx_slc}" '    onLocationEvent?()
+    refreshRelaunchRegion(around: manager.location)' '    refreshRelaunchRegion(around: manager.location)')"
+  _relaunch 'location launch: reported before the enable check' 1 "${fx_ad}" \
+    "$(_lit "${fx_slc}" '    guard isEnabled() else { return }
+    onLocationEvent?()' '    onLocationEvent?()
+    guard isEnabled() else { return }')"
+  _relaunch 'location launch: reported behind the catch-up floor' 1 "${fx_ad}" \
+    "$(_lit "${fx_slc}" '    onLocationEvent?()
+    refreshRelaunchRegion(around: locations.last)
+    guard catchupDue() else { return }' '    refreshRelaunchRegion(around: locations.last)
+    guard catchupDue() else { return }
+    onLocationEvent?()')"
+  _relaunch 'location launch: reported twice per update' 1 "${fx_ad}" \
+    "$(_lit "${fx_slc}" '    refreshRelaunchRegion(around: locations.last)' '    refreshRelaunchRegion(around: locations.last)
+    onLocationEvent?()')"
+  _relaunch 'location launch: reported from a third callback' 1 "${fx_ad}" \
+    "$(_lit "${fx_slc}" '  var onLocationEvent: (() -> Void)?' '  var onLocationEvent: (() -> Void)?
+
+  func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+    onLocationEvent?()
+  }')"
+  _relaunch 'location launch: launch options read again' 1 \
+    "$(_lit "${fx_ad}" '    bgTaskHandler.registerBGTask()' '    bgTaskHandler.registerBGTask()
+    let relaunched = launchOptions?[.location] != nil')"
+  _relaunch 'location launch: the foreground no longer seen' 1 \
+    "$(_lit "${fx_ad}" '    foregroundSeen = true
+' '')"
+  _relaunch 'location launch: the foreground marked seen at launch instead' 1 \
+    "$(_lit "$(_lit "${fx_ad}" '    foregroundSeen = true
+' '')" '    bgTaskHandler.registerBGTask()' '    bgTaskHandler.registerBGTask()
+    foregroundSeen = true')"
+  _relaunch 'location launch: the first foreground keeps the fact' 1 \
+    "$(_lit "${fx_ad}" '    locationStreamHandler.launchedForLocation = false
+' '')"
+  _relaunch 'location launch: the first foreground leaves the window open' 1 \
+    "$(_lit "${fx_ad}" '    locationStreamHandler.endLaunchWindow()
+' '')"
+  _relaunch 'location launch: the foreground forgotten at backgrounding' 1 \
+    "$(_lit "${fx_ad}" '    slcHandler.startMonitoring()
+    bgTaskHandler.scheduleNextCatchup()
+  }' '    slcHandler.startMonitoring()
+    bgTaskHandler.scheduleNextCatchup()
+    foregroundSeen = false
+  }')"
+  _relaunch 'location launch: the BGTask back inside a branch' 1 \
+    "$(_lit "${fx_ad}" '    slcHandler.startMonitoring()
+    bgTaskHandler.scheduleNextCatchup()
+    backgroundSessionHandler.arm()' '    slcHandler.startMonitoring()
+    if application.applicationState == .background {
+      bgTaskHandler.scheduleNextCatchup()
+    }
+    backgroundSessionHandler.arm()')"
+
+  # --- check_scene_hops (9c) --------------------------------------------------
+  _hops() { # <label> <want-rc> <SceneDelegate> [<AppDelegate>]
+    local got=0
+    printf '%s\n' "$3" >"${tmp}/SceneDelegate.swift"
+    printf '%s\n' "${4:-$fx_ad}" >"${tmp}/AppDelegate.swift"
+    ( check_scene_hops "${tmp}/SceneDelegate.swift" "${tmp}/AppDelegate.swift" ) >/dev/null 2>&1 || got=$?
+    _record "$1" "$2" "${got}"
+  }
+  _hops 'scene hops: today'"'"'s tree passes' 0 "${fx_sd}"
+  _hops 'scene hops: a scene delegate that is not FlutterSceneDelegate' 1 \
+    "$(_lit "${fx_sd}" 'class SceneDelegate: FlutterSceneDelegate {' 'class SceneDelegate: UIResponder, UIWindowSceneDelegate {')"
+  _hops 'scene hops: the connect override gone' 1 \
+    "$(_lit "${fx_sd}" '  override func scene(
+    _ scene: UIScene,
+    willConnectTo session: UISceneSession,
+    options connectionOptions: UIScene.ConnectionOptions
+  ) {
+    guard let windowScene = scene as? UIWindowScene else { return }
+    let window = UIWindow(windowScene: windowScene)
+    window.rootViewController = appDelegate.flutterViewController
+    self.window = window
+    window.makeKeyAndVisible()
+    super.scene(scene, willConnectTo: session, options: connectionOptions)
+  }
+' '')"
+  _hops 'scene hops: sceneWillEnterForeground gone' 1 \
+    "$(_lit "${fx_sd}" '  override func sceneWillEnterForeground(_ scene: UIScene) {
+    super.sceneWillEnterForeground(scene)
+    appDelegate.sceneWillEnterForeground()
+  }
+' '')"
+  _hops 'scene hops: sceneDidEnterBackground gone' 1 \
+    "$(_lit "${fx_sd}" '  override func sceneDidEnterBackground(_ scene: UIScene) {
+    super.sceneDidEnterBackground(scene)
+    appDelegate.sceneDidEnterBackground()
+  }
+' '')"
+  _hops 'scene hops: the foreground hop dropped' 1 \
+    "$(_lit "${fx_sd}" '    appDelegate.sceneWillEnterForeground()
+' '')"
+  _hops 'scene hops: the background hop dropped' 1 \
+    "$(_lit "${fx_sd}" '    appDelegate.sceneDidEnterBackground()
+' '')"
+  _hops 'scene hops: a hop nested in a branch' 1 \
+    "$(_lit "${fx_sd}" '    appDelegate.sceneDidEnterBackground()' '    if scene.activationState == .background {
+      appDelegate.sceneDidEnterBackground()
+    }')"
+  _hops 'scene hops: a hop only in a comment' 1 \
+    "$(_lit "${fx_sd}" '    appDelegate.sceneWillEnterForeground()' '    // appDelegate.sceneWillEnterForeground()')"
+  _hops 'scene hops: an override without super' 1 \
+    "$(_lit "${fx_sd}" '    super.sceneWillResignActive(scene)
+' '')"
+  _hops 'scene hops: super before the window is in place' 1 \
+    "$(_lit "$(_lit "${fx_sd}" '    super.scene(scene, willConnectTo: session, options: connectionOptions)
+' '')" '    let window = UIWindow(windowScene: windowScene)' '    super.scene(scene, willConnectTo: session, options: connectionOptions)
+    let window = UIWindow(windowScene: windowScene)')"
+  _hops 'scene hops: a window root other than the kept controller' 1 \
+    "$(_lit "${fx_sd}" 'window.rootViewController = appDelegate.flutterViewController' 'window.rootViewController = FlutterViewController(engine: appDelegate.flutterEngine, nibName: nil, bundle: nil)')"
+  _hops 'scene hops: a second window root' 1 \
+    "$(_lit "${fx_sd}" '    appDelegate.sceneWillEnterForeground()' '    appDelegate.sceneWillEnterForeground()
+    window?.rootViewController = appDelegate.flutterViewController')"
+  local cb
+  for cb in WillEnterForeground DidEnterBackground WillResignActive DidBecomeActive; do
+    _hops "scene hops: a dead application${cb} on the app delegate" 1 "${fx_sd}" \
+      "$(_lit "${fx_ad}" '  @objc func noteLocationLaunch() {' "  override func application${cb}(_ application: UIApplication) {
+    super.application${cb}(application)
+  }
+
+  @objc func noteLocationLaunch() {")"
+  done
+
+  # --- check_one_engine (9d) --------------------------------------------------
+  local fx_plist='<key>UILaunchStoryboardName</key><string>LaunchScreen</string><key>UIApplicationSceneManifest</key><dict><key>UIApplicationSupportsMultipleScenes</key><false/><key>UISceneConfigurations</key><dict><key>UIWindowSceneSessionRoleApplication</key><array><dict><key>UISceneClassName</key><string>UIWindowScene</string><key>UISceneConfigurationName</key><string>flutter</string><key>UISceneDelegateClassName</key><string>$(PRODUCT_MODULE_NAME).SceneDelegate</string></dict></array></dict></dict>'
+  local fx_pbx='		5E10CA780000000000000002 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E10CA780000000000000001 /* SceneDelegate.swift */; };
+		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };'
+  _engine() { # <label> <want-rc> <AppDelegate> <SceneDelegate> <plist inner> <pbxproj> [storyboard]
+    local got=0 d="${tmp}/runner9d"
+    rm -rf "$d"
+    mkdir -p "$d/Base.lproj"
+    printf '%s\n' "$3" >"$d/AppDelegate.swift"
+    printf '%s\n' "$4" >"$d/SceneDelegate.swift"
+    printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict>%s</dict></plist>\n' "$5" >"$d/Info.plist"
+    printf '%s\n' "$6" >"$d/project.pbxproj"
+    [[ -z "${7:-}" ]] || printf '<document/>\n' >"$d/Base.lproj/Main.storyboard"
+    ( check_one_engine "$d" "$d/Info.plist" "$d/project.pbxproj" ) >/dev/null 2>&1 || got=$?
+    _record "$1" "$2" "${got}"
+  }
+  _engine 'one engine: today'"'"'s tree passes' 0 "${fx_ad}" "${fx_sd}" "${fx_plist}" "${fx_pbx}"
+  _engine 'one engine: a second engine in the scene delegate' 1 "${fx_ad}" \
+    "$(_lit "${fx_sd}" '  private var appDelegate: AppDelegate {' '  private let engine = FlutterEngine(name: "scene")
+  private var appDelegate: AppDelegate {')" "${fx_plist}" "${fx_pbx}"
+  _engine 'one engine: the engine no longer the app delegate'"'"'s' 1 \
+    "$(_lit "${fx_ad}" '  @objc let flutterEngine = FlutterEngine(name: "io.flutter")' '  @objc var flutterEngine: FlutterEngine { sceneEngine }')" \
+    "$(_lit "${fx_sd}" '  private var appDelegate: AppDelegate {' '  let engine = FlutterEngine(name: "io.flutter")
+  private var appDelegate: AppDelegate {')" "${fx_plist}" "${fx_pbx}"
+  _engine 'one engine: a controller built by the scene' 1 "${fx_ad}" \
+    "$(_lit "${fx_sd}" '    window.makeKeyAndVisible()' '    window.makeKeyAndVisible()
+    _ = FlutterViewController(engine: appDelegate.flutterEngine, nibName: nil, bundle: nil)')" \
+    "${fx_plist}" "${fx_pbx}"
+  _engine 'one engine: the controller rebuilt on every read' 1 \
+    "$(_lit "${fx_ad}" '  @objc private(set) lazy var flutterViewController: FlutterViewController = {' '  @objc var flutterViewController: FlutterViewController {')" \
+    "${fx_sd}" "${fx_plist}" "${fx_pbx}"
+  _engine 'one engine: the controller on an engine of its own' 1 \
+    "$(_lit "${fx_ad}" 'FlutterViewController(engine: self.flutterEngine, nibName: nil, bundle: nil)' 'FlutterViewController(project: nil, nibName: nil, bundle: nil)')" \
+    "${fx_sd}" "${fx_plist}" "${fx_pbx}"
+  _engine 'one engine: the registrar answered by FlutterAppDelegate first' 1 \
+    "$(_lit "${fx_ad}" '    flutterEngine.registrar(forPlugin: pluginKey)' '    super.registrar(forPlugin: pluginKey) ?? flutterEngine.registrar(forPlugin: pluginKey)')" \
+    "${fx_sd}" "${fx_plist}" "${fx_pbx}"
+  _engine 'one engine: the hasPlugin override gone' 1 \
+    "$(_lit "${fx_ad}" '  override func hasPlugin(_ pluginKey: String) -> Bool {
+    flutterEngine.hasPlugin(pluginKey)
+  }
+' '')" "${fx_sd}" "${fx_plist}" "${fx_pbx}"
+  _engine 'one engine: valuePublished answered by FlutterAppDelegate' 1 \
+    "$(_lit "${fx_ad}" '    flutterEngine.valuePublished(byPlugin: pluginKey)' '    super.valuePublished(byPlugin: pluginKey)')" \
+    "${fx_sd}" "${fx_plist}" "${fx_pbx}"
+  _engine 'one engine: the main storyboard back in Info.plist' 1 "${fx_ad}" "${fx_sd}" \
+    "<key>UIMainStoryboardFile</key><string>Main</string>${fx_plist}" "${fx_pbx}"
+  _engine 'one engine: an iPad main storyboard in Info.plist' 1 "${fx_ad}" "${fx_sd}" \
+    "<key>UIMainStoryboardFile~ipad</key><string>Main</string>${fx_plist}" "${fx_pbx}"
+  _engine 'one engine: a scene storyboard in the configuration' 1 "${fx_ad}" "${fx_sd}" \
+    "$(_lit "${fx_plist}" '<key>UISceneConfigurationName</key>' '<key>UISceneStoryboardFile</key><string>Main</string><key>UISceneConfigurationName</key>')" "${fx_pbx}"
+  # xmllint, not grep: a key inside an XML comment is not a key.
+  _engine 'one engine: a storyboard named only in an XML comment passes' 0 "${fx_ad}" "${fx_sd}" \
+    "<!-- <key>UIMainStoryboardFile</key><string>Main</string> -->${fx_plist}" "${fx_pbx}"
+  _engine 'one engine: multiple scenes supported' 1 "${fx_ad}" "${fx_sd}" \
+    "$(_lit "${fx_plist}" '<key>UIApplicationSupportsMultipleScenes</key><false/>' '<key>UIApplicationSupportsMultipleScenes</key><true/>')" "${fx_pbx}"
+  _engine 'one engine: multiple scenes left to the default' 1 "${fx_ad}" "${fx_sd}" \
+    "$(_lit "${fx_plist}" '<key>UIApplicationSupportsMultipleScenes</key><false/>' '')" "${fx_pbx}"
+  _engine 'one engine: Main.storyboard back in the project' 1 "${fx_ad}" "${fx_sd}" "${fx_plist}" \
+    "${fx_pbx}
+		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };"
+  _engine 'one engine: Main.storyboard back on disk' 1 "${fx_ad}" "${fx_sd}" "${fx_plist}" "${fx_pbx}" storyboard
+
+  # --- check_bgtask_main_queue (9e) -------------------------------------------
+  local fx_bgt='final class HavenBGTaskHandler {
+  func registerBGTask() {
+    BGTaskScheduler.shared.register(
+      forTaskWithIdentifier: Self.taskIdentifier,
+      using: .main
+    ) { [weak self] task in
+      self?.handle(task)
+    }
+  }
+}'
+  _bgq() { # <label> <want-rc> <HavenBGTaskHandler.swift>
+    local got=0
+    printf '%s\n' "$3" >"${tmp}/HavenBGTaskHandler.swift"
+    ( check_bgtask_main_queue "${tmp}/HavenBGTaskHandler.swift" ) >/dev/null 2>&1 || got=$?
+    _record "$1" "$2" "${got}"
+  }
+  _bgq 'BGTask queue: today'"'"'s tree passes' 0 "${fx_bgt}"
+  _bgq 'BGTask queue: a nil queue' 1 "$(_lit "${fx_bgt}" 'using: .main' 'using: nil')"
+  _bgq 'BGTask queue: a second registration' 1 \
+    "$(_lit "${fx_bgt}" '  func registerBGTask() {' '  func registerOther() {
+    BGTaskScheduler.shared.register(forTaskWithIdentifier: "other", using: nil) { _ in }
+  }
+
+  func registerBGTask() {')"
 
   # --- check_catchup_floor (13b) ---------------------------------------------
   local cf_body='  private static let relaunchRegionRadiusMeters: CLLocationDistance = 200
@@ -6434,4 +7171,4 @@ if [[ "$FAILED" -ne 0 ]]; then
   echo "iOS background publish guard FAILED — see failures above." >&2
   exit 1
 fi
-echo "OK: iOS background publish invariants hold (plist mode, one stream boundary per platform, toggle-keyed iOS route with a background branch that cannot fall through to the one-shot, native owner's session shape + two accuracy tiers + sink-only refusals + transient-error filter + only-Best cache in all three copies, bounded anchor staleness in both the controller and the serving path, fail-closed background-launch provider guard, C4 watcher + its opt-out release issued on every path, burst plane entered only from the running process and native wakes with one receive-only door into Dart, presence-only logs, tier-based session/indicator policy with a session-scoped confirmation and an unconditional disarm, AppDelegate wiring order, unfaked bg-publish drive, background-capable stream established before the drive backgrounds the app, P2c's receive oracle read from the subscription count and never from the paused flag and P2d's from the persisted last-known store, each with its terminal proof printed after the assertion it stands for, relaunch region coupled to SLC at 200 m (500 m without the current consent) with a monotonic five-minute catch-up floor stamped only when Dart answered, a background-launch start gate refusing every background start but a location relaunch's under Always and the current disclosure, with one Dart start site and one consent predicate across Swift and Dart, stream and network-change handlers compiled into the Xcode project, every leg's drive Timeout inside its own per-attempt retry deadline, one poll-path receive cadence across the product and the drive, the poll path's sweep declaring itself a background wake so the C3 consent chokepoint applies, every poll leg held at the when-in-use grant P2d's attribution depends on, and P3's settle window measured by the same numbers from both sides with a host-side wire oracle that outlives the app, two controls it cannot read nothing through — one that the relay answers at all, one that it still serves the kind the window is read for — and a completion-gate excuse of exactly two markers from exactly one source)."
+echo "OK: iOS background publish invariants hold (plist mode, one stream boundary per platform, toggle-keyed iOS route with a background branch that cannot fall through to the one-shot, native owner's session shape + two accuracy tiers + sink-only refusals + transient-error filter + only-Best cache in all three copies, bounded anchor staleness in both the controller and the serving path, fail-closed background-launch provider guard, C4 watcher + its opt-out release issued on every path, burst plane entered only from the running process and native wakes with one receive-only door into Dart, presence-only logs, tier-based session/indicator policy with a session-scoped confirmation and an unconditional disarm, AppDelegate wiring order on the one engine's messenger every launch reaches, scene callbacks routed to the app delegate with super, one engine and one kept controller with no storyboard and one scene, a main-queue BGTask handler, unfaked bg-publish drive, background-capable stream established before the drive backgrounds the app, P2c's receive oracle read from the subscription count and never from the paused flag and P2d's from the persisted last-known store, each with its terminal proof printed after the assertion it stands for, relaunch region coupled to SLC at 200 m (500 m without the current consent) with a monotonic five-minute catch-up floor stamped only when Dart answered, a background-launch start gate refusing every background start but a location launch's — the first location event before any scene came to the front, once per process — under Always and the current disclosure, with one Dart start site and one consent predicate across Swift and Dart, stream and network-change handlers and the scene delegate compiled into the Xcode project, every leg's drive Timeout inside its own per-attempt retry deadline, one poll-path receive cadence across the product and the drive, the poll path's sweep declaring itself a background wake so the C3 consent chokepoint applies, every poll leg held at the when-in-use grant P2d's attribution depends on, and P3's settle window measured by the same numbers from both sides with a host-side wire oracle that outlives the app, two controls it cannot read nothing through — one that the relay answers at all, one that it still serves the kind the window is read for — and a completion-gate excuse of exactly two markers from exactly one source)."

@@ -12,6 +12,8 @@
 # before your first tagged release, and again when the distribution certificate
 # expires (~1 year) or you rotate it.
 #
+# Builds nothing, so it does not follow the iOS toolchain runner (`xcode-27`).
+#
 # Required repository secrets (see haven/DEVELOPMENT.md for how to obtain each):
 #   MATCH_GIT_URL                 https URL of the private certs repo
 #   MATCH_PASSWORD                passphrase that encrypts the stored certs

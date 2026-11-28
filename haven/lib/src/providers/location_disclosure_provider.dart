@@ -7,6 +7,8 @@
 /// prompt — satisfying Google Play's "disclosure before collection" rule.
 library;
 
+import 'dart:io' show Platform;
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/constants/location.dart';
@@ -14,9 +16,16 @@ import 'package:haven/src/services/android_background_location.dart';
 import 'package:haven/src/widgets/location/location_disclosure_dialog.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+/// The background-disclosure version a user on this platform must have
+/// accepted before sharing starts again without them opening Haven:
+/// [kBackgroundDisclosureVersion] on iPhone,
+/// [kAndroidBackgroundDisclosureVersion] on Android.
+int resumeDisclosureVersion({required bool isIOS}) =>
+    isIOS ? kBackgroundDisclosureVersion : kAndroidBackgroundDisclosureVersion;
+
 /// Whether sharing may start again without the user opening Haven: both
-/// disclosures accepted, the background one at [kBackgroundDisclosureVersion]
-/// or later. A missing key is a refusal.
+/// disclosures accepted, the background one at [resumeDisclosureVersion] or
+/// later. A missing key is a refusal.
 ///
 /// The one predicate for that question on every platform: the iOS native
 /// relaunch gate (`HavenBackgroundSessionHandler.resumeConsented`) and the
@@ -25,20 +34,23 @@ bool backgroundResumeDisclosureAccepted({
   required bool? foregroundAccepted,
   required bool? backgroundAccepted,
   required int? acceptedVersion,
+  required bool isIOS,
 }) =>
     (foregroundAccepted ?? false) &&
     (backgroundAccepted ?? false) &&
-    (acceptedVersion ?? 0) >= kBackgroundDisclosureVersion;
+    (acceptedVersion ?? 0) >= resumeDisclosureVersion(isIOS: isIOS);
 
-/// [backgroundResumeDisclosureAccepted] read from [prefs].
-bool backgroundResumeDisclosureAcceptedIn(SharedPreferences prefs) =>
-    backgroundResumeDisclosureAccepted(
-      foregroundAccepted: prefs.getBool(kLocationDisclosureAcceptedKey),
-      backgroundAccepted: prefs.getBool(
-        kLocationDisclosureBackgroundAcceptedKey,
-      ),
-      acceptedVersion: prefs.getInt(kLocationDisclosureBackgroundVersionKey),
-    );
+/// [backgroundResumeDisclosureAccepted] read from [prefs]. [isIOS] is a test
+/// seam over `Platform.isIOS`.
+bool backgroundResumeDisclosureAcceptedIn(
+  SharedPreferences prefs, {
+  bool? isIOS,
+}) => backgroundResumeDisclosureAccepted(
+  foregroundAccepted: prefs.getBool(kLocationDisclosureAcceptedKey),
+  backgroundAccepted: prefs.getBool(kLocationDisclosureBackgroundAcceptedKey),
+  acceptedVersion: prefs.getInt(kLocationDisclosureBackgroundVersionKey),
+  isIOS: isIOS ?? Platform.isIOS,
+);
 
 /// Which consent dialog the first foreground of a mount owes, if any.
 enum ForegroundConsentStep {
@@ -71,10 +83,12 @@ ForegroundConsentStep foregroundConsentStepDue({
   required int promptedVersion,
   required BackgroundLocationStatus allTime,
   required bool allTimePrompted,
+  required bool isIOS,
 }) {
   if (!sharingOn || !backgroundAccepted) return ForegroundConsentStep.none;
-  if (acceptedVersion < kBackgroundDisclosureVersion) {
-    if (promptedVersion >= kBackgroundDisclosureVersion) {
+  final owed = resumeDisclosureVersion(isIOS: isIOS);
+  if (acceptedVersion < owed) {
+    if (promptedVersion >= owed) {
       return ForegroundConsentStep.none;
     }
     return allTime.missing
@@ -135,10 +149,14 @@ class LocationDisclosureState {
 /// Persists disclosure acceptance and gates the first permission request.
 class LocationDisclosureController
     extends StateNotifier<LocationDisclosureState> {
-  /// Creates a controller seeded with the given initial state.
-  LocationDisclosureController([
-    super.initial = LocationDisclosureState.none,
-  ]);
+  /// Creates a controller with nothing accepted yet. [isIOS] is a test seam
+  /// over `Platform.isIOS`: it picks the dialog's background sentence and the
+  /// version this platform's resume needs, so the two never disagree.
+  LocationDisclosureController({bool? isIOS})
+    : _isIOS = isIOS ?? Platform.isIOS,
+      super(LocationDisclosureState.none);
+
+  final bool _isIOS;
 
   /// Ensures the user has seen and accepted the location disclosure for the
   /// requested scope, showing the dialog if not already accepted.
@@ -146,8 +164,8 @@ class LocationDisclosureController
   /// Returns `true` if the user has consented (now or previously) and the
   /// caller may proceed to request the OS permission; `false` if the user
   /// declined. When [includeBackground] is `true`, the stricter
-  /// background-specific disclosure must have been accepted at
-  /// [kBackgroundDisclosureVersion] — neither a prior foreground-only
+  /// background-specific disclosure must have been accepted at this
+  /// platform's [resumeDisclosureVersion] — neither a prior foreground-only
   /// acceptance nor one of an older background text satisfies it.
   ///
   /// Decisions are read from [SharedPreferences] so the gate is correct even
@@ -176,22 +194,23 @@ class LocationDisclosureController
       context,
       includeBackground: includeBackground,
       allTimeStep: allTimeStep,
+      isIOS: _isIOS,
     );
     if (!accepted) return false;
     await _recordAccepted(prefs, includeBackground: includeBackground);
     return true;
   }
 
-  /// Whether the CURRENT background disclosure has been accepted. A user who
-  /// accepted an older version is shown the current text again when they turn
-  /// background sharing on.
+  /// Whether the background disclosure has been accepted at this platform's
+  /// [resumeDisclosureVersion]. A user who accepted an older version is shown
+  /// the current text again when they turn background sharing on.
   Future<bool> backgroundDisclosureCurrent() async =>
       _backgroundCurrent(await SharedPreferences.getInstance());
 
   bool _backgroundCurrent(SharedPreferences prefs) =>
       (prefs.getBool(kLocationDisclosureBackgroundAcceptedKey) ?? false) &&
       (prefs.getInt(kLocationDisclosureBackgroundVersionKey) ?? 1) >=
-          kBackgroundDisclosureVersion;
+          resumeDisclosureVersion(isIOS: _isIOS);
 
   Future<void> _recordAccepted(
     SharedPreferences prefs, {
@@ -240,13 +259,14 @@ class LocationDisclosureController
         (force ||
             (prefs.getInt(kLocationDisclosureBackgroundPromptedVersionKey) ??
                     0) <
-                kBackgroundDisclosureVersion);
+                resumeDisclosureVersion(isIOS: _isIOS));
     if (!owed || !context.mounted) return null;
     final accepted = await LocationDisclosureDialog.show(
       context,
       includeBackground: true,
       reconfirm: true,
       allTimeStep: allTimeStep,
+      isIOS: _isIOS,
     );
     await prefs.setInt(
       kLocationDisclosureBackgroundPromptedVersionKey,
@@ -283,6 +303,7 @@ class LocationDisclosureController
       allTime: status,
       allTimePrompted:
           prefs.getBool(kAndroidBackgroundLocationPromptedKey) ?? false,
+      isIOS: _isIOS,
     );
     if (step == ForegroundConsentStep.none) return true;
     if (!context.mounted || !isResumed()) return false;
@@ -305,6 +326,7 @@ class LocationDisclosureController
           context,
           includeBackground: true,
           allTimeStep: status,
+          isIOS: _isIOS,
         );
         if (agreed) await requestBackgroundLocation(allTime);
       case ForegroundConsentStep.none:

@@ -116,7 +116,8 @@
 #       drive's own bound is below the deadline, so a per-drive timeout can
 #       fire before the aggregate one.
 #   unbudgeted <workflow>::<job> <reason>   The macOS lanes: accepted only for
-#       a `nick-fields/retry` step on a macOS runner whose harness launches
+#       a `nick-fields/retry` step on a macOS runner (`macos-*`, or the
+#       `xcode-NN` image the iOS lanes run on) whose harness launches
 #       `flutter test` with no bound of its own, so there is no finite worst
 #       case to compare.
 #
@@ -2543,9 +2544,13 @@ lb_reaper() {
   fi
 }
 
+# GitHub's macOS labels: `macos-*`, and the per-Xcode images (`xcode-27`,
+# `xcode-27-xlarge`), which name no "macos".
+lb_macos_runner() { [[ "$1" == *macos* || "$1" =~ ^xcode-[0-9]+(-xlarge)?$ ]]; }
+
 lb_unbudgeted() {
   local root="$1" label="$2" lkey="$3" retry="$4" cmd="$5" dtok="$6" runs_on="$7" sctext rest
-  if (( ! retry )) || [[ "${runs_on}" != *macos* ]]; then
+  if (( ! retry )) || ! lb_macos_runner "${runs_on}"; then
     lb_violation "unb1:${label}" "${label}: declared unbudgeted (${LB_MANIFEST_REL}:${LB_DECL_LN[${lkey}]}), but only a nick-fields/retry lane on a macOS runner, whose harness has no inner bound, may be."
     return 0
   fi
@@ -2597,7 +2602,7 @@ lb_main() {
 
 # Cases lb_self_test must run, pinned by EQUALITY: a deleted case must fail
 # the suite, not shrink it.
-readonly LB_SELF_TEST_CASES=171
+readonly LB_SELF_TEST_CASES=173
 
 # The base lane's budget, from the fixture's constants: the helper's
 # UP_SECS + 1 tick, BARRIER_SECS, READY_SECS, SETTLE_SECS and the drive's
@@ -2728,7 +2733,7 @@ _lb_add_ios() {
   cat >"$1/.github/workflows/ios.yml" <<'YML'
 jobs:
   ios:
-    runs-on: macos-latest
+    runs-on: xcode-27
     timeout-minutes: 90
     steps:
       - name: Drive
@@ -2885,10 +2890,20 @@ lb_self_test() {
   _lb_mf 'unbudgeted lane.yml::lane it has no bound, it says'
   _lb_expect "an Android lane declared unbudgeted fails" 1 'only a nick-fields/retry lane on a macOS runner'
 
+  _lb_tree macos-label-unbudgeted
+  _lb_add_ios "${t}"
+  _lb_sub "${t}/.github/workflows/ios.yml" '    runs-on: xcode-27' '    runs-on: macos-latest'
+  _lb_expect "a macos-* label is a macOS runner too" 0 'unbudg ios.yml::ios'
+
   _lb_tree linux-retry-unbudgeted
   _lb_add_ios "${t}"
-  _lb_sub "${t}/.github/workflows/ios.yml" '    runs-on: macos-latest' '    runs-on: ubuntu-latest'
+  _lb_sub "${t}/.github/workflows/ios.yml" '    runs-on: xcode-27' '    runs-on: ubuntu-latest'
   _lb_expect "a retry lane on a Linux runner declared unbudgeted fails" 1 'only a nick-fields/retry lane on a macOS runner'
+
+  _lb_tree xcode-substring-unbudgeted
+  _lb_add_ios "${t}"
+  _lb_sub "${t}/.github/workflows/ios.yml" '    runs-on: xcode-27' '    runs-on: ubuntu-xcode-27'
+  _lb_expect "a label that merely contains xcode-NN is not a macOS runner" 1 'only a nick-fields/retry lane on a macOS runner'
 
   _lb_tree ios-bounded
   _lb_add_ios "${t}"

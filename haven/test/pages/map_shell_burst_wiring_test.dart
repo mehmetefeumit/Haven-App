@@ -555,9 +555,14 @@ void main() {
       final loaded = spec.indexOf(
         'await ref.read(backgroundSharingProvider.notifier).loaded;',
       );
-      // And the shell may have gone during that wait (B12).
+      // And the shell may have gone during that wait (B12). The gate's
+      // lifecycle, not the binding's: a location launch no scene has
+      // connected to reads the `detached` seed under the gate's pause, and
+      // would start no session into any burst.
       final wanted = spec.indexOf(
-        'if (!mounted || !_liveSyncWanted()) return null;',
+        'if (!mounted || !MapShell.liveSyncWanted(lifecycle: '
+        'effectiveLifecycle, isIOS: Platform.isIOS, backgroundSharingEnabled: '
+        'ref.read(backgroundSharingProvider))) {return null;}',
       );
       expect(loaded, isNonNegative);
       expect(

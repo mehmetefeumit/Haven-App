@@ -1407,6 +1407,52 @@ void main() {
       expect(status.launchedForLocation, isFalse);
     });
 
+    /// What the native side sends once it has set `launchedForLocation`.
+    Future<ByteData?> nativeCalls(String method) {
+      final reply = Completer<ByteData?>();
+      unawaited(
+        messenger.handlePlatformMessage(
+          MethodChannelIosLocationSource.methodChannel.name,
+          kWireCodec.encodeMethodCall(MethodCall(method)),
+          reply.complete,
+        ),
+      );
+      return reply.future;
+    }
+
+    test("the native side's location-launch report reaches its listeners, "
+        'once per report', () async {
+      installNative();
+      final reports = <void>[];
+      final sub = source.locationLaunches.listen(reports.add);
+      addTearDown(sub.cancel);
+
+      await nativeCalls('locationLaunch');
+      await pumpEventQueue();
+      expect(reports, hasLength(1));
+      expect(
+        methodCalls,
+        isEmpty,
+        reason: 'the handler is registered at construction: a report must not '
+            'wait on a status read to be heard',
+      );
+
+      await nativeCalls('locationLaunch');
+      await pumpEventQueue();
+      expect(reports, hasLength(2));
+    });
+
+    test('any other native call is not a report', () async {
+      final reports = <void>[];
+      final sub = source.locationLaunches.listen(reports.add);
+      addTearDown(sub.cancel);
+
+      final reply = await nativeCalls('somethingElse');
+      await pumpEventQueue();
+      expect(reports, isEmpty);
+      expect(reply, isNull, reason: 'answered as not implemented');
+    });
+
     test('status fails closed when no native handler is registered', () async {
       final status = await source.status();
 
@@ -1453,6 +1499,10 @@ void main() {
   // ==========================================================================
   group('NoopIosLocationSource', () {
     const source = NoopIosLocationSource();
+
+    test('reports no location launch', () async {
+      expect(await source.locationLaunches.isEmpty, isTrue);
+    });
 
     test('never emits, and never ENDS the stream either', () {
       fakeAsync((async) {

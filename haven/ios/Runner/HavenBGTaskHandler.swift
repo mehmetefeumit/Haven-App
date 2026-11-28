@@ -54,8 +54,8 @@ private let HAVEN_BGTASK_LOG = OSLog(subsystem: "haven_ios", category: "bgtask")
 /// startup, so tasks are submitted once the user enables background sharing.
 /// A rolled-back build rewrites `false` on its first launch, re-inerting this
 /// path with no Swift change. Scheduling is (re-)attempted at launch and on
-/// every `applicationDidEnterBackground` (AppDelegate, A3 — closes the
-/// launch-arm-before-mirror-write lag).
+/// every `sceneDidEnterBackground` (SceneDelegate → AppDelegate, A3 — closes
+/// the launch-arm-before-mirror-write lag).
 ///
 /// In the Simulator, `BGTaskScheduler.submit()` returns `notPermitted` — this
 /// is swallowed silently so CI (e2e-ios) does not fail.
@@ -127,11 +127,13 @@ final class HavenBGTaskHandler {
   ///
   /// The `launchHandler` reschedules first (so the floor persists even if the
   /// handler is killed early), runs the Dart catch-up, then calls
-  /// `setTaskCompleted`.
+  /// `setTaskCompleted`. It runs on the main queue: it invokes a Flutter
+  /// channel, which must be called on the platform thread, and a `nil` queue
+  /// would run it on a background one.
   func registerBGTask() {
     BGTaskScheduler.shared.register(
       forTaskWithIdentifier: Self.taskIdentifier,
-      using: nil
+      using: .main
     ) { [weak self] task in
       guard let self = self, let refreshTask = task as? BGAppRefreshTask else {
         task.setTaskCompleted(success: false)

@@ -348,12 +348,13 @@ void main() {
     const backgroundIos =
         'This app uses location data to enable sharing with your circles even '
         'when Haven is in the background and you are not using it. If '
-        "location is set to 'Always' and Haven is closed, even by you, Haven "
-        'starts sharing again by itself once you have moved a few hundred '
-        'metres and iOS allows it. After a restart, this happens only once '
-        'you have also unlocked your phone. iOS decides when, so it is not '
-        "guaranteed. With 'While Using the App', sharing stops when Haven is "
-        'closed and stays stopped until you open it again.';
+        "location is set to 'Always', sharing can start again by itself after "
+        'Haven is closed, even by you, and even if you have not moved; iOS '
+        'decides when, so it is not guaranteed. iOS can wake Haven after you '
+        'have moved a few hundred metres, and also when it refreshes apps in '
+        'the background. After a restart, this happens only once you have '
+        "also unlocked your phone. With 'While Using the App', sharing stops "
+        'when Haven is closed and stays stopped until you open it again.';
     const updateLead =
         'Background sharing has changed since you turned it on. Haven can now '
         'start sharing again by itself after it has stopped, for example '

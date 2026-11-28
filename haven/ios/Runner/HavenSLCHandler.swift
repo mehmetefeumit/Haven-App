@@ -44,8 +44,9 @@ private let HAVEN_SLC_LOG = OSLog(subsystem: "haven_ios", category: "slc")
 /// `lib/src/services/ios_background_catchup.dart`), so monitoring arms once
 /// the user enables background sharing. A rolled-back build rewrites `false`
 /// on its first launch, re-inerting this path with no Swift change. Arming is
-/// (re-)attempted at launch and on every `applicationDidEnterBackground`
-/// (AppDelegate, A3 — closes the launch-arm-before-mirror-write lag).
+/// (re-)attempted at launch and on every `sceneDidEnterBackground`
+/// (SceneDelegate → AppDelegate, A3 — closes the launch-arm-before-mirror-write
+/// lag).
 ///
 /// ## Relaunch region (paired with SLC, same gates)
 ///
@@ -180,6 +181,11 @@ final class HavenSLCHandler: NSObject, CLLocationManagerDelegate {
   /// if the Dart handler is not yet registered on SLC relaunch.
   private weak var bgTaskHandler: HavenBGTaskHandler?
 
+  /// Called once per enabled delivery, SLC or relaunch-region exit, before
+  /// the catch-up floor. `AppDelegate` wires it to the location-launch rule
+  /// (OD-R1), which needs every delivery: the floor would hide one.
+  var onLocationEvent: (() -> Void)?
+
   /// Creates the SLC handler.
   ///
   /// - Parameters:
@@ -286,7 +292,7 @@ final class HavenSLCHandler: NSObject, CLLocationManagerDelegate {
   /// The region APIs used here (`CLCircularRegion`,
   /// `isMonitoringAvailable(for:)`, `startMonitoring(for:)`) are deprecated in
   /// favour of `CLMonitor` from iOS 17, but remain functional and are the only
-  /// option at this target's floor (`IPHONEOS_DEPLOYMENT_TARGET = 15.5`). They
+  /// option at this target's floor (`IPHONEOS_DEPLOYMENT_TARGET = 15.0`). They
   /// compile as warnings only — no `SWIFT_TREAT_WARNINGS_AS_ERRORS` is set on
   /// the Runner target.
   private func refreshRelaunchRegion(around location: CLLocation?) {
@@ -340,6 +346,7 @@ final class HavenSLCHandler: NSObject, CLLocationManagerDelegate {
   func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
     // Re-check intent on every wake (C2 durable-intent re-check).
     guard isEnabled() else { return }
+    onLocationEvent?()
 
     // Follow the device with the relaunch region so a termination is always
     // recoverable from wherever the app was last known to be.
@@ -354,6 +361,7 @@ final class HavenSLCHandler: NSObject, CLLocationManagerDelegate {
   /// relaunch of a terminated app. Same receive-only catch-up as an SLC wake.
   func locationManager(_ manager: CLLocationManager, didExitRegion region: CLRegion) {
     guard isEnabled(), region.identifier == Self.relaunchRegionIdentifier else { return }
+    onLocationEvent?()
 
     // The circle just exited will not fire again on a continuing journey, so
     // re-centre it. `manager.location` is usually the fix that triggered this

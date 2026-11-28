@@ -67,21 +67,28 @@ void main() {
     final prefs = await SharedPreferences.getInstance();
     await seedLocationDisclosuresAccepted(prefs);
 
-    expect(
-      foregroundConsentStepDue(
-        sharingOn: true,
-        backgroundAccepted:
-            prefs.getBool(kLocationDisclosureBackgroundAcceptedKey) ?? false,
-        acceptedVersion:
-            prefs.getInt(kLocationDisclosureBackgroundVersionKey) ?? 1,
-        promptedVersion:
-            prefs.getInt(kLocationDisclosureBackgroundPromptedVersionKey) ?? 0,
-        allTime: BackgroundLocationStatus.failClosed,
-        allTimePrompted:
-            prefs.getBool(kAndroidBackgroundLocationPromptedKey) ?? false,
-      ),
-      ForegroundConsentStep.none,
-    );
+    // The iOS lanes seed through the same helper, and iPhone's resume needs
+    // a later version than Android's.
+    for (final isIOS in [false, true]) {
+      expect(
+        foregroundConsentStepDue(
+          sharingOn: true,
+          backgroundAccepted:
+              prefs.getBool(kLocationDisclosureBackgroundAcceptedKey) ?? false,
+          acceptedVersion:
+              prefs.getInt(kLocationDisclosureBackgroundVersionKey) ?? 1,
+          promptedVersion:
+              prefs.getInt(kLocationDisclosureBackgroundPromptedVersionKey) ??
+              0,
+          allTime: BackgroundLocationStatus.failClosed,
+          allTimePrompted:
+              prefs.getBool(kAndroidBackgroundLocationPromptedKey) ?? false,
+          isIOS: isIOS,
+        ),
+        ForegroundConsentStep.none,
+        reason: isIOS ? 'iPhone' : 'Android',
+      );
+    }
 
     await clearLocationDisclosures(prefs);
     expect(prefs.getBool(kAndroidBackgroundLocationPromptedKey), isNull);

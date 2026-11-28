@@ -36,8 +36,9 @@
 /// `isEnabled()` predicate holds (`HavenBGTaskHandler` / `HavenSLCHandler`:
 /// bg-sharing UserDefaults key AND the mirror key below both true). Arming
 /// happens at launch and — because the launch-time arm runs before Dart
-/// writes the mirror — again in `applicationDidEnterBackground` (A3), which
-/// closes the one-launch lag after an upgrade or a same-session enable.
+/// writes the mirror — again when the scene enters the background
+/// (`SceneDelegate.sceneDidEnterBackground`, A3), which closes the one-launch
+/// lag after an upgrade or a same-session enable.
 ///
 /// ## Sweep budget (D3 — deliberately NOT raised to the Android worker's 25)
 ///
@@ -56,10 +57,11 @@
 /// fires before the handler is registered:
 ///
 ///   - `HavenSLCHandler` fires from the CLLocationManager delegate, which runs
-///     on the main thread after the engine is running (not at launch). The
-///     23-second background task window provides time for the handler to
-///     register. If the reply is `FlutterMethodNotImplemented`, Swift falls
-///     back to scheduling a BGAppRefreshTask.
+///     on the main thread after `AppDelegate` has started the engine — at a
+///     launch too, since (re)starting significant-change monitoring delivers a
+///     fix at once. The 23-second background task window provides time for
+///     the handler to register. If the reply is `FlutterMethodNotImplemented`,
+///     Swift falls back to scheduling a BGAppRefreshTask.
 ///   - `HavenBGTaskHandler` handles `FlutterMethodNotImplemented` by calling
 ///     `setTaskCompleted(success: true)` and scheduling the next BGTask.
 ///

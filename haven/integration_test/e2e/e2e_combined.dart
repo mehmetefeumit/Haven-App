@@ -430,6 +430,7 @@ void main() {
   // exercise the legacy receive path instead of the one a foregrounded app
   // runs. See `_lib/app_lifecycle.dart`.
   resumeAppBeforeEachTest();
+  setUpAll(awaitPlatformResumed);
 
   // `late` keeps the test body ergonomic; the `_didInit*` sentinels
   // make `tearDownAll` safe against a partial `setUpAll` failure —

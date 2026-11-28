@@ -6,10 +6,14 @@
 // Until 2026-11-26 every iOS wake path was receive-only and the copy said so.
 // The owner then directed (OD-R1, owner-directed 2026-11-26) that a process iOS
 // relaunches for a location event resumes the user's own sharing — but only
-// under 'Always', only after movement (a significant change or leaving a 200 m
-// region), only after the first unlock following a restart, only for a user who
-// accepted the current background disclosure, and only when iOS chooses to
-// relaunch. While Using is never relaunched. The wake handlers themselves
+// under 'Always', only after the first unlock following a restart, only for a
+// user who accepted the current background disclosure, and only when iOS
+// chooses to start Haven. While Using is never relaunched. Until 2026-11-28
+// that also needed movement; under the UIScene lifecycle iOS no longer says
+// why it started Haven, so the owner decided (D4) that ANY background start
+// resumes sharing at its first location update — and iOS hands Haven one at
+// every background start, including a background app refresh, which needs no
+// movement at all. The wake handlers themselves
 // (`HavenSLCHandler.swift`, `catchup_service.dart`,
 // `ios_background_catchup.dart`) still have no publish call site; the relaunch
 // publishes through MapShell's
@@ -21,13 +25,15 @@
 // "even when the app is closed" is true there and false on iOS. The guard is
 // therefore not "never mention a closed app"; it is:
 //
-//   THE RULE (v2): in copy that reaches an iOS user, a sentence that names the
+//   THE RULE (v3): in copy that reaches an iOS user, a sentence that names the
 //   app being closed must state the outcome in the SAME sentence — that
 //   sharing stops, or that it starts again only under the whole condition:
-//   'Always', the movement, and that iOS decides (not guaranteed). And copy
-//   that says sharing starts again after Haven is closed must also state the
-//   While-Using limit: under 'While Using the App' it stays stopped until the
-//   user opens Haven.
+//   'Always', that it can happen even if the user has not moved, and that iOS
+//   decides (not guaranteed). And copy that says sharing starts again after
+//   Haven is closed must also state the While-Using limit: under 'While Using
+//   the App' it stays stopped until the user opens Haven. No iOS copy may say
+//   sharing starts again only once the user has moved: since D4 that promise
+//   is false in the reassuring direction.
 //
 // Stated that way it cannot be dodged by changing the verb ("keeps updated" →
 // "stays in sync" → "continues"), which a literal-substring guard would miss.
@@ -122,12 +128,23 @@ final RegExp _statesTheStop = _anyOf([
 
 /// The whole condition under which iOS resumes sharing after Haven is closed.
 /// A sentence that names the closed state without stating the stop must carry
-/// EVERY one of these, or it promises more than iOS delivers.
+/// EVERY one of these: without 'Always' or iOS deciding it promises more than
+/// iOS delivers, and without the no-movement clause it hides that a background
+/// app refresh resumes sharing where the user stands (owner decision D4).
 final Map<String, RegExp> _resumeCondition = {
   "names 'Always'": RegExp(r'\balways\b'),
-  'names the movement': RegExp(r'\b(moved|metres|meters)\b'),
+  'says no movement is needed': RegExp(
+    r"\b(even if you (have not|haven't) moved|without (you )?moving)\b",
+  ),
   'says iOS decides': RegExp(r'\b(not guaranteed|ios decides|ios allows)\b'),
 };
+
+/// The pre-D4 promise that sharing starts again only once the user has moved:
+/// false since a background app refresh resumes it without movement.
+final RegExp _movementOnly = RegExp(
+  r'\b((once|only (after|once|when|if)|as soon as) you (have )?(moved?|move)'
+  r'|(only )?after movement)\b',
+);
 
 /// The While-Using limit: under that authorization sharing stays stopped
 /// until the user opens Haven, because iOS never relaunches it.
@@ -166,13 +183,19 @@ final RegExp _sentenceEnd = RegExp('[.!?]');
 /// the other a settings paragraph that also covers Android — so the tie between
 /// them is the CLAIM, never the bytes. Each predicate is written against a
 /// fact: Haven can be closed; under 'Always' sharing then starts again by
-/// itself; only after movement; never before the first unlock after a restart;
-/// only when iOS decides; and under While Using it waits for an open. Drop any
-/// one from either surface and the two stop promising the same thing.
+/// itself, even without movement; iOS wakes Haven after the user moves a few
+/// hundred metres and when it refreshes apps in the background; never before
+/// the first unlock after a restart; only when iOS decides; and under While
+/// Using it waits for an open. Drop any one from either surface and the two
+/// stop promising the same thing.
 final Map<String, RegExp> _resumeClaim = {
   'names Haven being closed': _notRunning,
   'says sharing starts again by itself': _resumeVerb,
   ..._resumeCondition,
+  'names the movement that wakes Haven': RegExp(r'\b(metres|meters)\b'),
+  'names the background refresh that wakes Haven': RegExp(
+    r'\brefresh(es)? apps in the background\b',
+  ),
   'names the first unlock after a restart': RegExp(r'\bunlocked?\b'),
   'says While Using waits for an open': RegExp(
     r'\bwhile using\b[^.]*\b(until you open|when you open)\b',
@@ -242,6 +265,17 @@ List<BackgroundClaimViolation> findResumeClaimsWithoutWhileUsingLimit(
   ];
 }
 
+/// Returns every sentence in [text] that says sharing starts again only once
+/// the user has moved — the claim owner decision D4 made false on 2026-11-28.
+List<BackgroundClaimViolation> findMovementOnlyClaims(
+  String text, {
+  required String source,
+}) => [
+  for (final sentence in _sentences(text))
+    if (_movementOnly.hasMatch(sentence))
+      BackgroundClaimViolation(source: source, sentence: sentence),
+];
+
 /// Returns every sentence in [text] that still says a wake only fetches or
 /// never sends — the receive-only claim the owner retired on 2026-11-26.
 List<BackgroundClaimViolation> findReceiveOnlyWording(
@@ -260,6 +294,7 @@ List<BackgroundClaimViolation> findAllViolations(
 }) => [
   ...findUnqualifiedClosedAppClaims(text, source: source),
   ...findResumeClaimsWithoutWhileUsingLimit(text, source: source),
+  ...findMovementOnlyClaims(text, source: source),
   ...findReceiveOnlyWording(text, source: source),
 ];
 
@@ -344,6 +379,27 @@ const _oldAlwaysDescription =
     'locations; your own sharing resumes when you reopen Haven. Your location '
     'is always end-to-end encrypted.';
 
+/// The iPhone copy of version 2 (2026-11-26 to 2026-11-28): sharing started
+/// again only once the user had moved, which owner decision D4 made false.
+/// A revert, or a locale nobody retranslated, must be caught.
+const _movementOnlyCopy = <String, String>{
+  'consent sentence':
+      "If location is set to 'Always' and Haven is closed, even by you, Haven "
+      'starts sharing again by itself once you have moved a few hundred '
+      'metres and iOS allows it.',
+  'settings intro':
+      "With location set to 'Always', sharing starts again by itself after "
+      'Haven is closed, once you have moved a few hundred metres and iOS '
+      'allows it.',
+  'While-Using note':
+      "Choose 'Always' for Haven in Settings so sharing can start again by "
+      'itself after Haven is closed, once you have moved a few hundred metres '
+      'and iOS allows it.',
+  'Always usage description':
+      "With 'Always', if Haven is closed, it starts sharing again by itself "
+      'once you have moved a few hundred metres and iOS allows it.',
+};
+
 void main() {
   // The consent copy lives in the ARB now (`locationDisclosure*`), so the
   // English values are read the way the app reads them — through the generated
@@ -415,14 +471,14 @@ void main() {
       // enough, because each one is something iOS really requires.
       const variants = {
         "names 'Always'":
-            'If Haven is closed, sharing starts again by itself once you have '
-            'moved a few hundred metres; iOS decides when.',
-        'names the movement':
-            "With 'Always', if Haven is closed, sharing starts again by "
+            'If Haven is closed, sharing can start again by itself, even if '
+            'you have not moved; iOS decides when.',
+        'says no movement is needed':
+            "With 'Always', if Haven is closed, sharing can start again by "
             'itself; iOS decides when, so it is not guaranteed.',
         'says iOS decides':
-            "With 'Always', if Haven is closed, sharing starts again by "
-            'itself once you have moved a few hundred metres.',
+            "With 'Always', if Haven is closed, sharing can start again by "
+            'itself, even if you have not moved.',
       };
       expect(variants.keys.toSet(), _resumeCondition.keys.toSet());
       variants.forEach((dropped, sentence) {
@@ -436,10 +492,49 @@ void main() {
 
     test('permits a resume claim that states the whole condition', () {
       const conditional =
-          "With 'Always', if Haven is closed, sharing starts again by itself "
-          'once you have moved a few hundred metres; iOS decides when, so it '
-          'is not guaranteed.';
+          "With 'Always', if Haven is closed, sharing can start again by "
+          'itself, even if you have not moved; iOS decides when, so it is not '
+          'guaranteed.';
       expect(findUnqualifiedClosedAppClaims(conditional, source: 'x'), isEmpty);
+    });
+
+    test(
+      'the version-2 copy, which said sharing waits for movement, is now '
+      'caught twice: by the closed-app rule and as a movement-only claim',
+      () {
+        _movementOnlyCopy.forEach((surface, old) {
+          expect(
+            findUnqualifiedClosedAppClaims(old, source: surface),
+            hasLength(1),
+            reason: 'the old $surface lacks the no-movement clause',
+          );
+          expect(
+            findMovementOnlyClaims(old, source: surface),
+            hasLength(1),
+            reason: 'the old $surface says sharing waits for movement',
+          );
+        });
+      },
+    );
+
+    test('the movement-only detector passes movement named as one of the '
+        'things that wake Haven', () {
+      const trigger =
+          'iOS can wake Haven after you have moved a few hundred metres, and '
+          'also when it refreshes apps in the background.';
+      expect(findMovementOnlyClaims(trigger, source: 'x'), isEmpty);
+      for (final phrase in [
+        'Sharing starts again only after you move.',
+        'Sharing starts again as soon as you move.',
+        'Sharing starts again only after movement.',
+        'Sharing starts again once you move.',
+      ]) {
+        expect(
+          findMovementOnlyClaims(phrase, source: 'x'),
+          hasLength(1),
+          reason: phrase,
+        );
+      }
     });
 
     test('permits naming the closed state when the stop is stated', () {
@@ -473,7 +568,7 @@ void main() {
         'and passes it once the limit is stated', () {
       const resume =
           'With Always, if Haven is closed it starts sharing again by itself '
-          'once you have moved a few hundred metres, when iOS allows it.';
+          'even if you have not moved, when iOS allows it.';
       expect(
         findResumeClaimsWithoutWhileUsingLimit(resume, source: 'x'),
         hasLength(1),
@@ -577,6 +672,16 @@ void main() {
           condition.value.hasMatch(always),
           isTrue,
           reason: 'the Always string ${condition.key} no longer',
+        );
+      }
+      for (final wake in [
+        'names the movement that wakes Haven',
+        'names the background refresh that wakes Haven',
+      ]) {
+        expect(
+          _resumeClaim[wake]!.hasMatch(always),
+          isTrue,
+          reason: 'the Always string $wake no longer',
         );
       }
       expect(
@@ -778,12 +883,48 @@ void main() {
           en.locationSettingsIosLimitedNote,
           source: 'locationSettingsIosLimitedNote',
         ),
+        ...findMovementOnlyClaims(
+          en.locationSettingsIosLimitedNote,
+          source: 'locationSettingsIosLimitedNote',
+        ),
         ...findReceiveOnlyWording(
           en.locationSettingsIosLimitedNote,
           source: 'locationSettingsIosLimitedNote',
         ),
       ];
       expect(offenders, isEmpty, reason: offenders.join('\n'));
+    });
+
+    test('no iOS copy says sharing starts again only once the user has '
+        'moved, and each surface says it needs no movement', () {
+      // Owner decision D4: a background app refresh resumes sharing where the
+      // user stands. Copy that still makes movement the condition tells a user
+      // who has not moved that nothing is shared, which is false.
+      final plist = parseUsageDescriptions(
+        File('ios/Runner/Info.plist').readAsStringSync(),
+      );
+      final surfaces = <String, String>{
+        'locationDisclosureBackgroundIos': en.locationDisclosureBackgroundIos,
+        'locationSettingsIntroIos': en.locationSettingsIntroIos,
+        'locationSettingsIosLimitedNote': en.locationSettingsIosLimitedNote,
+        'NSLocationAlwaysAndWhenInUseUsageDescription':
+            plist['NSLocationAlwaysAndWhenInUseUsageDescription']!,
+      };
+      final noMovement = _resumeCondition['says no movement is needed']!;
+      for (final MapEntry(:key, :value) in surfaces.entries) {
+        expect(
+          findMovementOnlyClaims(value, source: key),
+          isEmpty,
+          reason: '$key: "$value"',
+        );
+        expect(
+          noMovement.hasMatch(normalizeCopy(value)),
+          isTrue,
+          reason:
+              '$key no longer says sharing can start again without '
+              'movement: "$value"',
+        );
+      }
     });
 
     test('the While-Using note states the stop for its own reader', () {
@@ -812,9 +953,18 @@ void main() {
           "With 'Always', if Haven is closed, sharing starts again by itself.";
       final profile = resumeClaimProfile(halfStated);
       expect(profile['says sharing starts again by itself'], isTrue);
-      expect(profile['names the movement'], isFalse);
+      expect(profile['says no movement is needed'], isFalse);
+      expect(profile['names the background refresh that wakes Haven'], isFalse);
       expect(profile['says iOS decides'], isFalse);
       expect(profile['says While Using waits for an open'], isFalse);
+    });
+
+    test('the version-2 consent sentence fails the resume claim', () {
+      final profile = resumeClaimProfile(
+        _movementOnlyCopy['consent sentence']!,
+      );
+      expect(profile['says no movement is needed'], isFalse);
+      expect(profile['names the background refresh that wakes Haven'], isFalse);
     });
 
     test('the old receive-only consent sentence fails the resume claim', () {

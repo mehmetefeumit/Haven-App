@@ -473,7 +473,17 @@ legs; no predecessor asset yet).
 |---|---|
 | `ci.yml` → `launch-gate-ios` (every PR and push to main) | `.github/workflows/launch-gate-ios.yml`, job `Simulator launch, relaunch and upgrade`: builds the candidate from the checked-out tree, launches it on a simulator, offline. A release gate job: `scripts/ci/check_ci_verdict.sh` requires it on the tagged commit. |
 | `release-build.yml` → `ios-launch-gate` | The same workflow on the tag's tree. TestFlight waits for it; on a tag (only) it uploads the simulator app it launched as `haven-ios-simulator-app`, which `publish` attaches to the GitHub Release with the APKs: every asset goes onto a draft that is published last, because releases are immutable here and a published one takes no new asset (v0.1.16 lost its simulator asset that way). |
-| `release-build.yml` → `ios` | `scripts/ci/check_ios_app_loadable.sh` on the signed archive's `Runner.app`, before the TestFlight upload. |
+| `release-build.yml` → `ios` | `scripts/ci/check_ios_app_loadable.sh` and `scripts/ci/check_ios_app_sdk.sh` on the signed archive's `Runner.app`, before the TestFlight upload. |
+
+Every one of these jobs runs on GitHub's `xcode-27` image and selects Xcode
+`latest-stable` with `maxim-lobanov/setup-xcode@v1` before it builds
+(owner decision D1, 2026-11-28): from April 2027 App Store Connect refuses an
+upload not built with the iOS 27 SDK, and the gate launches what TestFlight
+receives. `scripts/ci/check_release_launch_gated.sh` holds the wiring: G9 the
+SDK check before the upload, before the launch and after every `build-check.yml`
+iOS build, each as an unconditional whole-command step, G10 every iOS-building job on
+the TestFlight job's runner and Xcode with the `xcode-NN` label at or above
+`IOS_SDK_FLOOR`, G11 the XCTest bundle below. The app targets iOS 15.0.
 
 The gate must run green at least ten times on `ci.yml` before it is relied on as
 a required release gate; it is wired as one now (owner decision OD2).
@@ -503,8 +513,10 @@ the Release Info.plist and settings apply; the Dart is JIT. No `--dart-define`
 is passed: the receive path is `live_sync_provider.dart`'s `defaultValue`, as in
 what ships (`HAVEN_LIVE_SYNC-INTENT: production-default`).
 
-Before anything starts, `check_ios_app_loadable.sh` and the SQLCipher logger
-probe run on the candidate. On a tag it is also packaged as
+Before anything starts, `check_ios_app_loadable.sh`, `check_ios_app_sdk.sh
+--simulator` (the bundle's own `DTSDKName`, `DTPlatformVersion` and `DTXcode`,
+held to `IOS_SDK_FLOOR` = 27, fail-closed) and the SQLCipher logger probe run on
+the candidate. On a tag it is also packaged as
 `app-ios-simulator.zip` + `app-ios-simulator.zip.sha256` (sha256sum format)
 for the release.
 
@@ -553,6 +565,31 @@ the encrypted store swallows its failure (`create_identity_screen.dart`
 `_saveOnboardingProfileLocally`), and nothing reachable before onboarding
 completes (`app_router.dart` shows only `OnboardingShell` until then) reads that
 store back. It does not reach the map.
+
+### The app's XCTest bundle (RunnerTests)
+
+The legs drive the app from outside and read its semantics, which need no
+frame and no scene wiring. After them, on the same booted `iPhone 17`
+simulator, the workflow runs `haven/ios/RunnerTests`
+(`xcodebuild test -only-testing:RunnerTests`, the scheme's Debug test
+configuration, derived data of its own so it cannot touch the Release-native
+candidate) with the legs' install and the simulator keychain removed first, so
+the test host starts as a fresh install. It proves what UIKit wires and only a
+run shows:
+
+| Test | Proves |
+|---|---|
+| `testTheSceneShowsTheKeptControllerOnTheOneEngine` | UIKit built the one scene from the manifest's `SceneDelegate`; its window shows the controller `AppDelegate` keeps, on `AppDelegate.flutterEngine`, which holds the plugins (`HavenQrScanner`) — no per-scene controller, no second engine |
+| `testTheSceneRendersAFlutterFrame` | the engine started in the background draws a frame once the scene is in front |
+| `testPrivacyBlurCoversTheWindowWhileInactive` | no blur is left over the active scene (the one added when the scene connects is gone), the app-switcher blur covers the window from resign until active, is gone afterwards, and returns at the next resign |
+| `testALocationEventAfterTheForegroundIsNoLocationLaunch` | a location event in a process whose scene came to the front does not make it a location launch (OD-R1, D4) |
+| `testOnlyTheFirstLocationEventBeforeAnyForegroundIsALocationLaunch` | the launch rule's truth table (`AppDelegate.startsLocationLaunch`): only a first location event before any scene came to the front starts a location launch (D4) |
+| `testSceneManifestNamesHavenSceneDelegateAndNoStoryboard` | `UIApplicationSceneManifest` names Haven's delegate, one scene, no storyboard |
+
+The step is red when xcodebuild fails, any case fails, or no case passed
+(`check_release_launch_gated.sh` G11). Only xcodebuild's result lines leave its
+transcript — paths cut to their file name, UUIDs masked — and they are scanned
+(`scan-logs.sh`, `diag`) before they are echoed; nothing of it is uploaded.
 
 ### The predecessor
 
@@ -639,7 +676,13 @@ SHA-256 digest salted with a value drawn per run and never printed.
 * **The map on a fresh install.** Offline onboarding ends at SETUP_HELD; MapShell
   is reached only when a predecessor ends at MAP.
 * **Network behaviour.** The run is offline by construction.
-* **Other locales and devices.** One simulator model, the newest runtime, en_US.
+* **A location launch, and scenes the OS manages.** Whether iOS connects a scene
+  to a background launch, a scene it disconnects under memory pressure and the
+  reopen that re-hosts the kept controller, the first location event that makes
+  a process a location launch (including a background-refresh launch's), and
+  the blur in the real app-switcher snapshot: device-only, `docs/M7_BACKGROUND_SHARING.md`
+  §6 items 2m–2r (DEFERRED). RunnerTests sees one foregrounded process.
+* **Other locales and devices.** One simulator model (`iPhone 17`), the newest runtime, en_US.
 
 Before external distribution, install the TestFlight build on a physical
 iPhone: fresh install, onboarding, cold relaunch, and an upgrade over the

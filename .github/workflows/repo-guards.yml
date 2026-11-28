@@ -100,15 +100,19 @@
 #
 #   iOS app-switcher blur             scripts/ci/check_ios_privacy_blur.sh
 #     The iOS half of the same protection. iPhone cannot block capture, so
-#     what Haven does there is blur the app-switcher preview — six lines of
-#     AppDelegate.swift that were backed by nothing at all. Delete them and
-#     every other gate stays green. Union: installed on
-#     applicationWillResignActive (the switcher card is on screen while the
-#     app is still FOREGROUND, so didEnterBackground is too late), covering
-#     the window with a real .systemMaterial blur, removed and re-armed only on
-#     applicationDidBecomeActive, and no UIApplicationSceneManifest in
-#     Info.plist (adopting scenes stops UIKit calling any of those callbacks,
-#     leaving every other link intact and executing never).
+#     what Haven does there is blur the app-switcher preview — a few lines of
+#     SceneDelegate.swift that were backed by nothing at all. Delete them and
+#     every other gate stays green. Union: installed when the scene connects
+#     (a scene iOS connects in the background never resigns) and on
+#     sceneWillResignActive
+#     (the switcher card is on screen while the scene is still FOREGROUND, so
+#     didEnterBackground is too late), covering the scene's window with a real
+#     .systemMaterial blur, removed and re-armed only on sceneDidBecomeActive,
+#     both after super; Info.plist's UIApplicationSceneManifest routes the one
+#     application scene to $(PRODUCT_MODULE_NAME).SceneDelegate (without it an
+#     Xcode 27 build does not launch; with another delegate the blur never
+#     runs), and no blur or application* lifecycle override is left on the
+#     app delegate, where UIKit no longer calls them.
 #
 #   Background-wake invariants        scripts/ci/check_m7_native_wake_guards.sh
 #     Static correctness invariants of the Android WorkManager + iOS
@@ -158,7 +162,11 @@
 #     diagnostics observer re-running the policy rather than only setting a
 #     flag, and `disarm()` UNCONDITIONAL. Plus the C4 disable-while-paused
 #     watcher and its opt-out release, presence-only location logging, the
-#     AppDelegate wiring ORDER, the relaunch region coupled to SLC, and the
+#     AppDelegate wiring ORDER on the one engine's messenger every launch
+#     reaches, the location-launch rule (first location event before any scene
+#     came to the front), the scene-to-app-delegate hops with super, one engine
+#     and one kept controller with no storyboard and one scene, the main-queue
+#     BGTask handler, the relaunch region coupled to SLC, and the
 #     four project.pbxproj references without which the Swift file compiles
 #     nowhere and fails as a MissingPluginException Dart reads as "no native
 #     handler". Its `--self-test` runs as its own step: NO Swift unit test runs
@@ -463,7 +471,12 @@
 #     now prevents it: the GitHub Release, Zapstore and TestFlight wait for the
 #     launch gates, publish only the bytes the Android gate tested, the IPA
 #     load check runs before upload, and ci.yml and the verdict gate keep both
-#     gates (docs/LAUNCH_GATE.md).
+#     gates (docs/LAUNCH_GATE.md). The archive's load check, and each SDK
+#     check (the archive, the gate's candidate, build-check.yml's device
+#     build), must be an unconditional step whose whole command is the check,
+#     and the gate's
+#     RunnerTests step must fail a failed or empty run and scan its summary
+#     before printing it.
 #
 #   Network retry is classified       scripts/ci/retry_on_network_failure.sh
 #     The iOS builds on the release path (the launch gate's config pass and
@@ -500,6 +513,12 @@
 #     links resolves inside the bundle or the OS, and the Rust framework Dart
 #     opens exports every symbol the bridge looks up. Self-test here; the real
 #     run is on the archive before TestFlight and on the gate's simulator app.
+#
+#   iOS app SDK floor                 scripts/ci/check_ios_app_sdk.sh
+#     From April 2027 App Store Connect refuses (ITMS-90725) a build below the
+#     iOS 27 SDK, and only the built bundle's Info.plist says which SDK built
+#     it. Self-test here; the real run is on the archive before TestFlight, on
+#     the launch gate's simulator app and on build-check.yml's device build.
 #
 #   Session-busy marker is log-only   scripts/ci/check_session_busy_marker_not_routed.sh
 #     The Rule-14 "an MLS session is already open" marker must never drive a
@@ -1586,6 +1605,14 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_ios_app_loadable.sh --self-test
 
+      # plistlib fixtures, XML and binary: an SDK below the floor fails, and a
+      # missing, malformed or disagreeing reading cannot vouch. The check runs
+      # for real on the archive in release-build.yml, on the simulator app in
+      # launch-gate-ios.yml and on build-check.yml's device build.
+      - name: iOS app SDK floor self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_ios_app_sdk.sh --self-test
+
       - name: Release APK loadable self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_apk_loadable.sh --self-test
@@ -2410,6 +2437,14 @@ jobs:
       - name: E2E harness self-test (iOS launch gate)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-launch-gate-ios.sh --self-test
+
+      # Against a stubbed xcrun: the newest runtime (of two of one version, the
+      # one supporting the preferred type, then the higher build), a device on
+      # THAT runtime, and a type it supports, with a warning on the fallback;
+      # no iOS runtime or no supported iPhone fails.
+      - name: E2E harness self-test (iOS simulator boot)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/boot-ios-sim.sh --self-test
 
       # The Android launch gate's runner against a stubbed adb: a crash at
       # launch, a restart or ANR mid-journey, Intro after a relaunch, a name

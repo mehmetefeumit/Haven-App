@@ -1582,6 +1582,23 @@ void main() {
             iosSource: fakeIos,
           );
 
+      test("the native session's location-launch reports reach the shell "
+          'on iOS, and never elsewhere', () async {
+        final onIos = <void>[];
+        final elsewhere = <void>[];
+        final subs = [
+          serviceFor().locationLaunches.listen(onIos.add),
+          serviceFor(isIOS: false).locationLaunches.listen(elsewhere.add),
+        ];
+        addTearDown(() => Future.wait(subs.map((s) => s.cancel())));
+
+        fakeIos.launches.add(null);
+        await pumpEventQueue();
+
+        expect(onIos, hasLength(1));
+        expect(elsewhere, isEmpty);
+      });
+
       void stubAccessGranted() {
         when(
           mockGeolocator.isLocationServiceEnabled(),

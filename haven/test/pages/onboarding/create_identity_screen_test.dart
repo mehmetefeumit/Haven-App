@@ -363,6 +363,7 @@ void main() {
           allTime: await allTime.status(),
           allTimePrompted:
               prefs.getBool(kAndroidBackgroundLocationPromptedKey) ?? false,
+          isIOS: false,
         ),
         ForegroundConsentStep.none,
         reason: 'MapShell would show the same long dialog a second time',

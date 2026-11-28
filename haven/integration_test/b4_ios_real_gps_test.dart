@@ -147,6 +147,7 @@ import 'package:haven/src/utils/log_alias.dart' show magnitudeBucket;
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'e2e/_lib/app_lifecycle.dart' show awaitPlatformResumed;
 import 'e2e/_lib/circle_creation.dart'
     show DeliveredCircle, createCircleDelivered, settleLiveSession;
 import 'e2e/_lib/coordination.dart' show waitForKeyPackage;
@@ -214,6 +215,7 @@ const Duration _decryptWaitBudget = Duration(seconds: 120);
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  setUpAll(awaitPlatformResumed);
 
   testWidgets(
     'B4: publish a REAL simulator GPS fix and prove a peer decrypts those '

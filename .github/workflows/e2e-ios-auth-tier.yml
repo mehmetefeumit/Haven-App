@@ -13,10 +13,12 @@
 #     "When In Use", with the blue status-bar indicator. Haven's
 #     `MapShell._onPaused()` relies on exactly that and never consults the
 #     tier. "Always" buys the location relaunch after iOS terminates the
-#     app, which resumes sharing after movement (owner-directed 2026-11-26,
-#     OD-R1; `HavenSLCHandler` refuses to arm without Always, and the stream
-#     handler starts a session from a relaunch only under it). A simulator
-#     cannot relaunch a terminated app, so that half is device-only.
+#     app, which can resume sharing when iOS next starts Haven in the
+#     background — after movement, or at a background app refresh
+#     (owner-directed 2026-11-26, OD-R1; D4, 2026-11-28; `HavenSLCHandler`
+#     refuses to arm without Always, and the stream handler starts a
+#     session from a relaunch only under it). A simulator cannot relaunch a
+#     terminated app, so that half is device-only.
 #   * So the tier changes what the UI may CLAIM, not whether publishing
 #     continues. This lane asserts the honest per-tier copy AND continued
 #     background publishing in BOTH tiers.
@@ -41,7 +43,7 @@ on:
 jobs:
   e2e_ios_auth_tier:
     name: e2e_ios_auth_tier
-    runs-on: macos-latest # Apple Silicon; arm64 simulator (no Linux Docker).
+    runs-on: xcode-27 # Apple Silicon; arm64 simulator (no Linux Docker).
     # The job cap must clear the SUM of the step caps: below it, a run whose
     # every step is still inside its own cap can die here, and a job-cap death
     # skips every `if: always()` diagnostic (e2e-android.yml states the rule).
@@ -77,6 +79,13 @@ jobs:
         id: checkout
         uses: actions/checkout@v6
 
+      # The image's default Xcode is not its newest; select the newest stable
+      # one, the Xcode release-build.yml archives TestFlight builds with.
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -90,7 +99,7 @@ jobs:
             haven-core
             tooling/e2e/local-relay
             tooling/logscan
-          key: e2e-ios-auth-tier
+          key: e2e-ios-auth-tier-xcode27
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The runtime log scanner, release-built ONCE, before Flutter and the
@@ -128,11 +137,11 @@ jobs:
 
       - name: Boot iOS simulator
         id: sim
-        # macos-* runners have no GNU `timeout`, so GitHub's step cap is the
+        # macOS runners have no GNU `timeout`, so GitHub's step cap is the
         # only available bound on a boot that never reaches Booted. Measured
         # boots are 136-215 s; 15 min is ~4x the observed max.
         timeout-minutes: 15
-        run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 15"
+        run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 17"
 
       # `nick-fields/retry` is the inner bound on macOS (no coreutils
       # `timeout`), and it retries on ANY non-zero exit — it has no `retry_on`

@@ -213,8 +213,8 @@
 # =============================================================================
 #
 # Skipped, per the backlog item. The first clause is exactly right:
-# `e2e-ios.yml:57` and `e2e-profile.yml:405` are `runs-on: macos-latest`,
-# which has `pf`, not iptables, and no equivalent hook in the lane.
+# the iOS lanes run on GitHub's macOS images (`xcode-27` since 2026-11-28),
+# which have `pf`, not iptables, and no equivalent hook in the lane.
 #
 # The second clause — "hermeticity is already enforced in-process" — is TRUE
 # FOR THE RELAY PLANES AND ONLY THOSE. Verified: `TestUser.bootstrapProcess`

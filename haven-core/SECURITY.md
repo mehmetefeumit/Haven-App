@@ -3597,22 +3597,31 @@ Each wake **receives first, makes no commit, and is consent-gated**:
 2026-11-26, OD-R1/OD-R3).** The wake handlers above stay receive-only:
 `HavenSLCHandler`, `HavenBGTaskHandler`, `catchup_service.dart` and
 `ios_background_catchup.dart` have no publish call site. What changed is the
-process iOS relaunches into the background for a location event — a
-significant change, or leaving the relaunch region centred on the last
+process iOS launches into the background that then receives a location event
+(owner decision 2026-11-28, D4: any location event) — a significant change,
+including the fix iOS delivers at once whenever significant-change monitoring
+(re)starts, so a background-refresh (BGTask) launch with sharing on becomes one
+too, or leaving the relaunch region centred on the last
 fix (`relaunchRegionRadiusMeters`, 200 m, smaller than the earlier 500 m so a
 terminated Haven needs less movement to come back — but only for a user
 `resumeConsented()` holds for; everyone else keeps 500 m,
 `receiveOnlyRegionRadiusMeters`, because for them a relaunch is receive-only and
 a smaller circle would only add relay contact, Rule 10). `AppDelegate` marks it
-(`HavenLocationStreamHandler.launchedForLocation`, set only from
-`launchOptions[.location]` with the app in `.background`, cleared at the first
-foreground), keeps the BGTask floor scheduled on that launch too, and opens one
+(`HavenLocationStreamHandler.launchedForLocation`, set once per process at the
+first location delivery to `HavenSLCHandler` while no scene has entered the
+foreground — never from `launchOptions`, which a scene-based app is not
+reliably given — and cleared when a scene enters the foreground; a delivery
+that lands on a user's cold launch before its scene does marks it until then),
+tells Dart so (`locationLaunch` on `haven.app/ios_location_stream`, because
+Dart may have read the flag before it was set and a process no scene connects
+to is sent no lifecycle message), keeps the BGTask floor scheduled, and opens one
 background task (`haven.launch.share`, `beginLaunchWindow`) that bridges the
 catch-up sweep and the first publish; it ends at its expiry, when the session is
 cancelled, or at the first foreground. MapShell's mount
 (`ForegroundStartUpGate`) then decides what the first pause of that process
-owes, whatever lifecycle state the shell mounted under and whichever way that
-pause arrives: with background sharing on and the **current** background
+owes — reading the flag again at each `locationLaunch` until a lifecycle change
+reaches the shell — whatever lifecycle state the shell mounted under and
+whichever way that pause arrives: with background sharing on and the **current** background
 disclosure accepted (`MapShell.launchMayResume`: the consent loaded, then
 `backgroundResumeDisclosureAccepted`, then the roster awaited for at most
 `kConsentArmBound`), the pause — taken by the shell itself when iOS dispatches
@@ -3649,11 +3658,12 @@ significant-change or region wake of a relaunched process that iOS has
 suspended again opens no launch window, its handler runs the receive-only
 sweep, and nothing here claims whether that wake publishes (M7 §6 item 2j). What a relay of the user's circles can now
 see is this device's kind-445 after Haven was closed, at a time set by the
-user's movement and by iOS rather than by the app being open — the owner's
+user's movement and by iOS — a background refresh included, with no movement —
+rather than by the app being open — the owner's
 decision, disclosed in the consent dialog and the settings intro. Whether iOS
 relaunches an app the user force-quit, how long a session started from the
 background keeps the process executable, and what a relaunch costs in battery
-are device-only and DEFERRED (`docs/M7_BACKGROUND_SHARING.md` §6 items 2–2l;
+are device-only and DEFERRED (`docs/M7_BACKGROUND_SHARING.md` §6 items 2–2r;
 the cost is ESTIMATED in `docs/POWER_EFFICIENCY_PLAN.md` §6.5a).
 
 **Android: resume after a reboot or an app update (owner-directed 2026-11-26,
@@ -5939,7 +5949,10 @@ Eleven residuals, none of them optional:
     *paused*. On a device the lifecycle is never unset: both embedders seed it
     `detached`. But the binding reads it once, when `main()` initialises it,
     and a lifecycle message the engine receives before then replaces the seed
-    with no dispatch. A later one is dispatched, every state on the way
+    with no dispatch. On iOS only a view controller in a scene's window sends
+    one, and `AppDelegate` runs the engine at every launch before any scene
+    connects: a background launch no scene connects to is sent none and reads
+    the seed for its whole life. A later one is dispatched, every state on the way
     synthesised, to the observers registered at that instant
     (`ServicesBinding`, pinned by
     `haven/test/framework/lifecycle_synthesis_test.dart`): `detached` →
@@ -5970,7 +5983,14 @@ Eleven residuals, none of them optional:
     regardless: the maintenance timers arm only in front, and the live-sync
     heal starts a session only where one is wanted.
     - Mounted under `detached`: no session is wanted
-      (`MapShell.liveSyncWanted`) and no heal timer is armed. The first
+      (`MapShell.liveSyncWanted`) and no heal timer is armed; on iOS the
+      mount also tells the location service it is not in front
+      (`MapShell.foregroundActiveAtMount`), as no pause may ever say so. Where
+      the gate takes a location launch's pause over the seed (below), the
+      start a burst makes reads `paused` instead
+      (`ForegroundStartUpGate.effectiveLifecycle`, until any lifecycle message
+      arrives), so the iOS sharing-on burst starts its session; the
+      re-subscriber and the heal still read the binding and want none. The first
       message after the mount is dispatched `resumed` first, so the resume
       handler runs with nobody looking — it opens the location cache, arms
       the foreground timers and the heal timer, re-arms the maintenance
@@ -6021,13 +6041,18 @@ Eleven residuals, none of them optional:
     disclosure accepted, takes the pause whatever state it mounted under:
     `ForegroundStartUpGate` reads the native `launchedForLocation`, then
     `MapShell.launchMayResume`, and takes the pause once those resolve unless
-    a pause reached the shell first, which is handed the launch instead
+    a pause reached the shell first, which is handed the launch instead; the
+    native side sets the flag at the process's first location delivery, which
+    can land after that read, so each `locationLaunch` it then sends reads the
+    launch again while no lifecycle change has reached the shell
     (`takeLaunchSession`); `admitPause` keeps a `paused` iOS then dispatches
     on top of it from running a second pause. Everything in this section
     applies to that process, its first burst included ("Scheduled background
     wakes (M7)" above). This is closed for location launches only: a location
     relaunch the current disclosure does not cover takes no pause of its own,
-    and a BGTask launch none either, so both stay in the open cases above.
+    and nor does a launch no location event reaches (a BGTask launch with
+    sharing off, or one before its first significant-change fix), so both stay
+    in the open cases above.
     Every mount state and both orderings of a dispatched pause against the
     launch's reads are driven through the binding
     (`haven/test/pages/foreground_start_up_gate_test.dart`). Host-side, the
@@ -6038,8 +6063,12 @@ Eleven residuals, none of them optional:
     `MapShell` wires it so is pinned over the source
     (`haven/test/pages/map_shell_mount_lifecycle_test.dart`). No test, host or
     device, launches the app in the background, and that the seed is
-    `detached`, and that the engine replaces it until the binding first reads
-    it, are read from the Flutter engine and framework source.
+    `detached`, that the engine replaces it until the binding first reads
+    it, and that an iOS process no scene connects to is sent no lifecycle
+    message, are read from the Flutter engine and framework source; the
+    gate's side of both is driven through the binding
+    (`foreground_start_up_gate_test.dart`: "a location launch no scene has
+    connected to", "the native report of a location launch").
 
 The complementary arm is simpler and is stated with it: on **iOS with background
 sharing off**, and on **Android in both toggle states**, the pause STOPS the

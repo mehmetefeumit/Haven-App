@@ -8,6 +8,7 @@
 | [Android SDK](https://developer.android.com/studio) | Android build tools | Via Android Studio or command-line tools |
 | [Android NDK](https://developer.android.com/ndk) | Native development (for Rust FFI) | Installed automatically by Flutter |
 | [Rust](https://rustup.rs) ≥ 1.97.1 | `haven-core` and the FFI crate | `rustup toolchain install 1.97.1` — MDK v0.10.4's SQLCipher build (`libsqlite3-sys` from `rusqlite@5ae7fdf`) uses `cfg_select!`, which older compilers reject |
+| [Xcode](https://developer.apple.com/xcode/) 27 or newer (iOS only) | iOS builds, simulator and `RunnerTests` | Requires macOS Tahoe 26.6 or newer. The app targets iOS 15.0 and adopts UIScene; App Store Connect refuses an upload built below the iOS 27 SDK from April 2027, and CI builds every iOS job with the newest stable Xcode on GitHub's `xcode-27` image (`scripts/ci/check_ios_app_sdk.sh` checks the built bundle) |
 
 ### Flutter Installation
 
@@ -387,7 +388,7 @@ cleanly until `ZAPSTORE_SIGN_WITH` is set.
 
 iOS release builds are signed and uploaded to TestFlight automatically when you
 push a version tag (`vX.Y.Z`). All Apple-side work (Xcode, signing, upload) runs
-on a GitHub Actions **macOS runner** — you do not need a Mac. Signing uses
+on GitHub Actions' **`xcode-27` image** with its newest stable Xcode — you do not need a Mac. Signing uses
 [Fastlane Match](https://docs.fastlane.tools/actions/match/) (certificates stored,
 encrypted, in a separate private repo) and authenticates to App Store Connect with
 an **API key** (no Apple ID / 2FA). The build itself still goes through
@@ -397,7 +398,8 @@ guard always apply.
 Pipeline (in `.github/workflows/release-build.yml`, `ios` job): install signing
 assets read-only via Match → render the Team ID into `ios/ExportOptions.plist` →
 `scripts/build_release.sh ipa` (single archive: compiles the Rust pod, injects the
-key, obfuscates, exports a signed `.ipa`) → upload to TestFlight via
+key, obfuscates, exports a signed `.ipa`) → `check_ios_app_loadable.sh` and
+`check_ios_app_sdk.sh` on the archive's `Runner.app` → upload to TestFlight via
 `fastlane ios upload`. The build number is the GitHub Actions run number
 (`--build-number`), which is unique and monotonic — never set it in Fastlane (a
 `flutter build` regenerates `Generated.xcconfig` and would clobber it).

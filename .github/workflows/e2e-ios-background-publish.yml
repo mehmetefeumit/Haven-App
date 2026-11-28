@@ -8,7 +8,7 @@
 # the test reporter decides rather than when the drive prints them, far too
 # late to act on — then launches
 # com.apple.Preferences over Haven, so iOS itself fires
-# `applicationDidEnterBackground` — something NO other lane produces (B7 and
+# `sceneDidEnterBackground` — something NO other lane produces (B7 and
 # the Android B1 lane dispatch the paused lifecycle event in-process). The
 # drive keeps running only because the app holds a real background-execution
 # claim (`UIBackgroundModes: location` + a live CLLocationManager updates
@@ -290,7 +290,7 @@ on:
 jobs:
   e2e_ios_bg_publish:
     name: e2e_ios_bg_publish (${{ matrix.leg }})
-    runs-on: macos-latest # Apple Silicon; arm64 simulator (no Linux Docker).
+    runs-on: xcode-27 # Apple Silicon; arm64 simulator (no Linux Docker).
     strategy:
       # Never fail-fast. The legs assert things none of the others can — two
       # OPPOSITE session postures across the tier axis, two mutually exclusive
@@ -411,6 +411,13 @@ jobs:
         id: checkout
         uses: actions/checkout@v6
 
+      # The image's default Xcode is not its newest; select the newest stable
+      # one, the Xcode release-build.yml archives TestFlight builds with.
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -425,7 +432,7 @@ jobs:
             tooling/e2e/local-relay
             tooling/logscan
           # Per-leg, so the matrix jobs never race each other's cache save.
-          key: e2e-ios-bg-publish-${{ matrix.leg }}
+          key: e2e-ios-bg-publish-${{ matrix.leg }}-xcode27
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The runtime log scanner, release-built ONCE, before Flutter and the
@@ -465,11 +472,11 @@ jobs:
 
       - name: Boot iOS simulator
         id: sim
-        # macos-* runners have no GNU `timeout`, so GitHub's step cap is the
+        # macOS runners have no GNU `timeout`, so GitHub's step cap is the
         # only available bound on a boot that never reaches Booted. Measured
         # boots are 136-215 s; 15 min is ~4x the observed max.
         timeout-minutes: 15
-        run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 15"
+        run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 17"
 
       # `nick-fields/retry` is the inner bound on macOS (no coreutils
       # `timeout`), and it retries on ANY non-zero exit — it has no

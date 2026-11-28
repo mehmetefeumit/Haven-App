@@ -2643,7 +2643,7 @@ the commit subset while `isNotEmpty` stays satisfied by commits.
 | C5.6 | Publish-target containment; no event ever reaches an unconfigured default relay. **Cannot fail on the proxied lanes:** every route forwards to one upstream and every `--pool` names it, so the endpoint it keys on is in every pool by construction. Kept fixture-proven for a multi-upstream lane; plane containment on the core lanes is C8's |
 | C6 | Canaries: circle display name (high value), petname, coordinates. **Drop locale and timezone** — no wire field can carry a timezone, and locale already has a stronger static gate |
 | C8 | **Relay-plane placement**, keyed on `listen`: every client→relay EVENT, REQ filter and NEG-OPEN lands only on a proxy listen whose declared role (inbox, key-package, discovery, profile, location) admits it, a circle's traffic only on its declared routing (`HAVEN_WIRE_ROUTING` declarations, `docs/WIRE_JOURNAL.md`), every role witnessed. Runs on the poll AND live-sync variants (outside C5's gate). Judges ROLE PLACEMENT with no sender (union rules); the per-identity bindings are the Rust layers' |
-| C7 | Egress guard: currently rejects only TCP 80/443 and records nothing. Move to logging-only first (`-j LOG`, publish observed destinations), assert once nightlies show it stable. **Skip the iOS half** — that lane is `macos-latest` (no iptables) and hermeticity is already enforced in-process |
+| C7 | Egress guard: currently rejects only TCP 80/443 and records nothing. Move to logging-only first (`-j LOG`, publish observed destinations), assert once nightlies show it stable. **Skip the iOS half** — that lane is a macOS runner (`xcode-27`, no iptables) and hermeticity is already enforced in-process |
 
 **Scope honestly:** a wire transcript is a *send-side* instrument. It says
 nothing about a hostile relay withholding, reordering, or forging inbound events
@@ -3174,7 +3174,11 @@ Two tiers. **The AI can only fail a build, never pass one.**
   `check_ios_privacy_blur.sh` (wired enforcing in `repo-guards.yml`, 50 pinned
   fixtures) pins an 8-link union — hook, real blur material, geometry, z-order,
   unconditional add, removal *and* re-nil, absence of a scene manifest, and the
-  promise still being made in all 13 locales. The retention constant is now tied
+  promise still being made in all 13 locales. *(Superseded 2026-11-28 by the
+  UIScene migration: the blur is installed at scene connect and on
+  `SceneDelegate.sceneWillResignActive`, removed on `sceneDidBecomeActive`, and the guard's link 7 now REQUIRES the scene manifest
+  naming `SceneDelegate`, link 8 refuses a blur or UI-lifecycle override left on
+  `AppDelegate`; see its header for the current links and fixture count.)* The retention constant is now tied
   to the string in `privacy_copy_ties.rs` and pinned to ±1 s in BOTH directions,
   with the derivation read live from the Dart constants rather than mirrored —
   so moving `kTtlNetworkBufferSeconds` alone also reddens. The stale

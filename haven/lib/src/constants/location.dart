@@ -658,16 +658,30 @@ const String kLocationDisclosureBackgroundVersionKey =
 const String kLocationDisclosureBackgroundPromptedVersionKey =
     'haven.location.disclosure_background_prompted_version';
 
-/// The background-disclosure version whose acceptance lets sharing start
-/// again without the user opening Haven (an iOS location relaunch; an Android
-/// reboot, update or system restart of the foreground service).
+/// The background-disclosure version the dialog shows now: what Agree
+/// records, and the version whose acceptance lets sharing start again on
+/// iPhone without the user opening Haven (a background start by iOS).
 ///
 /// Bump it on any change that widens what background sharing does while the
 /// user is not using Haven, and bump `kBgDisclosureResumeVersion` in
-/// `HavenBackgroundSessionHandler.swift` (and the Android reader) in the same
-/// commit: `scripts/ci/check_ios_background_publish.sh` check 20 holds the
-/// Swift pair equal.
-const int kBackgroundDisclosureVersion = 2;
+/// `HavenBackgroundSessionHandler.swift` in the same commit
+/// (`scripts/ci/check_ios_background_publish.sh` check 20 holds the Swift pair
+/// equal); when the widening is Android's, also set
+/// [kAndroidBackgroundDisclosureVersion] to it.
+///
+/// 3: on iPhone sharing can start again without movement, at a background
+/// app refresh (owner decision D4, 2026-11-28).
+const int kBackgroundDisclosureVersion = 3;
+
+/// The background-disclosure version whose acceptance lets sharing start
+/// again on Android without the user opening Haven (a reboot, an update or a
+/// system restart of the foreground service).
+///
+/// Version 3 widened iPhone only: Android's disclosure and resume are what
+/// version 2 described, so an Android user who accepted it is not asked
+/// again. `HavenPrefs.BACKGROUND_DISCLOSURE_VERSION` in `ResumeRule.kt` is its
+/// twin (`check_m7_native_wake_guards.sh` 14k).
+const int kAndroidBackgroundDisclosureVersion = 2;
 
 /// SharedPreferences key recording that the Android "Allow all the time" step
 /// was shown, whatever the answer, so a decline is never asked again

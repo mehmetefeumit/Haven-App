@@ -6,9 +6,11 @@
 /// plain When-In-Use, and that is what background sharing runs on
 /// (`geolocator_location_service.dart:641-643`). What "Always" buys is the
 /// relaunch path: significant-location-change and region monitoring waking a
-/// *terminated* app (`HavenSLCHandler.swift`), which resumes the user's own
-/// sharing after movement when the current background disclosure is accepted
-/// (owner-directed 2026-11-26;
+/// *terminated* app (`HavenSLCHandler.swift`), which can resume the user's
+/// own sharing, when the current background disclosure is accepted, when iOS
+/// starts Haven in the background — after movement, or at a background app
+/// refresh with no movement at all (owner-directed 2026-11-26, widened by
+/// owner decision D4, 2026-11-28;
 /// `INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT` in
 /// `docs/privacy/privacy_invariants.json`).
 ///

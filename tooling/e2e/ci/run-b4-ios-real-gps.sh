@@ -28,7 +28,7 @@
 #
 # `simctl location` (with the `set` action) has existed since Xcode 14 and
 # `simctl privacy` since Xcode 11.4, so both are present on any plausible
-# `macos-latest` image. This lane still reads the subcommands' own usage text
+# macOS runner image (`xcode-27` since 2026-11-28). This lane still reads the subcommands' own usage text
 # and stops with an attributable misconfiguration (exit 2) rather than assuming
 # — a lane whose entire subject is "did the OS deliver a real fix" must not
 # discover a missing tool as an ambiguous timeout 20 minutes later.

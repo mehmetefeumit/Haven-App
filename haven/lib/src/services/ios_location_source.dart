@@ -200,10 +200,12 @@ class IosLocationStreamStatus {
   /// Whether UIKit reports the app as backgrounded.
   final bool backgrounded;
 
-  /// Whether iOS launched this process into the background for a location
-  /// event (a significant-change or region relaunch), and the user has not
-  /// brought it to the front since. Unreadable reads `false`: no relaunch
-  /// routing, no wait for a fix, no session start.
+  /// Whether this process, started in the background, has received a location
+  /// event (a significant change — the fix that (re)starting significant-change
+  /// monitoring delivers at once included — or a relaunch-region exit) before
+  /// any scene came to the front, and no scene has come to the front since.
+  /// Unreadable reads `false`: no relaunch routing, no wait for a fix, no
+  /// session start.
   final bool launchedForLocation;
 }
 
@@ -242,6 +244,13 @@ abstract class IosLocationSource {
 
   /// Reads the native session's state.
   Future<IosLocationStreamStatus> status();
+
+  /// Fires when the native side has just set
+  /// [IosLocationStreamStatus.launchedForLocation]. It sets it at the first
+  /// location delivery of a process no scene has brought to the front, which
+  /// can land after Dart first read the flag, and no lifecycle message
+  /// follows it there.
+  Stream<void> get locationLaunches;
 }
 
 /// Returns the platform-appropriate [IosLocationSource]: the channel-backed
@@ -455,7 +464,14 @@ class IosProfileController {
 /// Channel-backed [IosLocationSource] talking to `HavenLocationStreamHandler`.
 class MethodChannelIosLocationSource implements IosLocationSource {
   /// Creates a [MethodChannelIosLocationSource].
-  MethodChannelIosLocationSource();
+  ///
+  /// The handler is registered here, before this source's first [status]
+  /// read: a report sent after that read reaches every [locationLaunches]
+  /// listener subscribed when it arrives, and one sent before the read finds
+  /// the flag already set.
+  MethodChannelIosLocationSource() {
+    methodChannel.setMethodCallHandler(_onNativeCall);
+  }
 
   /// The method channel shared with the native handler.
   @visibleForTesting
@@ -470,6 +486,17 @@ class MethodChannelIosLocationSource implements IosLocationSource {
   );
 
   final IosProfileController _controller = IosProfileController();
+
+  final StreamController<void> _locationLaunches =
+      StreamController<void>.broadcast();
+
+  @override
+  Stream<void> get locationLaunches => _locationLaunches.stream;
+
+  Future<void> _onNativeCall(MethodCall call) async {
+    if (call.method != 'locationLaunch') throw MissingPluginException();
+    _locationLaunches.add(null);
+  }
 
   /// The single confirm timer, armed from [IosProfileController.nextDeadline].
   Timer? _confirmTimer;
@@ -711,6 +738,9 @@ class NoopIosLocationSource implements IosLocationSource {
   @override
   Future<IosLocationStreamStatus> status() async =>
       IosLocationStreamStatus.unknown;
+
+  @override
+  Stream<void> get locationLaunches => const Stream<void>.empty();
 }
 
 bool _boolOr(Object? raw, {required bool fallback}) =>

@@ -1505,12 +1505,19 @@ that replaces it expires ~30 s on; RunningBoard suspends and then terminates
 the process for not invalidating it — `OS_REASON_RUNNINGBOARD`, code
 `0x2182bad2`. **No jetsam, no crash report, no watchdog** (`0x8badf00d` appears
 nowhere). The assertion nobody ended is the DEBUG Flutter engine's own
-`Flutter debug task`, which UIKit warns about in every run of this lane
-(`"was created over 30 seconds ago … this creates a risk of termination"`).
-Whether the process gets to acknowledge the suspension in time is an OS
-scheduling race, which is why the same leg is green on most runs.
+`Flutter debug task`, which UIKit warned about in every run of this lane
+before 2026-11-28 (`"was created over 30 seconds ago … this creates a risk of
+termination"`). Whether the process gets to acknowledge the suspension in time
+is an OS scheduling race, which is why the same leg is green on most runs.
 
-Since then the wrapper does not end there. It holds P3's window open from the
+Since the UIScene migration (2026-11-28) the engine no longer starts that task:
+it begins its debug keep-alive only in an app with no scene delegate
+(`FlutterPluginAppLifeCycleDelegate.mm`'s `handleDidEnterBackground`). So the
+debug E2E lanes no longer get it, and a debug app that drops its last location
+claim is now suspended about 1 s later instead of being killed about 30 s
+later. The wire oracle below reads the relay, so it holds either way.
+
+Since run 35622556197 the wrapper does not end there. It holds P3's window open from the
 host and asks the relay — `tooling/e2e/ci/bgp-wire-probe.dart`, run against
 the lane's own `haven-local-relay` — whether any kind-445 was created inside
 it, and prints one of four verdicts. Read the log for them:

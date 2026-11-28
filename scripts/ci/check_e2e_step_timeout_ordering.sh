@@ -10,7 +10,7 @@
 #
 #   * The INNER deadline is ours. On Linux it is a coreutils `timeout` (via
 #     tooling/e2e/ci/run-with-deadline.sh), on macOS it is `nick-fields/retry`'s
-#     `timeout_minutes` (the macos-* runners have no GNU `timeout`). When it
+#     `timeout_minutes` (macOS runners have no GNU `timeout`). When it
 #     fires it names the lane, and the step's `if: failure()` diagnostics,
 #     secret scan and artifact upload all still run. That is a red you can act
 #     on.
@@ -1036,7 +1036,7 @@ self_test() {
 
   # --- Fixture J: macOS lane bounded by nick-fields/retry, not coreutils.
   #     60 (30x2) < 65 < 90 holds, so it must pass; the guard must not demand
-  #     a GNU `timeout` that macos-* runners do not have.
+  #     a GNU `timeout` that macOS runners do not have.
   local j="${tmp}/j"; mkdir -p "${j}"
   write_fixture "${j}/ios.yml" \
 'jobs:' \

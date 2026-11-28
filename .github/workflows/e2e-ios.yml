@@ -7,14 +7,13 @@
 # through a host-native Nostr relay, reached via the RECORDING WIRE PROXY on
 # ws://localhost:7788 (see "Wire recording" below).
 #
-# # Why macos-latest (Apple Silicon / arm64) works
+# # Why an Apple Silicon (arm64) runner works
 #
 # Haven's QR scanner is its own (`HavenQrScannerHandler.swift`: AVFoundation +
 # Apple's Vision framework), with no pod. Google MLKit, which an earlier
 # scanner plugin used, shipped no arm64-simulator slice and forced
 # `EXCLUDED_ARCHS[...]=arm64`; nothing in the app excludes arm64 now, so it
-# builds and runs on the arm64 simulator that macos-latest provides — the
-# faster, longer-lived runner.
+# builds and runs on the arm64 simulator the macOS runner provides.
 #
 # # Why a host-native relay (not the strfry container)
 #
@@ -60,7 +59,7 @@
 #     reason to record on THIS lane is different and narrower: the journal is
 #     the only place the iOS send path is observed as bytes rather than as the
 #     app's own belief about what it sent.
-#   * macos-latest has no iptables, so the C7 egress guard
+#   * macOS runners have no iptables, so the C7 egress guard
 #     (tooling/e2e/ci/setup-network-guard.sh) is deliberately NOT wired here.
 #     The recorder is a send-side instrument only; it does not bound egress.
 #
@@ -84,7 +83,7 @@ on:
 jobs:
   e2e_ios:
     name: e2e_ios
-    runs-on: macos-latest # Apple Silicon; arm64 simulator (no Linux Docker).
+    runs-on: xcode-27 # Apple Silicon; arm64 simulator (no Linux Docker).
     # This job cap sits above every step cap, and it must clear their SUM: a
     # job cap below it can SIGKILL a run whose every step is still inside its
     # own cap, and a job-cap death skips every `if: failure()` step, so the
@@ -162,6 +161,13 @@ jobs:
         id: checkout
         uses: actions/checkout@v6
 
+      # The image's default Xcode is not its newest; select the newest stable
+      # one, the Xcode release-build.yml archives TestFlight builds with.
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -178,7 +184,7 @@ jobs:
             haven-core
             tooling/e2e/local-relay
             tooling/logscan
-          key: e2e-ios-sim
+          key: e2e-ios-sim-xcode27
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The runtime log scanner, release-built ONCE, before Flutter and the
@@ -294,13 +300,13 @@ jobs:
 
       - name: Boot iOS simulator
         id: sim
-        # The macos-* runners have no GNU coreutils `timeout`, so this step's
+        # macOS runners have no GNU coreutils `timeout`, so this step's
         # only available bound is GitHub's — and it had none, meaning a sim
         # that never reaches Booted ran to the JOB cap and skipped every
         # if: always() diagnostic. Measured across 32 successful runs (ci.yml,
         # 2026-07/08) the boot takes 136-215 s; 15 min is ~4x the observed max.
         timeout-minutes: 15
-        run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 15"
+        run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 17"
 
       # `nick-fields/retry` absorbs the well-documented iOS-simulator
       # launch/attach flake (which presents as a HANG, not a fast fail).
