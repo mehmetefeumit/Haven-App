@@ -81,7 +81,7 @@ dependencies:
   # NOTE: This adds a COMPILED Android build-surface — the WorkManager Gradle
   # transitive dependency is pulled via workmanager_android. Validate with
   # android-build before merge (transitive AGP/Gradle conflict risk).
-  workmanager: ^0.9.0+3
+  workmanager: ^0.10.10
   # Square-locked crop / rotate editor shown AFTER the picker and BEFORE the
   # avatar is set. Native uCrop (Android) / TOCropViewController (iOS) — operates
   # on the picked file, needs no photo permission. Its output is re-run through
