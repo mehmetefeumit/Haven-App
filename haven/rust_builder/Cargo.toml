@@ -79,7 +79,7 @@ zbus-secret-service-keyring-store = { version = "0.3", features = ["crypto-rust"
 windows-native-keyring-store = "0.5"
 
 [target.'cfg(target_os = "android")'.dependencies]
-android-native-keyring-store = "0.5"
+android-native-keyring-store = "1.0"
 # Installed BEFORE flutter_rust_bridge's own android_logger (init_once is
 # first-call-wins via a shared OnceLock) so our per-target filter can drop the
 # `keyring_core` target, which logs raw DB-key bytes at DEBUG. Cargo unifies
