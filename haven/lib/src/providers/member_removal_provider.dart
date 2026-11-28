@@ -67,6 +67,11 @@ class MemberRemovalController extends Notifier<String?> {
   /// member's location first (see [_forgetLocationsOf]). A failed removal
   /// changed no state, so re-reading the roster would cost an FFI round trip
   /// to learn nothing.
+  ///
+  /// A success returns, and the row's in-flight marker clears, only once the
+  /// roster has been re-read: before that the list still holds the removed
+  /// member, and would show them, with Remove offered again, beside the
+  /// message that they are gone.
   Future<MemberRemovalOutcome> remove({
     required Circle circle,
     required String memberPubkeyHex,
@@ -96,6 +101,7 @@ class MemberRemovalController extends Notifier<String?> {
           ref
             ..invalidate(circlesProvider)
             ..invalidate(memberLocationsProvider);
+          await ref.read(circlesProvider.future);
           return MemberRemovalOutcome.removed;
       }
     } on Object catch (e) {
