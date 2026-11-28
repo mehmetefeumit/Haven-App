@@ -1179,7 +1179,7 @@ dependencies = [
  "haven-core",
  "haven-local-relay",
  "hex",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "image",
  "kamadak-exif",
  "keyring-core",
