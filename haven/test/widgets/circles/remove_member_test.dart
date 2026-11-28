@@ -85,11 +85,16 @@ void main() {
   });
 
   /// Pumps the sheet over [circle] with the member list expanded.
+  ///
+  /// [liveRoster] selects the circle by id, so the roster comes through the
+  /// same derivation (selectedCircleProvider -> circlesProvider) the app
+  /// uses; otherwise it is frozen at pump time.
   Future<MockCircleService> pumpSheet(
     WidgetTester tester, {
     required Circle circle,
     MockCircleService? service,
     Identity? identity,
+    bool liveRoster = false,
   }) async {
     final mockService = service ?? MockCircleService(circles: [circle]);
     final sheetController = DraggableScrollableController();
@@ -99,7 +104,10 @@ void main() {
       ProviderScope(
         overrides: [
           circleServiceProvider.overrideWithValue(mockService),
-          selectedCircleProvider.overrideWith((ref) => circle),
+          if (liveRoster)
+            selectedCircleIdProvider.overrideWith((ref) => circle.mlsGroupId)
+          else
+            selectedCircleProvider.overrideWith((ref) => circle),
           memberLocationsProvider.overrideWith((_) async => const []),
           identityProvider.overrideWith((_) async => identity ?? _identity()),
           displayNameProvider.overrideWith((_) async => 'Alice'),
@@ -271,48 +279,15 @@ void main() {
 
     testWidgets('a success removes the tile from the list the admin is '
         'looking at', (tester) async {
-      // Deliberately does NOT use pumpSheet's selectedCircleProvider
-      // override: that override freezes the roster at pump time, which
-      // would make this assertion pass or fail for a reason that has
-      // nothing to do with production wiring. Selecting via
-      // selectedCircleIdProvider instead exercises the SAME derivation
-      // (selectedCircleProvider -> circlesProvider) that
-      // member_removal_provider.dart's post-removal invalidate relies on.
-      final circle = _circle(selfIsAdmin: true);
-      final service = MockCircleService(circles: [circle]);
-      final sheetController = DraggableScrollableController();
-      addTearDown(sheetController.dispose);
-
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            circleServiceProvider.overrideWithValue(service),
-            selectedCircleIdProvider.overrideWith(
-              (ref) => circle.mlsGroupId,
-            ),
-            memberLocationsProvider.overrideWith((_) async => const []),
-            identityProvider.overrideWith((_) async => _identity()),
-            displayNameProvider.overrideWith((_) async => 'Alice'),
-          ],
-          child: MaterialApp(
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: Scaffold(
-              body: Stack(
-                children: [
-                  CirclesBottomSheet(
-                    onExpansionChanged: (_) {},
-                    controller: sheetController,
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
+      // A live roster: a frozen one would make this assertion pass or fail
+      // for a reason that has nothing to do with production wiring, since
+      // member_removal_provider.dart's post-removal invalidate reaches the
+      // list only through that derivation.
+      await pumpSheet(
+        tester,
+        circle: _circle(selfIsAdmin: true),
+        liveRoster: true,
       );
-      await tester.pumpAndSettle();
-      sheetController.jumpTo(0.85);
-      await tester.pumpAndSettle();
 
       expect(
         find.byKey(WidgetKeys.memberTile(_otherPubkey)),
@@ -334,6 +309,42 @@ void main() {
             'selectedCircleProvider must actually propagate that to the '
             'widget tree',
       );
+    });
+
+    testWidgets('the success is reported only once the list no longer '
+        'shows the member', (tester) async {
+      final service = await pumpSheet(
+        tester,
+        circle: _circle(selfIsAdmin: true),
+        liveRoster: true,
+      );
+      // The removal is applied; the roster re-read it triggers is held.
+      final reread = Completer<void>();
+      service.getVisibleCirclesGate = reread.future;
+
+      await tester.tap(find.byKey(WidgetKeys.memberRemoveButton(_otherPubkey)));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(WidgetKeys.memberRemoveConfirm));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byType(SnackBar),
+        findsNothing,
+        reason: 'the list still shows Bob until the roster is re-read, so a '
+            'success said now would sit beside the member it says is gone',
+      );
+      expect(
+        find.byKey(WidgetKeys.memberRemoveButton(_otherPubkey)),
+        findsNothing,
+        reason: "Bob's row keeps its progress rather than offering Remove "
+            'again for a member who is already out',
+      );
+
+      reread.complete();
+      await tester.pumpAndSettle();
+
+      expect(find.text('Removed Bob from the circle'), findsOneWidget);
+      expect(find.byKey(WidgetKeys.memberTile(_otherPubkey)), findsNothing);
     });
 
     testWidgets('a removal awaiting its relays is spoken once, with no snack',

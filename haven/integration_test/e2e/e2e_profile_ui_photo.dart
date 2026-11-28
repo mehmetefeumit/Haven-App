@@ -44,7 +44,9 @@ library;
 import 'dart:async' show StreamController;
 import 'dart:convert' show jsonDecode;
 import 'dart:io' show Directory, File, HttpClient;
+import 'dart:typed_data' show Uint8List;
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -69,8 +71,11 @@ import 'package:haven/src/services/nostr_circle_service.dart'
 import 'package:haven/src/test_keys.dart' show WidgetKeys;
 import 'package:haven/src/utils/log_alias.dart'
     show LogAliasClass, logAliasHandle, magnitudeBucket;
+import 'package:haven/src/widgets/identity/avatar.dart' show HavenAvatar;
 import 'package:haven/src/widgets/identity/display_name_card.dart'
     show DisplayNameCard;
+import 'package:haven/src/widgets/identity/identity_photo_header.dart'
+    show IdentityPhotoHeader;
 import 'package:integration_test/integration_test.dart';
 import 'package:path_provider/path_provider.dart'
     show getApplicationSupportDirectory;
@@ -677,9 +682,18 @@ Future<void> _cancelRound(
   );
 }
 
-/// A pick: `paused` (uCrop) then a later `resumed`; then the photo shows
-/// within [_applyBound], and the error SnackBar never, checked on every pump
-/// while the sidecar records the round.
+/// A pick: `paused` (uCrop) then a later `resumed`; then THIS round's photo
+/// shows, with the header's actions enabled again, within [_applyBound], and
+/// the error SnackBar never, checked on every pump while the sidecar records
+/// the round.
+///
+/// "This round's": a replacement round starts with the previous photo and its
+/// Remove already on screen, and a frame drawn while its own save is still
+/// running shows them disabled. The next tap lands on the last frame drawn,
+/// and nothing draws one during the relay waits that follow, so the round
+/// must end on a frame showing the new photo and enabled actions. Back-to-back
+/// rounds pick different cells, or the new photo could not be told from the
+/// old.
 Future<void> _pickRound(
   WidgetTester tester,
   _Lifecycle life,
@@ -689,6 +703,7 @@ Future<void> _pickRound(
   Finder tap, {
   required int cell,
 }) async {
+  final before = _shownPhoto(tester);
   final from = life.history.length;
   debugPrint('$_kArmMarker$round act=pick:$cell');
   await tester.tap(tap);
@@ -701,6 +716,8 @@ Future<void> _pickRound(
     from: from,
     what: 'round $round (pick): paused by uCrop, then resumed',
   );
+  // What the last frame checked lacked, in fixed words, for the failure.
+  var lacking = 'no frame checked';
   // Not eagerError: a failed photo check still waits for the record.
   await Future.wait<void>([
     _sidecarRecorded(files, round),
@@ -714,15 +731,56 @@ Future<void> _pickRound(
             'before the app was resumed while the MLS session was handed off.',
           );
         }
-        return _avatarButton(
+        final shown = _shownPhoto(tester);
+        if (shown == null ||
+            _avatarButton(
               l10n.photoHeaderViewPhotoSemantics,
-            ).evaluate().isNotEmpty &&
-            find.text(l10n.photoHeaderRemove).evaluate().isNotEmpty;
+            ).evaluate().isEmpty) {
+          lacking = 'no photo shown';
+        } else if (before != null && listEquals(shown, before)) {
+          lacking = 'the previous photo still shown';
+        } else if (!_enabled(l10n.photoHeaderEditPhoto) ||
+            !_enabled(l10n.photoHeaderRemove)) {
+          lacking = 'Edit photo or Remove disabled (the save still running)';
+        } else {
+          return true;
+        }
+        return false;
       },
       timeout: _applyBound,
-      description: 'round $round: the photo shown after the crop',
+      description: "round $round: this round's photo shown, actions enabled",
+    ).catchError(
+      (Object _) => throw TestFailure(
+        "[e2e_photo_ui] round $round: this round's photo was not shown with "
+        'the header actions enabled within ${_applyBound.inSeconds}s; the '
+        'last frame checked had $lacking.',
+      ),
+      test: (e) => e is StateError,
     ),
   ]);
+}
+
+/// The photo the Identity header is drawing, or null when it draws none.
+Uint8List? _shownPhoto(WidgetTester tester) {
+  final bytes = tester
+      .widget<HavenAvatar>(
+        find.descendant(
+          of: find.byType(IdentityPhotoHeader),
+          matching: find.byType(HavenAvatar),
+        ),
+      )
+      .imageBytes;
+  return bytes == null || bytes.isEmpty ? null : bytes;
+}
+
+/// Whether the one button labelled [label] is enabled.
+bool _enabled(String label) {
+  final button = find.ancestor(
+    of: find.text(label),
+    matching: find.byWidgetPredicate((w) => w is ButtonStyleButton),
+  );
+  return button.evaluate().length == 1 &&
+      (button.evaluate().single.widget as ButtonStyleButton).enabled;
 }
 
 /// Types [name] into the Identity page's field and saves it with the button.

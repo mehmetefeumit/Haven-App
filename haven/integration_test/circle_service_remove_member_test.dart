@@ -59,6 +59,7 @@ import 'e2e/_lib/app_lifecycle.dart';
 import 'e2e/_lib/circle_creation.dart'
     show createCircleDelivered, joinDeliveredWelcome;
 import 'e2e/_lib/driven_location.dart';
+import 'e2e/_lib/pump_helpers.dart' show pumpUntilFound;
 import 'e2e/_lib/test_user.dart';
 import 'e2e/_lib/throw_time_error_capture.dart';
 
@@ -852,7 +853,13 @@ void main() {
         await tester.tap(removeButton);
         await tester.pumpAndSettle();
         await tester.tap(find.byKey(WidgetKeys.memberRemoveConfirm));
-        await tester.pumpAndSettle();
+        // The removal runs on the real FFI and relay, past any frame
+        // pumpAndSettle would wait for: its outcome is what to wait on.
+        await pumpUntilFound(
+          tester,
+          find.byType(SnackBar),
+          description: 'the removal outcome SnackBar',
+        );
 
         // The engine is the authority, not the widget tree: re-read the
         // roster through the FFI rather than trusting the list to have
@@ -872,7 +879,8 @@ void main() {
               'applied a real Remove commit',
         );
 
-        // And the list the admin is looking at agrees.
+        // And the list the admin is looking at agrees, on the frame that
+        // reports the outcome.
         expect(
           find.byKey(WidgetKeys.memberTile(bobPubkeyHex)).evaluate().isEmpty,
           isTrue,

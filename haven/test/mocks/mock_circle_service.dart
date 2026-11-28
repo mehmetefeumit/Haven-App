@@ -87,9 +87,15 @@ class MockCircleService implements CircleService {
   /// which only records that the method fired.
   final List<String> decryptCallEventJsons = [];
 
+  /// When non-null, [getVisibleCircles] awaits this before answering, so a
+  /// test can hold a roster re-read open.
+  Future<void>? getVisibleCirclesGate;
+
   @override
   Future<List<Circle>> getVisibleCircles() async {
     methodCalls.add('getVisibleCircles');
+    final gate = getVisibleCirclesGate;
+    if (gate != null) await gate;
     if (shouldThrowOnGetCircles) {
       throw CircleServiceException(errorMessage);
     }
