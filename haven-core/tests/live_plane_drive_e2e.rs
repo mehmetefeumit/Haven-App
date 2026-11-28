@@ -4294,10 +4294,9 @@ async fn a_silent_relay_is_called_on_its_schedule_however_often_the_app_is_opene
 }
 
 /// The same, with real sessions: each visit is a session started on a
-/// foreground claim over the same stores, driven once in that foreground,
-/// waited for until no drive has a call out, and stopped. Two visits in one
-/// minute make one call, and a visit in a minute the relay is not due makes
-/// none.
+/// foreground claim over the same stores, driven by that claim and once
+/// more in that foreground, and stopped. Two visits in one minute make one
+/// call, and a visit in a minute the relay is not due makes none.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_sessions_started_one_after_another_keep_a_stored_records_schedule() {
     let (fx, _relay, url) = a_circle_on_a_local_relay().await;
@@ -4312,16 +4311,26 @@ async fn real_sessions_started_one_after_another_keep_a_stored_records_schedule(
     let mut called_at = Vec::new();
     for minute in [0_u64, 0, 1, 1, 2, 3, 4, 5] {
         scripted.clock.set(minute * 60 * SECOND_MS);
-        let core = scripted
-            .session(admin, &fx.group, &url, Claim::Foreground)
-            .await;
-        // Inline: the drive the claim asks for races the one the start
-        // asked for, which only finishes and so begins no first call.
-        core.processor().for_test().drive_due().await;
-        assert!(
-            held(|| async { core.processor().passes_under_way() == 0 }).await,
-            "a visit's drive never ended",
+        let core = LiveSyncCore::new_local_with_driver_for_test(
+            Arc::clone(&admin.circle),
+            scripted.driver(),
         );
+        // No REQ, so the start and the claim are all that ask for a drive. A
+        // claim that overtook the start's drive between its take and its
+        // call would take the relay twice for that one call: the start's
+        // drive ends first, as on a device that claims a moment later.
+        core.start(&[], &[]).await.expect("the session starts");
+        let drives = core.processor().for_test();
+        assert!(
+            drives.drives_ended(1, Duration::from_secs(10)).await,
+            "the start's drive never ended",
+        );
+        core.claim_foreground(Claim::Foreground).await;
+        assert!(
+            drives.drives_ended(2, Duration::from_secs(10)).await,
+            "the claim's drive never ended",
+        );
+        core.processor().for_test().drive_due().await;
         let _ = core.stop().await;
         for _ in scripted.transport.calls() {
             called_at.push(minute);

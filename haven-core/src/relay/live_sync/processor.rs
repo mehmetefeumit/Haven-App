@@ -714,6 +714,10 @@ pub struct EngineProcessor {
     /// its signal when that turn ends (tests only).
     #[cfg(any(test, feature = "test-utils"))]
     entry_pass_turn: (AtomicBool, Notify),
+    /// How many drives the drive task has ended, and its signal at each
+    /// (tests only).
+    #[cfg(any(test, feature = "test-utils"))]
+    drives_ended: (AtomicU64, Notify),
     /// Proposals staged in the foreground that no record could be written
     /// for, each awaiting its one publish by the next drive.
     unrecorded: Mutex<Vec<Event>>,
@@ -810,6 +814,8 @@ impl EngineProcessor {
             negentropy_steps: (AtomicUsize::new(0), AtomicUsize::new(0)),
             #[cfg(any(test, feature = "test-utils"))]
             entry_pass_turn: (AtomicBool::new(false), Notify::new()),
+            #[cfg(any(test, feature = "test-utils"))]
+            drives_ended: (AtomicU64::new(0), Notify::new()),
             unrecorded: Mutex::new(Vec::new()),
             drive_retry_after_ms: Mutex::new(None),
             drive_due_at_ms: Mutex::new(None),
@@ -1788,6 +1794,13 @@ impl EngineProcessor {
         self.entry_pass_turn.1.notify_waiters();
     }
 
+    /// The drive task ended a drive; tests only.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(super) fn note_drive_ended(&self) {
+        self.drives_ended.0.fetch_add(1, Ordering::SeqCst);
+        self.drives_ended.1.notify_waiters();
+    }
+
     /// Whether the session still serves `lifecycle` and has not been stopped:
     /// what a NIP-77 pass reads before each step that touches a relay or the
     /// engine.
@@ -2634,6 +2647,25 @@ impl SessionsPart<'_> {
         let deadline = Instant::now() + bound;
         loop {
             let notified = processor.entry_pass_turn.1.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if ended() {
+                return true;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return ended();
+            }
+        }
+    }
+
+    /// Waits, at most `bound`, until the drive task has ended `count` drives
+    /// in all, and answers whether it had.
+    pub async fn drives_ended(&self, count: u64, bound: Duration) -> bool {
+        let processor = self.0;
+        let ended = || processor.drives_ended.0.load(Ordering::SeqCst) >= count;
+        let deadline = Instant::now() + bound;
+        loop {
+            let notified = processor.drives_ended.1.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             if ended() {
