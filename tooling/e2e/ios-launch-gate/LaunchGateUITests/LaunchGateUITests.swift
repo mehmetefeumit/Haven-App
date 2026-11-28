@@ -7,7 +7,8 @@
 // Every label comes from the ARB of the build being driven, through the
 // runner's TEST_RUNNER_GATE_* environment, so a previous release is driven in
 // its own words. The display name is held in memory and compared, never
-// printed: a failure message names an ARB key or a step, nothing the app shows.
+// printed: a failure message names ARB keys, a step, the app's state and
+// whether it exposes any element or text, nothing the app shows.
 // Across the upgrade's two runs the name crosses only as a digest salted with a
 // value the runner never prints.
 
@@ -105,14 +106,14 @@ private final class Journey {
     func launch(_ step: String) throws {
         app.launch()
         guard app.wait(for: .runningForeground, timeout: Bound.launch) else {
-            throw GateFailure("the app did not reach the foreground within \(Int(Bound.launch)) s at \(step)")
+            throw GateFailure("the app did not reach the foreground within \(Int(Bound.launch)) s at \(step); \(seen())")
         }
     }
 
     func relaunchCold() throws {
         app.terminate()
         guard app.wait(for: .notRunning, timeout: Bound.launch) else {
-            throw GateFailure("the app did not stop within \(Int(Bound.launch)) s of terminate()")
+            throw GateFailure("the app did not stop within \(Int(Bound.launch)) s of terminate(); \(seen())")
         }
         try launch("the cold relaunch")
     }
@@ -120,22 +121,60 @@ private final class Journey {
     func requireForeground(_ step: String) throws {
         let state = app.state
         guard state == .runningForeground else {
-            throw GateFailure("the app is not running in the foreground (state \(state.rawValue)) at \(step)")
+            throw GateFailure("the app is not running in the foreground (state \(stateName(state))) at \(step)")
         }
     }
 
-    // One snapshot per observation: the keys whose label is a whole line of
-    // any element's label.
-    func visibleKeys() throws -> Set<Key> {
+    private func stateName(_ state: XCUIApplication.State) -> String {
+        switch state {
+        case .notRunning: return "notRunning"
+        case .runningBackgroundSuspended: return "runningBackgroundSuspended"
+        case .runningBackground: return "runningBackground"
+        case .runningForeground: return "runningForeground"
+        default: return "unknown(\(state.rawValue))"
+        }
+    }
+
+    // Every line of the labels below the app element (whose own label is the
+    // app's name), and how many elements there are.
+    private func scan(_ root: XCUIElementSnapshot) -> (lines: Set<String>, elements: Int) {
         var lines = Set<String>()
-        var stack: [XCUIElementSnapshot] = [try app.snapshot()]
+        var elements = 0
+        var stack = root.children
         while let node = stack.popLast() {
+            elements += 1
             for line in node.label.split(separator: "\n") {
                 lines.insert(String(line))
             }
             stack.append(contentsOf: node.children)
         }
-        return Set(labels.compactMap { lines.contains($0.value) ? $0.key : nil })
+        return (lines, elements)
+    }
+
+    private func keys(in lines: Set<String>) -> Set<Key> {
+        Set(labels.compactMap { lines.contains($0.value) ? $0.key : nil })
+    }
+
+    // One snapshot per observation: the keys whose label is a whole line of
+    // any element's label.
+    func visibleKeys() throws -> Set<Key> {
+        try keys(in: scan(app.snapshot()).lines)
+    }
+
+    // What a failure says about the screen: the ARB key names shown, whether
+    // the app exposes any element and any text (the launch screen, shown up
+    // to Flutter's first frame, has no text), and its state. Never a label:
+    // the screen holds the display name.
+    func seen() -> String {
+        let state = app.state
+        // An app that is not running has no screen to query.
+        guard state != .notRunning, state != .unknown, let root = try? app.snapshot() else {
+            return "on screen: no snapshot; app \(stateName(state))"
+        }
+        let (lines, elements) = scan(root)
+        let shown = keys(in: lines).map(\.rawValue).sorted().joined(separator: ", ")
+        let text = elements == 0 ? "no element" : lines.isEmpty ? "no labelled element" : "labelled elements"
+        return "on screen: keys [\(shown)], \(text); app \(stateName(state))"
     }
 
     // Returns as soon as any known label is on screen, or when `timeout` ends.
@@ -163,7 +202,7 @@ private final class Journey {
             object: app.descendants(matching: .any).matching(error).firstMatch)
         _ = XCTWaiter.wait(for: [shown], timeout: Bound.errorSettle)
         try failIfError(try visibleKeys(), at: "\(key.rawValue) shown again")
-        throw GateFailure("\(key.rawValue) was shown again after it was tapped: the journey did not progress")
+        throw GateFailure("\(key.rawValue) was shown again after it was tapped: the journey did not progress; \(seen())")
     }
 
     func tap(_ key: Key, remaining: TimeInterval) throws {
@@ -171,14 +210,14 @@ private final class Journey {
         if !target.isHittable {
             let hittable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true"), object: target)
             guard XCTWaiter.wait(for: [hittable], timeout: Bound.hittable) == .completed else {
-                throw GateFailure("\(key.rawValue) is shown but not hittable")
+                throw GateFailure("\(key.rawValue) is shown but not hittable within \(Int(Bound.hittable)) s; \(seen())")
             }
         }
         target.tap()
         let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: target)
         guard XCTWaiter.wait(for: [gone], timeout: min(Bound.progress, max(remaining, 1))) == .completed else {
             try failIfError(try visibleKeys(), at: "after tapping \(key.rawValue)")
-            throw GateFailure("the journey did not progress past \(key.rawValue) within \(Int(Bound.progress)) s")
+            throw GateFailure("the journey did not progress past \(key.rawValue) within \(Int(Bound.progress)) s; \(seen())")
         }
     }
 
@@ -205,7 +244,7 @@ private final class Journey {
             try requireForeground("the onboarding journey")
             let remaining = deadline.timeIntervalSinceNow
             guard remaining > 0 else {
-                throw GateFailure("no terminal screen within \(Int(Bound.journey)) s; tapped \(tapped.map(\.rawValue).sorted())")
+                throw GateFailure("no terminal screen within \(Int(Bound.journey)) s; tapped \(tapped.map(\.rawValue).sorted()); \(seen())")
             }
             awaitAnyKnown(remaining)
             try requireForeground("the onboarding journey")
@@ -213,7 +252,7 @@ private final class Journey {
             try failIfError(visible, at: "the onboarding journey")
             if visible.contains(.setupHeld) || visible.contains(.map) {
                 guard let held = name else {
-                    throw GateFailure("a terminal screen appeared before the create-identity screen was seen")
+                    throw GateFailure("a terminal screen appeared before the create-identity screen was seen; \(seen())")
                 }
                 return (visible.contains(.setupHeld) ? .setupHeld : .map, held)
             }
@@ -232,14 +271,14 @@ private final class Journey {
             try requireForeground(step)
             let remaining = deadline.timeIntervalSinceNow
             guard remaining > 0 else {
-                throw GateFailure("\(expected.rawValue) was not shown within \(Int(Bound.relaunch)) s at \(step)")
+                throw GateFailure("\(expected.rawValue) was not shown within \(Int(Bound.relaunch)) s at \(step); \(seen())")
             }
             awaitAnyKnown(remaining)
             try requireForeground(step)
             let visible = try visibleKeys()
             try failIfError(visible, at: step)
             if let wrong = forbidden.first(where: visible.contains) {
-                throw GateFailure("\(wrong.rawValue) was shown at \(step)")
+                throw GateFailure("\(wrong.rawValue) was shown at \(step); \(seen())")
             }
             if visible.contains(expected) { return }
         }
@@ -250,7 +289,7 @@ private final class Journey {
     func restoredName(matching accepts: @escaping (String?) -> Bool) throws -> String? {
         let fields = app.textFields
         guard fields.count == 1 else {
-            throw GateFailure("the create-identity screen shows \(fields.count) text fields after the relaunch, not one")
+            throw GateFailure("the create-identity screen shows \(fields.count) text fields after the relaunch, not one; \(seen())")
         }
         let field = fields.element(boundBy: 0)
         let restored = XCTNSPredicateExpectation(
@@ -259,12 +298,19 @@ private final class Journey {
         return field.value as? String
     }
 
+    // Whether the field was empty, never what it holds.
+    func failRestored(_ shown: String?) {
+        XCTFail("restored name differs: the field is \(shown?.isEmpty ?? true ? "empty" : "not empty") after \(Int(Bound.restore)) s; \(seen())")
+    }
+
+    // The held error shows only once this run's create CTA was tapped, and
+    // turns that CTA into Retry: at a relaunch it is a wrong screen.
     func awaitTerminalAfterRelaunch(_ terminal: Terminal, at step: String) throws {
         switch terminal {
         case .setupHeld:
-            try awaitScreen(.create, forbidden: [.welcome], at: step)
+            try awaitScreen(.create, forbidden: [.welcome, .setupHeld, .map], at: step)
         case .map:
-            try awaitScreen(.map, forbidden: [.welcome, .create], at: step)
+            try awaitScreen(.map, forbidden: [.welcome, .create, .setupHeld], at: step)
         }
     }
 }
@@ -283,7 +329,7 @@ final class LaunchGateUITests: XCTestCase {
         try journey.awaitTerminalAfterRelaunch(terminal, at: "the cold relaunch")
         if terminal == .setupHeld {
             let restored = try journey.restoredName { $0 == name }
-            XCTAssertTrue(restored == name, "restored name differs")
+            if restored != name { journey.failRestored(restored) }
         }
     }
 
@@ -321,8 +367,7 @@ final class LaunchGateUITests: XCTestCase {
         try journey.awaitTerminalAfterRelaunch(terminal, at: "the upgraded candidate's first launch")
         if terminal == .setupHeld {
             let restored = try journey.restoredName { shown in shown.map { saltedDigest($0, salt: salt) } == expected }
-            let digest = restored.map { saltedDigest($0, salt: salt) }
-            XCTAssertTrue(digest == expected, "restored name differs")
+            if restored.map({ saltedDigest($0, salt: salt) }) != expected { journey.failRestored(restored) }
         }
     }
 }

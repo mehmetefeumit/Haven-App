@@ -534,12 +534,27 @@ driven (`TEST_RUNNER_GATE_*`): the candidate's from the checked-out
 `locationDisclosureNotNow` for builds that show it); `onboardingFinishSetupError`
 ends it as SETUP_HELD and `commonSettings` as MAP;
 `onboardingCreateIdentityError` or `onboardingDisplayNameError` fails it at once,
-naming the key. Each step requires `app.state == .runningForeground`; each tap
+naming the key. After the cold relaunch and the upgrade, the wait for the
+terminal fails at once on a screen that cannot be it: Intro always; the held
+error or the map when the terminal was SETUP_HELD (a relaunch shows the create
+screen with its CTA back to `onboardingCreateIdentityCta`, since the error
+appears only after a tap); the create screen or the held error when it was
+MAP. Each step requires `app.state == .runningForeground`; each tap
 requires `isHittable` (the privacy blur would cover the screen otherwise). All
 waits are `waitForExistence`/predicate expectations under named bounds inside
 XCTest's 600 s per-test allowance; the runner bounds each xcodebuild run at
 900 s itself (macOS has no coreutils `timeout`). Locale is pinned with
 `-AppleLanguages (en) -AppleLocale en_US`.
+
+A failure that ends a wait, or finds a wrong screen, says after its reason what
+was on screen: `on screen: keys [<ARB keys shown>], <no element | no labelled
+element | labelled elements>; app <state>` (`on screen: no snapshot` when the
+app is not running), from one snapshot, naming keys only, never a label or the
+field's text. `keys [], no labelled element; app runningForeground` is a
+process in front that shows no text: the launch screen before Flutter's first
+frame, or a frame with none. A key list names the wrong screen. A restored
+name that differs says only whether the field was empty. The runner keeps a
+transcript line up to 640 characters, so the account reaches the summary whole.
 
 Offline, a current build ends every fresh install at SETUP_HELD: onboarding
 waits for the reachability publish (commit 2ee27b08), which cannot succeed
