@@ -179,7 +179,7 @@ subtle = "2.5"
 
 # Cryptography
 rand = "0.8"
-sha2 = "0.10"
+sha2 = "0.11"
 # Keyed PRF for the profile-plane relay assignment (HMAC-SHA256 rendezvous
 # weights, `profile::assignment`). Already present transitively at 0.12.1 via
 # openmls_rust_crypto / hkdf / pbkdf2, so naming it here unifies rather than
