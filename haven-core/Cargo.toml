@@ -86,7 +86,7 @@ transport-nostr-adapter = { git = "https://github.com/marmot-protocol/mdk", rev 
 # is deliberately NOT required. Kept at 0.7 so it stays ONE crate instance with
 # the platform store installed in rust_builder; `cargo tree -i keyring-core`
 # confirms a single version.
-keyring-core = "0.7"
+keyring-core = "1.0"
 
 # SQLite for local storage (circles-v2.db, tiles-v2.db, and — via
 # storage-sqlite — the MLS session-v2.sqlite). libsqlite3-sys is a
