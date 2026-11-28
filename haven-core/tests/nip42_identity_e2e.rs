@@ -1,13 +1,13 @@
 //! The identity's NIP-42 connections (`relay::identity`), against real and
 //! scripted relays behind a frame recorder.
 //!
-//! What is promised: an identity connection answers a relay's challenge with
-//! exactly the answer NIP-42 asks for, under the identity key and nothing
-//! else, and is then served what the relay gates — while the anonymous client
-//! on the same relay is not; it sends a signed event at most once after it
-//! authenticated, reads the outcome off the relay's own `OK` frames, carries
-//! no REQ when it is registered to write, and closes its socket whether its
-//! call finishes or is dropped mid-wait.
+//! What is promised: an identity connection answers a relay's challenge, and
+//! no second one, with exactly the answer NIP-42 asks for, under the identity
+//! key and nothing else, and is then served what the relay gates — while the
+//! anonymous client on the same relay is not; it sends a signed event at most
+//! once after it authenticated, reads the outcome off the relay's own `OK`
+//! frames, carries no REQ when it is registered to write, and closes its
+//! socket whether its call finishes or is dropped mid-wait.
 
 mod helpers;
 
@@ -22,15 +22,16 @@ use haven_core::relay::identity::{
 };
 use haven_core::relay::nip42::Nip42Signer;
 use haven_core::relay::recording_front::RecordingFront;
-use haven_core::relay::scripted_relay::{ScriptedRelay, Verdict};
+use haven_core::relay::scripted_relay::{Frame, ScriptedRelay, Verdict};
 use haven_core::relay::RelayManager;
 use helpers::{assert_no_needles, assert_some_line_from, capture_haven_log_here, haven_core_lines};
 use nostr::{
-    Event, EventBuilder, Filter, JsonUtil as _, Keys, Kind, PublicKey, RelayUrl, Tag, Timestamp,
+    ClientMessage, Event, EventBuilder, Filter, JsonUtil as _, Keys, Kind, PublicKey, RelayUrl,
+    SubscriptionId, Tag, Timestamp,
 };
 use nostr_relay_builder::builder::{RelayBuilder, RelayBuilderNip42, RelayBuilderNip42Mode};
 use nostr_relay_builder::LocalRelay;
-use nostr_sdk::pool::relay::ReqExitPolicy;
+use nostr_sdk::pool::relay::{RelayNotification, ReqExitPolicy};
 use nostr_sdk::Client;
 use tempfile::TempDir;
 
@@ -457,6 +458,64 @@ async fn a_send_dropped_mid_wait_still_closes_its_identity_socket() {
         .expect("the dropped call's identity connection was left open");
     assert_eq!(front.connections(), 1, "the identity client dialled again");
     assert_eq!(auth_frames(&front), 1, "the identity client answered again");
+}
+
+/// A connection answers one challenge, whatever the relay sends after it: a
+/// relay that challenges at every REQ and accepts every answer is answered
+/// once, and its second challenge fails inside the pool — so the pool, which
+/// resends a refused REQ after every `Authenticated`, can never resend twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_identity_connection_answers_one_challenge() {
+    let me = identity();
+    let relay = ScriptedRelay::start();
+    relay.accept_auth();
+    relay.answer(
+        |_| true,
+        vec![
+            Frame::Text(serde_json::json!(["AUTH", "scripted-challenge-0b7e"]).to_string()),
+            Frame::Closed("auth-required: sign in".to_owned()),
+        ],
+    );
+    let front = RecordingFront::start(relay.url());
+    let target = url(front.url());
+
+    let verdicts = with_identity_relay(
+        Arc::clone(&me.signer),
+        &target,
+        IdentityUse::Read,
+        |mut conn| async move {
+            let mut verdicts = Vec::new();
+            for id in ["first", "second"] {
+                conn.relay
+                    .send_msg(ClientMessage::req(SubscriptionId::new(id), Filter::new()))
+                    .expect("the REQ is handed to the socket");
+                let verdict = loop {
+                    match conn.notifications.recv().await {
+                        Ok(RelayNotification::Authenticated) => break true,
+                        Ok(RelayNotification::AuthenticationFailed) => break false,
+                        Ok(_) => {}
+                        Err(error) => panic!("the relay's notifications ended: {error}"),
+                    }
+                };
+                verdicts.push(verdict);
+            }
+            verdicts
+        },
+    );
+    let verdicts = tokio::time::timeout(budget(), verdicts)
+        .await
+        .expect("each challenge was neither answered nor refused")
+        .expect("the relay is dialled");
+
+    assert_eq!(
+        verdicts,
+        [true, false],
+        "the second challenge was answered: authenticated twice on one connection"
+    );
+    tokio::time::timeout(budget(), front.wait_closed(1))
+        .await
+        .expect("the identity connection is closed when its call returns");
+    the_one_answer(&front, 0, me.keys.public_key());
 }
 
 /// A write-only connection holds no READ flag, so it can carry no REQ; a

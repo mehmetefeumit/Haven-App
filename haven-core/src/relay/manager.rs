@@ -2528,7 +2528,11 @@ impl RelayManager {
     /// the connection authenticated it never resends, so the read sends its
     /// REQ once more under a new id. One second chance in all: a second such
     /// `CLOSED`, or a failed answer, is the relay's refusal, and a relay that
-    /// never challenges is one too. All of it within `req_timeout`.
+    /// never challenges is one too. All of it within `req_timeout`. The
+    /// connection answers one challenge (`Nip42Signer::answering_once`), so it
+    /// authenticates once and the pool's resend — which follows every
+    /// `Authenticated` — comes at most once: no third REQ, whatever the relay
+    /// asks after the read has ended.
     ///
     /// # Why an early exit sends its own `CLOSE`
     ///

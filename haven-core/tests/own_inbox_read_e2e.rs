@@ -272,7 +272,11 @@ async fn a_strfry_gated_inbox_is_read_after_its_wrapped_refusal() {
 
 /// A relay that refuses the read again after the answer to its challenge was
 /// accepted: `Refused` — the refusal an invitation there is out of reach by,
-/// not a read that did not finish — and the REQ is asked no third time.
+/// not a read that did not finish — and the REQ is asked no third time. The
+/// relay challenges at every REQ and accepts every answer, so it would be
+/// asked again if the connection answered a second challenge (the pool
+/// resends a refused REQ after every `Authenticated`); the frames are counted
+/// once the socket is closed, so nothing the client sent is left uncounted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_relay_that_refuses_after_authentication_is_refused() {
     let me = identity();
@@ -291,6 +295,9 @@ async fn a_relay_that_refuses_after_authentication_is_refused() {
     let read = RelayManager::read_own_inbox_per_relay(&me.signer, None, 10, &inbox).await;
 
     assert_eq!(read[0].inbox_read(), InboxRead::Refused);
+    tokio::time::timeout(helpers_budget(), front.wait_closed(1))
+        .await
+        .expect("the identity connection is closed when its read returns");
     let reqs = verbs_on(&front, 0)
         .into_iter()
         .filter(|(verb, _)| verb == "REQ")
@@ -300,6 +307,7 @@ async fn a_relay_that_refuses_after_authentication_is_refused() {
         !no_answer_on(&front, 0),
         "the read was refused without answering the challenge"
     );
+    the_one_answer(&front, 0, &me.keys);
 }
 
 /// The scaled wait every bounded await here gets.

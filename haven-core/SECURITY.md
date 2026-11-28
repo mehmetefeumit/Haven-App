@@ -547,8 +547,9 @@ or kind-445 resend only after the relay refused the anonymous send with
 
 - **The signer** (`relay/nip42.rs`, `Nip42Signer`) is built once, in
   `CircleManager::new`, from the keys the session already holds (Rules 7 and
-  9): the public key and the 32 secret bytes in a `Zeroizing` buffer,
-  `ZeroizeOnDrop`, and a `Debug` that renders neither. It signs a kind-22242
+  9): the public key and the 32 secret bytes in one `Zeroizing` buffer,
+  `ZeroizeOnDrop`, which the per-call connections' signers share and never
+  copy, and a `Debug` that renders neither. It signs a kind-22242
   event with empty content and exactly the `challenge` and `relay` tags
   `EventBuilder::auth` builds, under the identity key, and refuses every other
   event — another kind, content, a tag more, fewer or reordered, a relay URL
@@ -562,7 +563,18 @@ or kind-445 resend only after the relay refused the anonymous send with
 - **The per-call connections** (`relay/identity.rs`) hold one relay each,
   registered with the publish pool's options (no reconnect, no ping) for one
   direction only: a write connection holds no READ flag and cannot carry a
-  REQ, so no filter rides a retry socket. The call awaits the client's
+  REQ, so no filter rides a retry socket. Each answers one challenge: it
+  holds `Nip42Signer::answering_once`, a signer over the same key buffer
+  that signs its first answer and refuses every later one. The pool reports
+  `Authenticated` only after it signed an answer the relay accepted, and an
+  auto-closing REQ resends itself after every `Authenticated` once refused
+  with `auth-required:` (`nostr-relay-pool-0.44.3 relay/inner.rs:927-957`,
+  `:1553-1564`, `:1600-1609`), so a relay that challenges at every REQ could
+  otherwise draw a REQ for each answer; refused inside the pool's own call,
+  the bound holds whatever the scheduler does, and an own inbox read is asked
+  at most twice (`nip42_identity_e2e::an_identity_connection_answers_one_challenge`,
+  `own_inbox_read_e2e::a_relay_that_refuses_after_authentication_is_refused`).
+  The call awaits the client's
   shutdown before it returns; a call dropped mid-await is shut down by the
   pool's own last-handle destructor (`atomic_destructor`,
   `nostr-relay-pool-0.44.3 pool/inner.rs:41-46`), pinned by

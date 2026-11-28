@@ -1,4 +1,4 @@
-//! Per-call identity connections: one relay, one client that answers its
+//! Per-call identity connections: one relay, one client that answers one
 //! NIP-42 challenge, shut down on every path.
 //!
 //! Authentication is a property of a whole client in `nostr-relay-pool`
@@ -7,6 +7,12 @@
 //! registered with the publish pool's options (`reconnect(false)`, no ping) and
 //! for one direction only: a write-only relay can carry no REQ, so no filter
 //! ever rides an authenticated retry socket.
+//!
+//! The client holds `Nip42Signer::answering_once` and answers one challenge:
+//! the pool resends a REQ refused with `auth-required:` after every
+//! `Authenticated`, so a second answer would draw a third REQ from an own
+//! inbox read, which promises a relay refusing it after authentication one
+//! second chance.
 //!
 //! [`with_identity_relay`] awaits the client's shutdown before it returns, so
 //! the socket is closed when the call is over. A call dropped mid-await (a
@@ -70,8 +76,8 @@ pub struct IdentityRelay {
 }
 
 /// Runs `act` on `url`, connected through a fresh [`identity_client`] that holds
-/// that relay alone, for `direction` only, and shuts the client down
-/// afterwards.
+/// that relay alone, for `direction` only, answering one challenge, and shuts
+/// the client down afterwards.
 ///
 /// # Errors
 ///
@@ -90,7 +96,11 @@ where
     if !may_dial(url) {
         return Err(NotDialled);
     }
-    let client = identity_client(signer, ClientOptions::default(), None);
+    let client = identity_client(
+        Arc::new(signer.answering_once()),
+        ClientOptions::default(),
+        None,
+    );
     let result = async {
         client
             .pool()

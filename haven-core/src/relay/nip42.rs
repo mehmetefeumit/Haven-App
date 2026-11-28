@@ -14,6 +14,8 @@
 //! it is handed, and rebuilds the [`Keys`] for each signature only.
 
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use nostr::signer::SignerBackend;
 use nostr::util::BoxedFuture;
@@ -27,19 +29,30 @@ use zeroize::{ZeroizeOnDrop, Zeroizing};
 /// reach a log or an error string as it is (Security Rule 15).
 const REFUSED: &str = "the NIP-42 signer signs only a NIP-42 authentication event";
 
+/// A once-answering signer's refusal of every answer after its first; fixed
+/// text, as [`REFUSED`].
+const ANSWERED: &str = "the NIP-42 signer has answered its connection's one challenge";
+
 /// Signs the identity key's answer to a relay's NIP-42 challenge, and nothing
 /// else.
 ///
 /// Built by `CircleManager::new` from the session's identity keys and handed
 /// out as `CircleManager::nip42_signer()`; only `relay::verified::identity_client`
 /// installs it on a relay client (`check_engine_client_options.sh` check 11).
-#[derive(ZeroizeOnDrop)]
 pub struct Nip42Signer {
     /// The identity public key: every answer is signed under it, and an event
     /// naming another author is refused.
-    #[zeroize(skip)]
     public_key: PublicKey,
-    secret: Zeroizing<[u8; 32]>,
+    /// Shared by every [`Self::answering_once`] signer, never copied.
+    secret: Arc<Nip42Secret>,
+    /// `Some` on an [`Self::answering_once`] signer: whether it has answered.
+    answered: Option<AtomicBool>,
+}
+
+/// The identity's 32 secret bytes.
+#[derive(ZeroizeOnDrop)]
+struct Nip42Secret {
+    bytes: Zeroizing<[u8; 32]>,
 }
 
 impl Nip42Signer {
@@ -47,7 +60,29 @@ impl Nip42Signer {
     pub(crate) fn new(keys: &Keys) -> Self {
         Self {
             public_key: keys.public_key(),
-            secret: Zeroizing::new(keys.secret_key().to_secret_bytes()),
+            secret: Arc::new(Nip42Secret {
+                bytes: Zeroizing::new(keys.secret_key().to_secret_bytes()),
+            }),
+            answered: None,
+        }
+    }
+
+    /// This key, for a connection that answers one challenge: the first answer
+    /// is signed and every later one refused.
+    ///
+    /// The pool answers every challenge a relay sends, reports `Authenticated`
+    /// only after it signed an answer the relay accepted, and resends an
+    /// auto-closing REQ refused with `auth-required:` after every
+    /// `Authenticated` (`nostr-relay-pool-0.44.3 relay/inner.rs:927-957`,
+    /// `:1553-1564`, `:1600-1609`). Refused here, inside the pool's own call,
+    /// the bound holds whatever the scheduler does: one `Authenticated` on the
+    /// connection, so at most one resend.
+    #[must_use]
+    pub(crate) fn answering_once(&self) -> Self {
+        Self {
+            public_key: self.public_key,
+            secret: Arc::clone(&self.secret),
+            answered: Some(AtomicBool::new(false)),
         }
     }
 
@@ -86,8 +121,15 @@ impl Nip42Signer {
         if rebuilt.tags != unsigned.tags {
             return Err(SignerError::from(REFUSED));
         }
-        let secret =
-            SecretKey::from_slice(self.secret.as_ref()).map_err(|_| SignerError::from(REFUSED))?;
+        if self
+            .answered
+            .as_ref()
+            .is_some_and(|answered| answered.swap(true, Ordering::Relaxed))
+        {
+            return Err(SignerError::from(ANSWERED));
+        }
+        let secret = SecretKey::from_slice(self.secret.bytes.as_ref())
+            .map_err(|_| SignerError::from(REFUSED))?;
         rebuilt
             .sign_with_keys(&Keys::new(secret))
             .map_err(|_| SignerError::from(REFUSED))
@@ -358,9 +400,49 @@ mod tests {
         );
     }
 
+    /// One answer per connection, over the one key buffer: what a relay
+    /// asks after it is refused in fixed words, an event the signer refuses
+    /// anyway does not spend it, and the session's signer keeps answering.
+    #[tokio::test]
+    async fn a_once_answering_signer_signs_one_answer_over_the_same_key() {
+        let keys = Keys::generate();
+        let signer = Nip42Signer::new(&keys);
+        let once = signer.answering_once();
+        assert!(
+            Arc::ptr_eq(&signer.secret, &once.secret),
+            "the once-answering signer holds a copy of the key"
+        );
+        let mut other_kind = answer(keys.public_key());
+        other_kind.kind = Kind::TextNote;
+        other_kind.id = None;
+        refused(&once, other_kind, "another kind").await;
+
+        let first = once
+            .sign_event(answer(keys.public_key()))
+            .await
+            .expect("the first answer is signed");
+        assert!(first.verify().is_ok());
+        assert_eq!(first.pubkey, keys.public_key());
+        assert!(
+            once.sign_event(answer(keys.public_key())).await == Err(SignerError::from(ANSWERED)),
+            "a second answer was signed, or refused in words other than the fixed text"
+        );
+        for _ in 0..2 {
+            signer
+                .sign_event(answer(keys.public_key()))
+                .await
+                .expect("the session's signer answers every challenge");
+        }
+        signer
+            .answering_once()
+            .sign_event(answer(keys.public_key()))
+            .await
+            .expect("another connection answers its own challenge");
+    }
+
     #[test]
-    fn it_zeroizes_on_drop() {
+    fn its_key_zeroizes_on_drop() {
         const fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
-        assert_zeroize_on_drop::<Nip42Signer>();
+        assert_zeroize_on_drop::<Nip42Secret>();
     }
 }
