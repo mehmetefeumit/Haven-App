@@ -2046,6 +2046,17 @@ log-privacy gate vouched for and the workflow scanned again — never the
 | upgrade source unusable (4) | the previous release's simulator asset does not unpack to one simulator `Runner.app`, its ARB lacks a journey label, or it installs but does not onboard offline | yank the tag for `ios` in `scripts/ci/launch_gate_yanked_releases.txt` with a reason |
 | no predecessor (5, job GREEN with a `::notice::`) | no eligible release carries `app-ios-simulator.zip` and its `.sha256` yet | expected until the first release that attaches them; the fresh and relaunch legs still ran |
 
+Reading a product line: a wait that timed out or met a wrong screen ends
+`on screen: keys [<ARB keys>], <no element | no labelled element | labelled
+elements>; app <state>`. An empty key list with no labelled element and the
+app `runningForeground` means the process is in front and no text was drawn
+(the launch screen before Flutter's first frame, or a frame with none). A key
+list names the screen it
+reached instead (`onboardingFinishSetupError` at a relaunch: the held error
+came back; `commonSettings`: the map). `restored name differs: the field is
+empty` versus `not empty` tells a name that never arrived from one replaced by
+another value (docs/LAUNCH_GATE.md "The legs").
+
 ## Failure mode 28 — `e2e-relay-management`'s status target is red
 
 The last runner invocation of `Run relay-management tests on the emulator`

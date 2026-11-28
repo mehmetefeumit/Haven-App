@@ -394,6 +394,8 @@ for n, path in enumerate(sys.argv[1:], 1):
 # The transcript lines a summary may keep: test-case progress, XCTest failure
 # and xcodebuild error lines, the result banners and the terminal marker.
 # Paths are cut to their last component and UUIDs (the simulator's) dropped.
+# A line is cut at 640 characters: a failure names what was on screen after
+# its reason (LaunchGateUITests.swift `seen()`), up to about 510 in all.
 transcript_lines() { # <transcript>
   python3 -I -c '
 import re, sys
@@ -408,7 +410,7 @@ with open(sys.argv[1], encoding="utf-8", errors="replace") as f:
             continue
         if keep.search(line) or (tail and line.startswith("\t")):
             tail = line.startswith("Testing failed:") or (tail and line.startswith("\t"))
-            print("  | " + uuid.sub("<uuid>", path.sub(r"\1", line))[:300])
+            print("  | " + uuid.sub("<uuid>", path.sub(r"\1", line))[:640])
         else:
             tail = False
 ' "$1"
@@ -629,7 +631,7 @@ for devs in json.load(sys.stdin)["devices"].values():
 # ---------------------------------------------------------------------------
 run_self_test() {
   local tmp ran=0 fail=0
-  local -r SELF_TEST_FIXTURES=40
+  local -r SELF_TEST_FIXTURES=41
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '${tmp}' '${OUT_DIR}'" RETURN
@@ -684,14 +686,18 @@ case "${method}" in
     echo "LAUNCH-GATE-TERMINAL SETUP_HELD"
     echo "LAUNCH-GATE-NAME-DIGEST ${FAKE_DIGEST:-$(printf 'ab%.0s' {1..32})}" ;;
 esac
-if [[ "${mode}" == fail || "${mode}" == crash ]]; then
+if [[ "${mode}" == fail || "${mode}" == crash || "${mode}" == screen ]]; then
   if [[ "${mode}" == crash ]]; then
     { printf '{"bug_type":"309","app_name":"Runner","timestamp":"2026-11-14 10:00:01.00 +0000"}\n'
       printf '{"procPath":"/Users/runner/Library/Developer/CoreSimulator/Devices/%s-EF0123456789/data/Containers/Bundle/Application/X/Runner.app/Runner","pid":4242,"exception":{"type":"EXC_CRASH","signal":"SIGABRT"},"faultingThread":0,"threads":[{"frames":[{"imageIndex":0,"symbol":"__pthread_kill"},{"imageIndex":1,"symbol":"rust_panic"}]}],"usedImages":[{"name":"libsystem_kernel.dylib","path":"/usr/lib/system/libsystem_kernel.dylib"},{"path":"/Users/runner/x/rust_lib_haven.framework/rust_lib_haven"}]}\n' 'ABCDEF01-2345-6789-ABCD'
     } >"${FAKE_DIAG}/Runner-2026-11-14-100001.ips"
     printf '{"bug_type":"409"}\n{}\n' >"${FAKE_DIAG}/Runner-2026-11-14-100002.ips"
   fi
-  printf "/Users/runner/work/Haven-App/tooling/e2e/ios-launch-gate/LaunchGateUITests/LaunchGateUITests.swift:120: error: -[LaunchGateUITests.LaunchGateUITests %s] : failed: caught error: \"the app showed onboardingCreateIdentityError at the onboarding journey\"\n" "${method}"
+  if [[ "${mode}" == screen ]]; then
+    printf "/Users/runner/work/Haven-App/tooling/e2e/ios-launch-gate/LaunchGateUITests/LaunchGateUITests.swift:274: error: -[LaunchGateUITests.LaunchGateUITests %s] : failed: caught error: \"onboardingCreateIdentityCta was not shown within 90 s at the upgraded candidate's first launch; on screen: keys [commonSettings, locationDisclosureNotNow, onboardingCreateIdentityCta, onboardingCreateIdentityError, onboardingDisplayNameError, onboardingFinishSetupError, onboardingWelcomeCta], labelled elements; app runningBackgroundSuspended\"\n" "${method}"
+  else
+    printf "/Users/runner/work/Haven-App/tooling/e2e/ios-launch-gate/LaunchGateUITests/LaunchGateUITests.swift:120: error: -[LaunchGateUITests.LaunchGateUITests %s] : failed: caught error: \"the app showed onboardingCreateIdentityError at the onboarding journey\"\n" "${method}"
+  fi
   printf "Test Case '-[LaunchGateUITests.LaunchGateUITests %s]' failed (3.000 seconds).\n" "${method}"
   printf '** TEST EXECUTE FAILED **\n'
   exit 65
@@ -994,6 +1000,11 @@ EOF2
   # (13) The upgraded candidate fails: product.
   _run FAKE_XCB_UPGRADE_MODE=fail
   _case "a candidate failing after the upgrade is a product failure" 1 'failed after the upgrade from v0.1.20'
+  # (13a) A failed wait's account of the screen reaches the summary whole,
+  #       however many keys it names.
+  _run FAKE_XCB_UPGRADE_MODE=screen
+  _case "a failed wait keeps what was on screen, uncut" 1 \
+    '^  \| LaunchGateUITests\.swift:274: error: .* at the upgraded candidate.s first launch; on screen: keys \[commonSettings, .*, onboardingWelcomeCta\], labelled elements; app runningBackgroundSuspended"$'
 
   # (13b) Infrastructure, not the source's fault: the simulator refuses the
   #       source's install, or the keychain cannot be reset.
