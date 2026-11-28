@@ -5,7 +5,7 @@
 # Runs ONE drive target (haven/integration_test/ios_bg_publish_test.dart) on a
 # booted simulator and, MID-DRIVE, backgrounds the app for real by launching
 # another app (com.apple.Preferences) over it — so iOS itself fires
-# `applicationDidEnterBackground` and the Flutter engine dispatches the paused
+# `sceneDidEnterBackground` and the Flutter engine dispatches the paused
 # lifecycle state through the same channel a production backgrounding uses.
 # No other lane does this: B7 and the Android B1 lane dispatch the lifecycle
 # event IN-PROCESS, which runs the app's own paused branch but never the OS's
@@ -2778,7 +2778,7 @@ echo "bg-publish — handshake signal: ${SIGNAL_NAME} under ${APP_DATA_ROOT}" \
      "(any container; stale copies cleared)"
 
 # bgp_background_app — the REAL background transition: launch Preferences
-# over Haven so iOS fires applicationDidEnterBackground. The prior terminate
+# over Haven so iOS fires sceneDidEnterBackground. The prior terminate
 # is best-effort hygiene (a leftover Preferences from an earlier attempt
 # would make the launch a no-op foregrounding of an already-front app).
 # Returns non-zero when the launch itself failed.

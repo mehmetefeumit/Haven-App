@@ -722,7 +722,7 @@ check_native_stream_handler() { # <HavenLocationStreamHandler.swift>
     lfail "allowsBackgroundLocationUpdates is assigned something other than the derived allowsBg (onListen) or false (onCancel) in $(basename "$sh"): ${bad_bg}"
   fi
   grep -qE 'applicationState == \.background' <<<"$onlisten" ||
-    lfail "onListen no longer refuses a start while applicationState == .background — iOS rejects a background-capable start issued from the background, and a refused start is indistinguishable from a running one until peers stop receiving. The test must be '== .background', never '!= .active': Flutter's 'resumed' is delivered from applicationDidBecomeActive, so a legitimate foreground start can land while UIKit still reports .inactive"
+    lfail "onListen no longer refuses a start while applicationState == .background — iOS rejects a background-capable start issued from the background, and a refused start is indistinguishable from a running one until peers stop receiving. The test must be '== .background', never '!= .active': Flutter's 'resumed' follows UIKit's did-become-active notification, so a legitimate foreground start can land while UIKit still reports .inactive"
   if grep -qE 'applicationState *!= *\.active' <<<"$onlisten"; then
     lfail "onListen tests applicationState != .active — that refuses legitimate foreground starts delivered while UIKit is still .inactive (the instant Flutter reports 'resumed'), silently leaving the app with no location session at all"
   fi
@@ -1259,7 +1259,8 @@ check_arm_tier_policy() { # <HavenBackgroundSessionHandler.swift>
   # backgrounded: a WIU->Always upgrade delivered in the background (the
   # authorization delegate DOES fire there) would otherwise drop the only
   # keep-alive the process has, while its replacement cannot start outside the
-  # foreground. The AppDelegate's foreground re-arm performs it later.
+  # foreground. The scene's foreground re-arm (AppDelegate.sceneWillEnterForeground)
+  # performs it later.
   local drop_block
   drop_block="$(brace_block 'else if UIApplication.shared.applicationState != .background' <<<"$arm_body")"
   if [[ -z "$drop_block" ]]; then
@@ -2419,7 +2420,7 @@ check_scene_hops() { # <SceneDelegate.swift> <AppDelegate.swift>
   top="$(stmt_lines <<<"$connect")"
   l_win="$(stmt_at 'self\.window = window$' <<<"$top")"
   l_super="$(stmt_at 'super\.scene\(' <<<"$top")"
-  if ! grep -qF 'willConnectTo' <<<"$connect" || [[ -z "$l_win" || -z "$l_super" ]] ||
+  if [[ -z "$l_win" || -z "$l_super" ]] ||
     (( l_win >= l_super )) || [[ -z "$(stmt_at 'window\.rootViewController = appDelegate\.flutterViewController$' <<<"$top")" ]]; then
     lfail "SceneDelegate.scene(_:willConnectTo:options:) no longer sets the window's root to appDelegate.flutterViewController and assigns self.window (line ${l_win:-none}) before super (line ${l_super:-none}) — super registers the root controller's engine with the scene, and finding none it forwards the scene's events to no engine"
   fi
@@ -2459,8 +2460,7 @@ check_one_engine() { # <Runner dir> <Info.plist> <project.pbxproj>
   for f in "$dir"/*.swift; do n=$(( n + $(code_view "$f" | grep -cF 'FlutterViewController(' || true) )); done
   view="$(code_view "$ad")"
   kept="$(brace_block 'lazy var flutterViewController: FlutterViewController = {' <<<"$view")"
-  if [[ "$n" != "1" ]] || ! grep -qE 'lazy +var +flutterViewController *: *FlutterViewController *= *\{' <<<"$view" ||
-    ! grep -qE 'FlutterViewController\(engine: *(self\.)?flutterEngine,' <<<"$kept"; then
+  if [[ "$n" != "1" ]] || ! grep -qE 'FlutterViewController\(engine: *(self\.)?flutterEngine,' <<<"$kept"; then
     lfail "FlutterViewController( must be constructed exactly once (found ${n}), in AppDelegate's lazy stored flutterViewController, on flutterEngine — a controller built without that engine starts its own, and one built per scene is freed with the scene, sending Dart 'detached' in a process still sharing"
   fi
   local sig call
@@ -3104,7 +3104,7 @@ fi
 # hide under the slack.
 # ---------------------------------------------------------------------------
 self_test() {
-  local -r SELF_TEST_FIXTURES=366
+  local -r SELF_TEST_FIXTURES=368
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -6719,6 +6719,11 @@ P3_PROVEN_BY_HOST=1" "${p3_probe}" "${p3_drive}" "${p3_constants}"
       self?.noteLocationLaunch()
     }
 ' '')"
+  _relaunch 'location launch: noted at launch instead of by the hook' 1 \
+    "$(_lit "$(_lit "${fx_ad}" '      self?.noteLocationLaunch()' '      self?.backgroundSessionHandler.arm()')" '    backgroundSessionHandler.arm()
+    return result' '    backgroundSessionHandler.arm()
+    noteLocationLaunch()
+    return result')"
   _relaunch 'location launch: the hook wired in a branch' 1 \
     "$(_lit "$(_lit "${fx_ad}" '    slcHandler.onLocationEvent = { [weak self] in' '    if HavenBackgroundSessionHandler.resumeConsented() {
     slcHandler.onLocationEvent = { [weak self] in')" '      self?.noteLocationLaunch()
@@ -6756,6 +6761,10 @@ P3_PROVEN_BY_HOST=1" "${p3_probe}" "${p3_drive}" "${p3_constants}"
   _relaunch 'location launch: the foreground no longer seen' 1 \
     "$(_lit "${fx_ad}" '    foregroundSeen = true
 ' '')"
+  _relaunch 'location launch: the foreground marked seen at launch instead' 1 \
+    "$(_lit "$(_lit "${fx_ad}" '    foregroundSeen = true
+' '')" '    bgTaskHandler.registerBGTask()' '    bgTaskHandler.registerBGTask()
+    foregroundSeen = true')"
   _relaunch 'location launch: the first foreground keeps the fact' 1 \
     "$(_lit "${fx_ad}" '    locationStreamHandler.launchedForLocation = false
 ' '')"
@@ -6883,8 +6892,8 @@ P3_PROVEN_BY_HOST=1" "${p3_probe}" "${p3_drive}" "${p3_constants}"
   _engine 'one engine: the controller on an engine of its own' 1 \
     "$(_lit "${fx_ad}" 'FlutterViewController(engine: self.flutterEngine, nibName: nil, bundle: nil)' 'FlutterViewController(project: nil, nibName: nil, bundle: nil)')" \
     "${fx_sd}" "${fx_plist}" "${fx_pbx}"
-  _engine 'one engine: the registrar answered by FlutterAppDelegate' 1 \
-    "$(_lit "${fx_ad}" '    flutterEngine.registrar(forPlugin: pluginKey)' '    super.registrar(forPlugin: pluginKey)')" \
+  _engine 'one engine: the registrar answered by FlutterAppDelegate first' 1 \
+    "$(_lit "${fx_ad}" '    flutterEngine.registrar(forPlugin: pluginKey)' '    super.registrar(forPlugin: pluginKey) ?? flutterEngine.registrar(forPlugin: pluginKey)')" \
     "${fx_sd}" "${fx_plist}" "${fx_pbx}"
   _engine 'one engine: the hasPlugin override gone' 1 \
     "$(_lit "${fx_ad}" '  override func hasPlugin(_ pluginKey: String) -> Bool {
@@ -7143,4 +7152,4 @@ if [[ "$FAILED" -ne 0 ]]; then
   echo "iOS background publish guard FAILED — see failures above." >&2
   exit 1
 fi
-echo "OK: iOS background publish invariants hold (plist mode, one stream boundary per platform, toggle-keyed iOS route with a background branch that cannot fall through to the one-shot, native owner's session shape + two accuracy tiers + sink-only refusals + transient-error filter + only-Best cache in all three copies, bounded anchor staleness in both the controller and the serving path, fail-closed background-launch provider guard, C4 watcher + its opt-out release issued on every path, burst plane entered only from the running process and native wakes with one receive-only door into Dart, presence-only logs, tier-based session/indicator policy with a session-scoped confirmation and an unconditional disarm, AppDelegate wiring order, unfaked bg-publish drive, background-capable stream established before the drive backgrounds the app, P2c's receive oracle read from the subscription count and never from the paused flag and P2d's from the persisted last-known store, each with its terminal proof printed after the assertion it stands for, relaunch region coupled to SLC at 200 m (500 m without the current consent) with a monotonic five-minute catch-up floor stamped only when Dart answered, a background-launch start gate refusing every background start but a location relaunch's under Always and the current disclosure, with one Dart start site and one consent predicate across Swift and Dart, stream and network-change handlers compiled into the Xcode project, every leg's drive Timeout inside its own per-attempt retry deadline, one poll-path receive cadence across the product and the drive, the poll path's sweep declaring itself a background wake so the C3 consent chokepoint applies, every poll leg held at the when-in-use grant P2d's attribution depends on, and P3's settle window measured by the same numbers from both sides with a host-side wire oracle that outlives the app, two controls it cannot read nothing through — one that the relay answers at all, one that it still serves the kind the window is read for — and a completion-gate excuse of exactly two markers from exactly one source)."
+echo "OK: iOS background publish invariants hold (plist mode, one stream boundary per platform, toggle-keyed iOS route with a background branch that cannot fall through to the one-shot, native owner's session shape + two accuracy tiers + sink-only refusals + transient-error filter + only-Best cache in all three copies, bounded anchor staleness in both the controller and the serving path, fail-closed background-launch provider guard, C4 watcher + its opt-out release issued on every path, burst plane entered only from the running process and native wakes with one receive-only door into Dart, presence-only logs, tier-based session/indicator policy with a session-scoped confirmation and an unconditional disarm, AppDelegate wiring order on the one engine's messenger every launch reaches, scene callbacks routed to the app delegate with super, one engine and one kept controller with no storyboard and one scene, a main-queue BGTask handler, unfaked bg-publish drive, background-capable stream established before the drive backgrounds the app, P2c's receive oracle read from the subscription count and never from the paused flag and P2d's from the persisted last-known store, each with its terminal proof printed after the assertion it stands for, relaunch region coupled to SLC at 200 m (500 m without the current consent) with a monotonic five-minute catch-up floor stamped only when Dart answered, a background-launch start gate refusing every background start but a location launch's — the first location event before any scene came to the front, once per process — under Always and the current disclosure, with one Dart start site and one consent predicate across Swift and Dart, stream and network-change handlers and the scene delegate compiled into the Xcode project, every leg's drive Timeout inside its own per-attempt retry deadline, one poll-path receive cadence across the product and the drive, the poll path's sweep declaring itself a background wake so the C3 consent chokepoint applies, every poll leg held at the when-in-use grant P2d's attribution depends on, and P3's settle window measured by the same numbers from both sides with a host-side wire oracle that outlives the app, two controls it cannot read nothing through — one that the relay answers at all, one that it still serves the kind the window is read for — and a completion-gate excuse of exactly two markers from exactly one source)."

@@ -101,14 +101,16 @@
 #   iOS app-switcher blur             scripts/ci/check_ios_privacy_blur.sh
 #     The iOS half of the same protection. iPhone cannot block capture, so
 #     what Haven does there is blur the app-switcher preview — six lines of
-#     AppDelegate.swift that were backed by nothing at all. Delete them and
-#     every other gate stays green. Union: installed on
-#     applicationWillResignActive (the switcher card is on screen while the
-#     app is still FOREGROUND, so didEnterBackground is too late), covering
-#     the window with a real .systemMaterial blur, removed and re-armed only on
-#     applicationDidBecomeActive, and no UIApplicationSceneManifest in
-#     Info.plist (adopting scenes stops UIKit calling any of those callbacks,
-#     leaving every other link intact and executing never).
+#     SceneDelegate.swift that were backed by nothing at all. Delete them and
+#     every other gate stays green. Union: installed on sceneWillResignActive
+#     (the switcher card is on screen while the scene is still FOREGROUND, so
+#     didEnterBackground is too late), covering the scene's window with a real
+#     .systemMaterial blur, removed and re-armed only on sceneDidBecomeActive,
+#     both after super; Info.plist's UIApplicationSceneManifest routes the one
+#     application scene to $(PRODUCT_MODULE_NAME).SceneDelegate (without it an
+#     Xcode 27 build does not launch; with another delegate the blur never
+#     runs), and no blur or application* lifecycle override is left on the
+#     app delegate, where UIKit no longer calls them.
 #
 #   Background-wake invariants        scripts/ci/check_m7_native_wake_guards.sh
 #     Static correctness invariants of the Android WorkManager + iOS
@@ -158,7 +160,11 @@
 #     diagnostics observer re-running the policy rather than only setting a
 #     flag, and `disarm()` UNCONDITIONAL. Plus the C4 disable-while-paused
 #     watcher and its opt-out release, presence-only location logging, the
-#     AppDelegate wiring ORDER, the relaunch region coupled to SLC, and the
+#     AppDelegate wiring ORDER on the one engine's messenger every launch
+#     reaches, the location-launch rule (first location event before any scene
+#     came to the front), the scene-to-app-delegate hops with super, one engine
+#     and one kept controller with no storyboard and one scene, the main-queue
+#     BGTask handler, the relaunch region coupled to SLC, and the
 #     four project.pbxproj references without which the Swift file compiles
 #     nowhere and fails as a MissingPluginException Dart reads as "no native
 #     handler". Its `--self-test` runs as its own step: NO Swift unit test runs

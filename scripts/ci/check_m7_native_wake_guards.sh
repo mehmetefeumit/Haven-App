@@ -1341,10 +1341,6 @@ SWIFT
 check_stream_handler_no_publish() { # <HavenLocationStreamHandler.swift>
   local sh="$1" view surface admitted notify
   view="$(code_view "$sh")"
-  if [[ -z "${view//[[:space:]]/}" ]]; then
-    fail "check 13: $(basename "$sh") holds no code to scan"
-    return 1
-  fi
   surface="$(grep -nE 'URLSession|URLRequest|NWConnection|NWListener|NWBrowser|CFStream|URLSessionWebSocketTask|invokeMethod\(' <<<"$view" |
     grep -vE '^[0-9]+: *channel\?\.invokeMethod\("locationLaunch", arguments: nil\)$' || true)"
   admitted="$(grep -cE '^ *channel\?\.invokeMethod\("locationLaunch", arguments: nil\)$' <<<"$view" || true)"
@@ -1393,22 +1389,17 @@ check_background_rearm() { # <AppDelegate.swift> <SceneDelegate.swift>
     { d = depth; lfree = literal_free($0); depth += gsub(/[{]/, "&", lfree) - gsub(/[}]/, "&", lfree)
       if (d == 1) { t = $0; sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t); print t } }'; }
   hook="$(fn_slice 'func sceneDidEnterBackground()' "$1" | _depth1)"
-  if [[ -z "$hook" ]]; then
-    fail "14i: AppDelegate has no sceneDidEnterBackground() — the iOS one-launch arming lag (A3) is not closed"
-    rc=1
-  else
-    grep -qxF 'slcHandler.startMonitoring()' <<<"$hook" ||
-      { fail "14i: AppDelegate.sceneDidEnterBackground() does not re-arm SLC (slcHandler.startMonitoring()) at its own statement depth"; rc=1; }
-    grep -qxF 'bgTaskHandler.scheduleNextCatchup()' <<<"$hook" ||
-      { fail "14i: AppDelegate.sceneDidEnterBackground() does not re-arm the BGTask (bgTaskHandler.scheduleNextCatchup()) at its own statement depth"; rc=1; }
-  fi
+  grep -qxF 'slcHandler.startMonitoring()' <<<"$hook" ||
+    { fail "14i: AppDelegate.sceneDidEnterBackground() is missing or does not re-arm SLC (slcHandler.startMonitoring()) at its own statement depth — the iOS one-launch arming lag (A3) is not closed"; rc=1; }
+  grep -qxF 'bgTaskHandler.scheduleNextCatchup()' <<<"$hook" ||
+    { fail "14i: AppDelegate.sceneDidEnterBackground() is missing or does not re-arm the BGTask (bgTaskHandler.scheduleNextCatchup()) at its own statement depth — the iOS one-launch arming lag (A3) is not closed"; rc=1; }
   hop="$(fn_slice 'override func sceneDidEnterBackground(' "$2" | _depth1)"
   grep -qxF 'appDelegate.sceneDidEnterBackground()' <<<"$hop" ||
     { fail "14i: SceneDelegate.sceneDidEnterBackground no longer reaches the app delegate's re-arm (appDelegate.sceneDidEnterBackground() at its own statement depth) — UIKit sends the backgrounding to the scene only, so A3 would never run"; rc=1; }
   return "$rc"
 }
 
-EXPECTED_NATIVE_FIXTURES=17
+EXPECTED_NATIVE_FIXTURES=18
 
 native_self_test() {
   local tmp fails=0 checked=0
@@ -1468,8 +1459,9 @@ native_self_test() {
     channel?.invokeMethod(\"locationLaunch\", arguments: nil)}"
   _native_case 'stream handler: the nudge gone FAILS' 1 "$check" \
     "$f=${stream/    channel?.invokeMethod(\"locationLaunch\", arguments: nil)/    _ = channel}"
-  _native_case 'stream handler: the nudge sent from outside notifyLocationLaunch FAILS' 1 "$check" \
-    "$f=${stream/    channel.setMethodCallHandler \{ call, result in result(nil) \}/    channel.setMethodCallHandler \{ call, result in result(nil) \}
+  local moved="${stream/    channel?.invokeMethod(\"locationLaunch\", arguments: nil)/    _ = channel}"
+  _native_case 'stream handler: the nudge moved out of notifyLocationLaunch FAILS' 1 "$check" \
+    "$f=${moved/    channel.setMethodCallHandler \{ call, result in result(nil) \}/    channel.setMethodCallHandler \{ call, result in result(nil) \}
     channel?.invokeMethod(\"locationLaunch\", arguments: nil)}"
 
   local scene='class SceneDelegate: FlutterSceneDelegate {
@@ -1486,6 +1478,8 @@ native_self_test() {
 }'
   check=check_scene_delegate_holds_no_handler f=SceneDelegate.swift
   _native_case 'scene delegate: today'"'"'s tree passes' 0 "$check" "$f=${scene}"
+  _native_case 'scene delegate: a file with no SceneDelegate class FAILS' 1 "$check" \
+    "$f=${scene/class SceneDelegate:/class RunnerSceneDelegate:}"
   _native_case 'scene delegate: a held handler FAILS' 1 "$check" \
     "$f=${scene/  private var privacyBlurView/  private let slcHandler = AppDelegate.sharedSLC
   private var privacyBlurView}"

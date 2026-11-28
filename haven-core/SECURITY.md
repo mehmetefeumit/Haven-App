@@ -3663,7 +3663,7 @@ rather than by the app being open — the owner's
 decision, disclosed in the consent dialog and the settings intro. Whether iOS
 relaunches an app the user force-quit, how long a session started from the
 background keeps the process executable, and what a relaunch costs in battery
-are device-only and DEFERRED (`docs/M7_BACKGROUND_SHARING.md` §6 items 2–2l;
+are device-only and DEFERRED (`docs/M7_BACKGROUND_SHARING.md` §6 items 2–2r;
 the cost is ESTIMATED in `docs/POWER_EFFICIENCY_PLAN.md` §6.5a).
 
 **Android: resume after a reboot or an app update (owner-directed 2026-11-26,
