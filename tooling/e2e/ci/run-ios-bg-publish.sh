@@ -164,7 +164,11 @@
 # ~30 s on, and RunningBoard terminated the process for not invalidating it
 # (OS_REASON_RUNNINGBOARD 0x2182bad2 — no jetsam, no crash report, no
 # watchdog; the assertion nobody ended is the DEBUG Flutter engine's own
-# "Flutter debug task", which UIKit warns about in every run of this lane).
+# "Flutter debug task", which UIKit warned about in every run of this lane
+# before 2026-11-28). Since the UIScene migration (2026-11-28) the engine
+# starts that task only in an app with no scene delegate, so a debug app that
+# drops its last location claim is suspended ~1 s later instead of killed
+# ~30 s later; the relay-side oracle below holds either way.
 # A healthy product therefore REACHES that outcome — it is the privacy-best
 # outcome — and it used to end the lane on "P3 was neither proved nor
 # disproved", an indeterminate result reported as a failure.

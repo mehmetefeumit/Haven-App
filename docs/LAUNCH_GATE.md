@@ -480,7 +480,8 @@ Every one of these jobs runs on GitHub's `xcode-27` image and selects Xcode
 (owner decision D1, 2026-11-28): from April 2027 App Store Connect refuses an
 upload not built with the iOS 27 SDK, and the gate launches what TestFlight
 receives. `scripts/ci/check_release_launch_gated.sh` holds the wiring: G9 the
-SDK check before the upload and before the launch, G10 every iOS-building job on
+SDK check before the upload, before the launch and after every `build-check.yml`
+iOS build, each as an unconditional whole-command step, G10 every iOS-building job on
 the TestFlight job's runner and Xcode with the `xcode-NN` label at or above
 `IOS_SDK_FLOOR`, G11 the XCTest bundle below. The app targets iOS 15.0.
 

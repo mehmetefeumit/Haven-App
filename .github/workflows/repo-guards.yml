@@ -469,7 +469,11 @@
 #     now prevents it: the GitHub Release, Zapstore and TestFlight wait for the
 #     launch gates, publish only the bytes the Android gate tested, the IPA
 #     load check runs before upload, and ci.yml and the verdict gate keep both
-#     gates (docs/LAUNCH_GATE.md).
+#     gates (docs/LAUNCH_GATE.md). Each load and SDK check (the archive, the
+#     gate's candidate, build-check.yml's device build) must be an
+#     unconditional step whose whole command is the check, and the gate's
+#     RunnerTests step must fail a failed or empty run and scan its summary
+#     before printing it.
 #
 #   Network retry is classified       scripts/ci/retry_on_network_failure.sh
 #     The iOS builds on the release path (the launch gate's config pass and

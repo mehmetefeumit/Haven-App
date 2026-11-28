@@ -2,11 +2,12 @@
 # CI guard: the iOS app-switcher privacy blur.
 #
 # iPhone cannot block screenshots, so what Haven does there is blur the
-# app-switcher preview: six lines of `SceneDelegate.swift` — a
-# `UIVisualEffectView` added on resign and removed on become-active. Android's
+# app-switcher preview: a few lines of `SceneDelegate.swift` — a
+# `UIVisualEffectView` added at connect and on resign, and removed on
+# become-active. Android's
 # half is a WINDOW flag pinned by `check_flag_secure_app_wide.sh`. Until this
-# guard existed the iOS half was backed by nothing at all: delete those six
-# lines and every other gate in the repo stays green.
+# guard existed the iOS half was backed by nothing at all: delete those lines
+# and every other gate in the repo stays green.
 #
 # There is no runtime proof available here: the repo-guards job has no Xcode, no
 # Simulator, and the OS-captured snapshot is not observable from inside the
@@ -17,10 +18,12 @@
 #
 #   1. THE ANCHORS EXIST. `SceneDelegate: FlutterSceneDelegate` and the
 #      `privacyBlurView` property. A guard that cannot find its subject must
-#      fail, never pass for want of something to scan.
+#      fail, never pass for want of something to scan. The blur itself is built
+#      in ONE place, `coverWithPrivacyBlur()`, which links 3-5 read; links 2
+#      and 9 pin its two callers.
 #
-#   2. ADDED ON THE PRE-SNAPSHOT CALLBACK, AND ONLY THERE. The blur is
-#      installed in `sceneWillResignActive`, which is correct and is NOT
+#   2. ADDED ON THE PRE-SNAPSHOT CALLBACK. The blur is installed from
+#      `sceneWillResignActive`, which is correct and is NOT
 #      interchangeable with `sceneDidEnterBackground`. While the app switcher
 #      is open showing Haven's card, the scene is *inactive but still
 #      foreground* — `didEnterBackground` has not been called yet — and the same
@@ -28,10 +31,12 @@
 #      incoming call. Only `willResignActive` covers those, and it also strictly
 #      precedes `didEnterBackground`, so it covers the snapshot too. Moving the
 #      add "down" to `didEnterBackground` is the tidy-looking edit that silently
-#      un-blurs the very screen the copy names. The method calls `super` at its
-#      own statement depth, as its twin in link 6 does: FlutterSceneDelegate
-#      forwards each callback to the engine and the plugins, so an override that
-#      drops it keeps the blur and leaves Dart's lifecycle a state behind.
+#      un-blurs the very screen the copy names. The call sits at the method's
+#      own statement depth and the method has no `return` at any depth, for
+#      link 5's reason. The method calls `super` at its own statement depth, as
+#      its twin in link 6 does: FlutterSceneDelegate forwards each callback to
+#      the engine and the plugins, so an override that drops it keeps the blur
+#      and leaves Dart's lifecycle a state behind.
 #
 #   3. IT COVERS THE WINDOW — TARGET, GEOMETRY AND STACKING. Added to the
 #      scene's `window` itself (not to the root view controller's view, which a
@@ -111,7 +116,18 @@
 #      `applicationDidEnterBackground`, so a blur — or any of those overrides —
 #      left in AppDelegate.swift reads as protection and runs never.
 #
-# THE SLICING HAZARD, DELIBERATELY HANDLED. Checks 2-6 are bound to ONE method
+#   9. COVERED FROM CONNECT. `scene(_:willConnectTo:options:)` calls
+#      `coverWithPrivacyBlur()` at its own statement depth, after
+#      `self.window = window` (the cover binds it) and after
+#      `window.makeKeyAndVisible()` (which installs the root controller's
+#      view), with no `return` but its UIWindowScene guard. AppDelegate keeps
+#      one controller for the process, so a scene iOS reconnects in the
+#      background shows that controller's last frame, never resigns active, and
+#      can be snapshotted before it is ever active; sceneDidBecomeActive takes
+#      the cover off. Not under an `activationState` test: UIKit reports the
+#      same state at connect for a background launch and a user's.
+#
+# THE SLICING HAZARD, DELIBERATELY HANDLED. Checks 2-6 and 9 are bound to ONE method
 # body each, not to the file, because "somewhere in SceneDelegate.swift" is not
 # where any of them has to be. The Android twin was written first and its first
 # draft got exactly this wrong: it ran a brace-matched slice over Kotlin's
@@ -359,20 +375,15 @@ the plugins: without it Dart never hears the scene come back."
   fi
 
   # --- link 2: the resign covers, unconditionally ---------------------------
-  # Counted, not presence-tested at depth 1, for the reason the add's own
-  # statements are (link 5); and no `return` at any depth, as on become-active.
-  local n_call_body n_call_top
-  n_call_body="$(grep -cF 'coverWithPrivacyBlur()' <<<"${resign_body}" || true)"
+  # At the method's own statement depth, and no `return` at any depth, as on
+  # become-active.
+  local n_call_top
   n_call_top="$(grep -cE '^[[:space:]]*(self\.)?coverWithPrivacyBlur\(\)[[:space:]]*$' <<<"${resign_top}" || true)"
   if (( n_call_top == 0 )); then
     fail_msg "sceneWillResignActive does not call coverWithPrivacyBlur() at its \
 own statement depth, so nothing blurs the switcher card or the Control-Centre \
-peek."
-    fail=1
-  elif (( n_call_body != n_call_top )); then
-    fail_msg "sceneWillResignActive covers the window below its own statement \
-depth as well — nested in an \`if\`, a closure or a \`#if\` branch. A \
-conditional cover is an off switch with none of the shape of one."
+peek — a call nested in an \`if\`, a closure or a \`#if\` branch is an off \
+switch with none of the shape of one."
     fail=1
   fi
   if grep -qE '\breturn\b' <<<"${resign_body}"; then
@@ -382,18 +393,13 @@ whatever follows such a return is skipped in exactly the case that added it."
   fi
 
   # --- link 9: a scene is covered from the moment it connects ---------------
-  n_call_body="$(grep -cF 'coverWithPrivacyBlur()' <<<"${conn_body}" || true)"
   n_call_top="$(grep -cE '^[[:space:]]*(self\.)?coverWithPrivacyBlur\(\)[[:space:]]*$' <<<"${conn_top}" || true)"
   if (( n_call_top == 0 )); then
     fail_msg "scene(_:willConnectTo:options:) does not call coverWithPrivacyBlur() \
 at its own statement depth (link 9). A scene iOS reconnects in the background \
 shows the kept controller's last frame, and it never resigns active, so nothing \
-else covers it before iOS can snapshot it."
-    fail=1
-  elif (( n_call_body != n_call_top )); then
-    fail_msg "scene(_:willConnectTo:options:) covers the window below its own \
-statement depth as well (link 9) — under an \`if\` such as an activationState \
-test, which UIKit answers .unattached at connect, so the branch is taken never."
+else covers it before iOS can snapshot it. A call under an activationState test \
+is no cover: a background connect and a user's look alike here."
     fail=1
   fi
   local l_cover l_win l_shown
@@ -434,7 +440,7 @@ takes it shows the kept controller uncovered."
   local add_squashed
   add_squashed="$(tr -d ' \t\n' <<<"${add_body}")"
   if [[ "${add_squashed}" != *'UIVisualEffectView(effect:UIBlurEffect(style:.systemMaterial))'* ]]; then
-    fail_msg "sceneWillResignActive does not build \
+    fail_msg "coverWithPrivacyBlur() does not build \
 \`UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))\`. The overlay \
 staying installed, sized and layered while its effect becomes nil, a vibrancy \
 effect, or a thin/ultra-thin material is the mutation that keeps the code looking \
@@ -451,7 +457,7 @@ pinned in both directions: change it here, deliberately, with the reason."
   neutralizer="$(grep -nE '\balpha\b|\bisHidden\b|effect *[:=] *nil|UIVibrancyEffect|\.clear\b|\.layer\b|\btransform\b' \
     <<<"${add_body}" || true)"
   if [[ -n "${neutralizer}" ]]; then
-    fail_msg "sceneWillResignActive manipulates the overlay's visibility, \
+    fail_msg "coverWithPrivacyBlur() manipulates the overlay's visibility, \
 transparency or layer: ${neutralizer//$'\n'/ | }. A blur view that is present but \
 see-through — whether through \`alpha\`, its \`layer\`, or a scale-to-zero \
 \`transform\` — passes every reading of this code and protects nothing."
@@ -464,7 +470,7 @@ see-through — whether through \`alpha\`, its \`layer\`, or a scale-to-zero \
   # depth-bound presence check made a nested-add mutation report a wrong-target
   # failure, so the fixture for one link was passing on the other's message.
   if ! grep -qE 'window\??\.addSubview\(' <<<"${add_body}"; then
-    fail_msg "sceneWillResignActive does not add the blur to the WINDOW. \
+    fail_msg "coverWithPrivacyBlur() does not add the blur to the WINDOW. \
 \`rootViewController.view\` is not the same thing: a presented modal (the \
 photo-crop screen, a bottom sheet) is not inside it and would be photographed \
 unblurred."
@@ -489,7 +495,7 @@ protection."
   else
     bad_frame="$(grep -vE '\.frame *= *window\??\.bounds[[:space:]]*$' <<<"${frame_assigns}" || true)"
     if [[ -n "${bad_frame}" ]]; then
-      fail_msg "sceneWillResignActive assigns a frame that is not \
+      fail_msg "coverWithPrivacyBlur() assigns a frame that is not \
 \`window.bounds\`: ${bad_frame//$'\n'/ | }. The LAST assignment is the one the \
 snapshot sees, so a correct line followed by a zero or inset one — or by an \
 overwrite of one of its components — covers nothing while the correct line is \
@@ -508,7 +514,7 @@ still there to be read."
   reorder="$(grep -E 'sendSubviewToBack|insertSubview|exchangeSubview|bringSubviewToFront' \
     <<<"${add_body}" || true)"
   if [[ -n "${reorder}" ]]; then
-    fail_msg "sceneWillResignActive re-orders the window's subviews: \
+    fail_msg "coverWithPrivacyBlur() re-orders the window's subviews: \
 ${reorder//$'\n'/ | }. \`window.addSubview(blur)\` is what puts the blur ABOVE the \
 content; sending it back or inserting it below leaves it installed, sized to the \
 window and fully opaque, with the map rendered on top of it and photographed by \
@@ -525,7 +531,7 @@ from under a fixed-frame overlay and re-exposes what it was covering."
     fail=1
   fi
   if ! grep -qE 'privacyBlurView *= *[A-Za-z_]' <<<"${add_body}"; then
-    fail_msg "sceneWillResignActive never stores the view in \
+    fail_msg "coverWithPrivacyBlur() never stores the view in \
 privacyBlurView, so sceneDidBecomeActive has no handle to remove: the blur \
 is added once and stays over the live app forever."
     fail=1
@@ -537,7 +543,7 @@ is added once and stays over the live app forever."
   guard_count=0
   [[ -n "${guard_lines}" ]] && guard_count="$(grep -c '' <<<"${guard_lines}")"
   if (( guard_count > 1 )); then
-    fail_msg "sceneWillResignActive has ${guard_count} guard statements. \
+    fail_msg "coverWithPrivacyBlur() has ${guard_count} guard statements. \
 One is the re-entrancy/window binding; any second one is an off switch for the \
 blur that nothing else in the repo would notice."
     fail=1
@@ -548,7 +554,7 @@ blur that nothing else in the repo would notice."
       conjunct="$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' <<<"${conjunct}")"
       [[ -z "${conjunct}" ]] && continue
       if [[ "${conjunct}" != 'let window = window' && "${conjunct}" != 'privacyBlurView == nil' ]]; then
-        fail_msg "sceneWillResignActive's guard carries an unrecognised \
+        fail_msg "coverWithPrivacyBlur()'s guard carries an unrecognised \
 condition: \`${conjunct}\`. The only conditions allowed to skip the blur are the \
 window binding and the re-entrancy check — a flag, a build config or a \
 UserDefaults read here makes the whole method a no-op that still reads as \
@@ -574,7 +580,7 @@ protection."
       if (word($0, "return") && !(d == 1 && word($0, "guard"))) print
     }' <<<"${add_body}")"
   if [[ -n "${stray_return}" ]]; then
-    fail_msg "sceneWillResignActive returns early outside its guard: \
+    fail_msg "coverWithPrivacyBlur() returns early outside its guard: \
 ${stray_return//$'\n'/ | }. Everything below such a return is dead in exactly the \
 case that added it, and the diff reads like a harmless fast path."
     fail=1
@@ -588,7 +594,7 @@ case that added it, and the diff reads like a harmless fast path."
   n_body="$(grep -cE '\.addSubview\(' <<<"${add_body}" || true)"
   n_top="$(grep -cE '\.addSubview\(' <<<"${add_top}" || true)"
   if (( n_body != n_top )); then
-    fail_msg "sceneWillResignActive adds the blur below its own statement \
+    fail_msg "coverWithPrivacyBlur() adds the blur below its own statement \
 depth — nested in an \`if\`, a closure or a \`#if\` branch. A conditional add is \
 an off switch with none of the shape of one: every line still reads as \
 protection, and nothing is installed in whichever case the condition excludes."
@@ -597,7 +603,7 @@ protection, and nothing is installed in whichever case the condition excludes."
   n_body="$(grep -cE 'privacyBlurView *= *[A-Za-z_]' <<<"${add_body}" || true)"
   n_top="$(grep -cE 'privacyBlurView *= *[A-Za-z_]' <<<"${add_top}" || true)"
   if (( n_body != n_top )); then
-    fail_msg "sceneWillResignActive stores privacyBlurView below its own \
+    fail_msg "coverWithPrivacyBlur() stores privacyBlurView below its own \
 statement depth, so the handle is only set in whichever case the enclosing \
 condition allows and sceneDidBecomeActive has nothing to remove in the \
 other — leaving an opaque overlay over a live app."
@@ -612,7 +618,7 @@ statement depth (a removal nested in an \`if\` is a removal that can be skipped)
   fi
   if ! grep -qE 'privacyBlurView *= *nil' <<<"${rem_top}"; then
     fail_msg "sceneDidBecomeActive removes the blur but leaves \
-privacyBlurView non-nil. The re-entrancy guard in sceneWillResignActive \
+privacyBlurView non-nil. The re-entrancy guard in coverWithPrivacyBlur() \
 then sees a stale view forever: Haven is blurred on the FIRST backgrounding and \
 on no later one, and nothing on screen ever looks wrong."
     fail=1
@@ -637,7 +643,7 @@ over a running app, and the obvious 'fix' for that bug is to delete the blur."
     (( ln >= add_start && ln <= add_end )) && continue
     (( ln >= rem_start && ln <= rem_end )) && continue
     fail_msg "${swift##*/}:${ln} touches privacyBlurView outside its declaration, \
-sceneWillResignActive and sceneDidBecomeActive: \
+coverWithPrivacyBlur() and sceneDidBecomeActive: \
 \`$(sed -e 's/^[[:space:]]*//' <<<"${rest}")\`. Every other lifecycle callback is \
 either too late to cover the switcher card (didEnterBackground: not yet called \
 while the card is on screen) or does not fire at all on a resign that never \
@@ -649,9 +655,8 @@ call), so a second touch point silently trades one of those cases away."
   while IFS=: read -r ln rest; do
     (( ln >= add_start && ln <= add_end )) && continue
     fail_msg "${swift##*/}:${ln} constructs a UIVisualEffectView outside \
-sceneWillResignActive. The blur has to exist before iOS renders the \
-switcher card, and sceneWillResignActive is the last callback that is \
-guaranteed to run first."
+coverWithPrivacyBlur(). The blur is pinned there, for both of its callers; a \
+second construction site is a blur none of links 3-5 reads."
     fail=1
   done < <(grep -n 'UIVisualEffectView(' "${code}" || true)
 
@@ -773,7 +778,7 @@ self_test() {
   # Bump this in the SAME commit that adds or removes a fixture. Equality, not a
   # floor: a floor lets deletions hide under the slack, which is exactly how the
   # previous version of this suite could lose cases silently.
-  local -r SELF_TEST_FIXTURES=57
+  local -r SELF_TEST_FIXTURES=66
   local tmp fails=0 checked=0
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -803,8 +808,8 @@ self_test() {
     _record "$1" "$2" "${got}"
   }
 
-  # Most mutations are a one-line edit to the ADD method, so they are supplied
-  # as a replacement for that method alone and re-assembled here. The explicit
+  # Most mutations are a one-line edit to the ADD method (the cover), so they
+  # are supplied as a replacement for that method alone and re-assembled here. The explicit
   # newline is load-bearing: `$(...)` strips the trailing one, which would run
   # the add method's closing brace into the next signature and make several
   # fixtures below fail for a reason other than the mutation they carry.
@@ -822,11 +827,30 @@ ${rem}"
   }
 
   # The committed shape, reused as the base for every mutation below.
-  local head='class SceneDelegate: FlutterSceneDelegate {
+  local hdr='class SceneDelegate: FlutterSceneDelegate {
   private var privacyBlurView: UIVisualEffectView?
 '
-  local add='  override func sceneWillResignActive(_ scene: UIScene) {
+  local conn='  override func scene(
+    _ scene: UIScene,
+    willConnectTo session: UISceneSession,
+    options connectionOptions: UIScene.ConnectionOptions
+  ) {
+    guard let windowScene = scene as? UIWindowScene else { return }
+    let window = UIWindow(windowScene: windowScene)
+    window.rootViewController = appDelegate.flutterViewController
+    self.window = window
+    window.makeKeyAndVisible()
+    super.scene(scene, willConnectTo: session, options: connectionOptions)
+    coverWithPrivacyBlur()
+  }
+'
+  local resign='  override func sceneWillResignActive(_ scene: UIScene) {
     super.sceneWillResignActive(scene)
+    coverWithPrivacyBlur()
+  }
+'
+  local head="${hdr}${conn}${resign}"
+  local add='  private func coverWithPrivacyBlur() {
     guard let window = window, privacyBlurView == nil else { return }
     let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
     blur.frame = window.bounds
@@ -852,7 +876,7 @@ ${rem}"
   _swift 'a renamed SceneDelegate class FAILS' 1 \
 "class RunnerSceneDelegate: FlutterSceneDelegate {
   private var privacyBlurView: UIVisualEffectView?
-${add}${rem}"
+${conn}${resign}${add}${rem}"
   _swift 'a deleted privacyBlurView property FAILS' 1 \
 "class SceneDelegate: FlutterSceneDelegate {
   override func sceneWillResignActive(_ scene: UIScene) {
@@ -862,22 +886,41 @@ ${add}${rem}"
 
   # -- link 2: the callback that runs before the switcher renders ------------
   # The first two both land on the "no sceneWillResignActive" branch, and
-  # they are not the same fixture: this one leaves a textbook-correct blur
-  # installation in the file, in the wrong callback. It fails because the checks
-  # are bound to ONE method rather than to the file — which is the property the
+  # they are not the same fixture: this one leaves a textbook-correct cover
+  # call in the file, in the wrong callback. It fails because the checks are
+  # bound to ONE method rather than to the file — which is the property the
   # slicing note in the header is about, and which a whole-file grep would lose
   # while still passing the next fixture.
-  _add_case 'a blur installed only in sceneDidEnterBackground FAILS' 1 \
-'  override func sceneDidEnterBackground(_ scene: UIScene) {
+  _swift 'a blur installed only in sceneDidEnterBackground FAILS' 1 \
+"${hdr}${conn}  override func sceneDidEnterBackground(_ scene: UIScene) {
     super.sceneDidEnterBackground(scene)
-    guard let window = window, privacyBlurView == nil else { return }
-    let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
-    blur.frame = window.bounds
-    blur.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-    window.addSubview(blur)
-    privacyBlurView = blur
-  }'
-  _swift 'no sceneWillResignActive at all FAILS' 1 "${head}${rem}"
+    coverWithPrivacyBlur()
+  }
+${add}${rem}"
+  _swift 'no sceneWillResignActive at all FAILS' 1 "${hdr}${conn}${add}${rem}"
+  # The resign's own call, which the cover's checks never see: dropped, nested
+  # under a condition (a whole-body grep would still find it), or skipped by a
+  # return in front of it.
+  _swift 'a sceneWillResignActive that never covers the window FAILS' 1 \
+"${hdr}${conn}  override func sceneWillResignActive(_ scene: UIScene) {
+    super.sceneWillResignActive(scene)
+  }
+${add}${rem}"
+  _swift 'a resign cover nested inside an if FAILS' 1 \
+"${hdr}${conn}  override func sceneWillResignActive(_ scene: UIScene) {
+    super.sceneWillResignActive(scene)
+    if shouldBlur {
+      coverWithPrivacyBlur()
+    }
+  }
+${add}${rem}"
+  _swift 'an early return in sceneWillResignActive FAILS' 1 \
+"${hdr}${conn}  override func sceneWillResignActive(_ scene: UIScene) {
+    super.sceneWillResignActive(scene)
+    if Self.blurDisabled { return }
+    coverWithPrivacyBlur()
+  }
+${add}${rem}"
   # "and ONLY there": a SECOND install site, added belt-and-braces, is the edit
   # that reads as extra safety and is not. It touches no privacyBlurView and
   # removes nothing, so the exclusivity scan for UIVisualEffectView is the only
@@ -921,8 +964,9 @@ ${rem}"
   _add_case 'an add that never stores the handle FAILS' 1 \
     "$(grep -v 'privacyBlurView = blur' <<<"${add}")"
   # The super calls (links 2 and 6): each method drops its own, alone.
-  _add_case 'a sceneWillResignActive without super FAILS' 1 \
-    "$(grep -v 'super.sceneWillResignActive' <<<"${add}")"
+  _swift 'a sceneWillResignActive without super FAILS' 1 \
+"${hdr}${conn}$(grep -v 'super.sceneWillResignActive' <<<"${resign}")
+${add}${rem}"
 
   # -- link 4: a real blur ---------------------------------------------------
   _add_case 'effect: nil FAILS' 1 \
@@ -957,8 +1001,7 @@ ${rem}"
   # This is the fixture that keeps the return scan depth-aware: neuter the depth
   # and the one-line fixture stays green while this one goes red.
   _add_case 'a multi-line kill switch FAILS' 1 \
-'  override func sceneWillResignActive(_ scene: UIScene) {
-    super.sceneWillResignActive(scene)
+'  private func coverWithPrivacyBlur() {
     guard let window = window, privacyBlurView == nil else { return }
     if Self.blurDisabled {
       return
@@ -970,8 +1013,7 @@ ${rem}"
     privacyBlurView = blur
   }'
   _add_case 'the add nested inside an if FAILS' 1 \
-'  override func sceneWillResignActive(_ scene: UIScene) {
-    super.sceneWillResignActive(scene)
+'  private func coverWithPrivacyBlur() {
     guard let window = window, privacyBlurView == nil else { return }
     let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
     blur.frame = window.bounds
@@ -987,8 +1029,7 @@ ${rem}"
   # while the handle is always stored; below, the blur is installed in every
   # case and only the handle goes missing.
   _add_case 'a store nested inside an if FAILS' 1 \
-'  override func sceneWillResignActive(_ scene: UIScene) {
-    super.sceneWillResignActive(scene)
+'  private func coverWithPrivacyBlur() {
     guard let window = window, privacyBlurView == nil else { return }
     let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
     blur.frame = window.bounds
@@ -1052,6 +1093,52 @@ ${rem}"
   }
 ${rem}"
 
+  # -- link 9: covered from connect -----------------------------------------
+  # Each fixture is the committed connect with one edit, so each lands on its
+  # own branch alone: the call gone, the call under the activationState test
+  # that reads the same for every connect, the call ahead of the window it
+  # binds, the call ahead of the show that installs the root view, a return in
+  # front of it, and no connect method at all.
+  _conn() { # _conn <label> <want-rc> <replacement-connect-method>
+    _swift "$1" "$2" "${hdr}$3
+${resign}${add}${rem}"
+  }
+  _conn 'a scene that connects uncovered FAILS' 1 \
+    "$(grep -v 'coverWithPrivacyBlur' <<<"${conn}")"
+  _conn 'a connect cover under an activationState test FAILS' 1 \
+    "$(sed 's/^    coverWithPrivacyBlur()$/    if scene.activationState == .background {\n      coverWithPrivacyBlur()\n    }/' <<<"${conn}")"
+  _conn 'a connect cover ahead of self.window FAILS' 1 \
+'  override func scene(
+    _ scene: UIScene,
+    willConnectTo session: UISceneSession,
+    options connectionOptions: UIScene.ConnectionOptions
+  ) {
+    guard let windowScene = scene as? UIWindowScene else { return }
+    let window = UIWindow(windowScene: windowScene)
+    window.rootViewController = appDelegate.flutterViewController
+    window.makeKeyAndVisible()
+    coverWithPrivacyBlur()
+    self.window = window
+    super.scene(scene, willConnectTo: session, options: connectionOptions)
+  }'
+  _conn 'a connect cover ahead of makeKeyAndVisible FAILS' 1 \
+'  override func scene(
+    _ scene: UIScene,
+    willConnectTo session: UISceneSession,
+    options connectionOptions: UIScene.ConnectionOptions
+  ) {
+    guard let windowScene = scene as? UIWindowScene else { return }
+    let window = UIWindow(windowScene: windowScene)
+    window.rootViewController = appDelegate.flutterViewController
+    self.window = window
+    coverWithPrivacyBlur()
+    window.makeKeyAndVisible()
+    super.scene(scene, willConnectTo: session, options: connectionOptions)
+  }'
+  _conn 'an early return in front of the connect cover FAILS' 1 \
+    "$(sed 's/^    coverWithPrivacyBlur()$/    if connectionOptions.urlContexts.isEmpty { return }\n    coverWithPrivacyBlur()/' <<<"${conn}")"
+  _swift 'no scene(_:willConnectTo:options:) at all FAILS' 1 "${hdr}${resign}${add}${rem}"
+
   # -- false-positive directions --------------------------------------------
   # Explaining the mechanism must stay possible, or the explanation gets deleted
   # instead of the code. The prose below is written to be LOAD-BEARING in both
@@ -1071,8 +1158,7 @@ ${rem}"
 /* An earlier draft called privacyBlurView?.removeFromSuperview() from
    sceneWillEnterForeground, which does not fire on a resign that never
    reached the background. */
-${head}  override func sceneWillResignActive(_ scene: UIScene) {
-    super.sceneWillResignActive(scene)
+${head}  private func coverWithPrivacyBlur() {
     guard let window = window, privacyBlurView == nil else { return }
     // Never .clear, and never alpha 0: a see-through overlay protects nothing.
     let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
@@ -1097,7 +1183,7 @@ ${rem}"
   # that would silently widen every method-bound check into a whole-file grep —
   # and it is caught by the swallowed-signature scan, not by the EOF branch.
   _swift 'a body that loses its brace swallows the next method: BROKEN' 2 \
-"${head}  override func sceneWillResignActive(_ scene: UIScene) {
+"${head}  private func coverWithPrivacyBlur() {
     guard let window = window, privacyBlurView == nil else { return }
     let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
     blur.frame = window.bounds
@@ -1262,10 +1348,11 @@ main() {
     fail_msg "the iOS app-switcher blur is no longer intact (see above)."
     exit 1
   fi
-  log "OK: the app-switcher blur is installed on sceneWillResignActive, covers \
-the scene's window with a real blur, is removed and re-armed only on \
-sceneDidBecomeActive, both after super; Info.plist routes the scene to \
-SceneDelegate, and the app delegate holds no dead copy."
+  log "OK: the app-switcher blur is built in coverWithPrivacyBlur() alone, \
+called unconditionally at connect and on sceneWillResignActive, covers the \
+scene's window with a real blur, is removed only on sceneDidBecomeActive, both \
+callbacks after super; Info.plist routes the scene to SceneDelegate, and the \
+app delegate holds no dead copy."
   exit 0
 }
 
