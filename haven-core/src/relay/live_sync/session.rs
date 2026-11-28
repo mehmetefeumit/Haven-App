@@ -4917,6 +4917,8 @@ async fn run_drive(
             () = processor.drive_due_again() => {}
         }
         Box::pin(drive_once(&processor)).await;
+        #[cfg(any(test, feature = "test-utils"))]
+        processor.note_drive_ended();
         if processor.take_negentropy_owed() && processor.lifecycle() == Lifecycle::Foreground {
             if let Some(pool) = &pool {
                 let pass = async {
