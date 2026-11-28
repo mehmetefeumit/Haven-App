@@ -108,7 +108,7 @@ dev_dependencies:
   flutter_launcher_icons: ^0.14.4
   integration_test:
     sdk: flutter
-  ffigen: ^20.1.1
+  ffigen: ^23.0.0
   # Lets the avatar-picker test override ImagePickerPlatform.instance with a
   # fake (MockPlatformInterfaceMixin bypasses the platform-interface token).
   plugin_platform_interface: ^2.1.8
