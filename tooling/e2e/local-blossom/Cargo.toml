@@ -38,7 +38,7 @@ path = "src/main.rs"
 # Minimal synchronous HTTP server — no async runtime pulled in.
 tiny_http = "0.12"
 # Content-addressed blob hashing and the NIP-01 event id.
-sha2 = "0.10"
+sha2 = "0.11"
 # Lower-hex encoding of digests, keys and signatures.
 hex = "0.4"
 # The auth event: parsed, then re-serialized as NIP-01's id preimage.
