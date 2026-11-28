@@ -226,7 +226,7 @@ tempfile = "3.10"
 # EXIF parser — used ONLY in avatar tests to assert that the re-encode
 # pipeline structurally strips all EXIF/GPS metadata (and as a positive
 # control that the crafted test input *does* carry EXIF before stripping).
-kamadak-exif = "0.5"
+kamadak-exif = "0.6"
 # In-process Nostr relay for hermetic live-sync engine integration tests
 # (proves the persistent receive engine connects, subscribes, receives, routes,
 # and processes real `kind:445` events over a real socket). Dev-only.
