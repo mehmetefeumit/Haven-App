@@ -81,7 +81,11 @@ void main() {
       expect(find.byType(HavenAvatar), findsOneWidget);
       final images = tester.widgetList<Image>(find.byType(Image));
       for (final img in images) {
-        expect(img.image, isNot(isA<NetworkImage>()));
+        final provider = img.image;
+        expect(
+          provider is ResizeImage ? provider.imageProvider : provider,
+          isA<MemoryImage>(),
+        );
       }
     });
 

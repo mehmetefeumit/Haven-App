@@ -18,11 +18,12 @@
 //!   re-encode a fresh JPEG. No container metadata is ever carried forward —
 //!   strictly safer than tag deletion. Critical for a location-sharing app
 //!   where a camera selfie can embed home coordinates.
-//! * **All plaintext byte buffers we own are `Zeroizing`.** The one honest
-//!   residual is the `image` crate's [`image::DynamicImage`] decode buffer: it
-//!   is a foreign type that cannot be `Zeroizing`-wrapped. It lives only for
-//!   the duration of one synchronous decode → crop → scale → encode call and
-//!   is dropped immediately after.
+//! * **All plaintext byte buffers we own are `Zeroizing`.** Two honest
+//!   residuals live inside the `image` crate, where they cannot be
+//!   `Zeroizing`-wrapped: the [`image::DynamicImage`] decode buffer, and the
+//!   plain copy of the input its JPEG decoder takes before parsing, which the
+//!   header-only read of [`thumbnail_is_current`] makes too. Each lives only
+//!   for the one synchronous call that made it and is dropped right after.
 //! * **No error ever echoes input bytes**: decode/encode failures map to a
 //!   generic [`AvatarError`] variant.
 

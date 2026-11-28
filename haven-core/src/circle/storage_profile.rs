@@ -759,7 +759,9 @@ impl CircleStorage {
         let Ok(fresh) = rederive_thumbnail(&canonical) else {
             return Ok(Some(thumbnail));
         };
-        self.store_rederived_thumbnail(pubkey_hex, &fresh, &sha256, updated_at)?;
+        // Storing only refreshes the cache: a failed write must not cost this
+        // read the bytes it already holds. The next read derives them again.
+        let _ = self.store_rederived_thumbnail(pubkey_hex, &fresh, &sha256, updated_at);
         Ok(Some(fresh))
     }
 
@@ -1921,6 +1923,30 @@ mod tests {
             *storage.get_profile_thumbnail("aa").unwrap().unwrap(),
             *first,
             "a current thumbnail is served as stored"
+        );
+    }
+
+    #[test]
+    fn a_rederived_thumbnail_is_served_even_when_it_cannot_be_stored() {
+        let edge_px = crate::avatar::AVATAR_THUMB_EDGE_PX;
+        let (processed, legacy) = sanitized_with_legacy_thumbnail();
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .upsert_profile_picture("aa", "u", &[0xAB; 32], &processed.canonical, &legacy, 4_000)
+            .unwrap();
+        storage
+            .conn()
+            .lock()
+            .unwrap()
+            .execute_batch("PRAGMA query_only = ON;")
+            .unwrap();
+
+        let served = storage.get_profile_thumbnail("aa").unwrap().unwrap();
+        assert_eq!(edge(&served), (edge_px, edge_px));
+        assert_eq!(
+            stored_thumbnail(&storage, "aa"),
+            legacy,
+            "the write was refused"
         );
     }
 
