@@ -3,10 +3,11 @@
 /// restart the system makes after killing the process (`START_STICKY`).
 ///
 /// Owner-directed 2026-11-26 (OD-R2/OD-R3): sharing resumes without the user
-/// opening Haven only with consent to the CURRENT background disclosure, a
-/// foreground location grant and, on Android 11+, "Allow all the time". The
-/// Kotlin twin is `decideResume` in `ResumeRule.kt`; a UI start keeps the
-/// v1 disclosure gate (`backgroundPublishDisclosureAccepted`).
+/// opening Haven only with consent to Android's current background disclosure
+/// (`kAndroidBackgroundDisclosureVersion`), a foreground location grant and,
+/// on Android 11+, "Allow all the time". The Kotlin twin is `decideResume` in
+/// `ResumeRule.kt`; a UI start keeps the v1 disclosure gate
+/// (`backgroundPublishDisclosureAccepted`).
 library;
 
 import 'package:flutter/foundation.dart';
@@ -46,6 +47,7 @@ SystemResumeDecision decideSystemResume({
     foregroundAccepted: foregroundAccepted,
     backgroundAccepted: backgroundAccepted,
     acceptedVersion: acceptedVersion,
+    isIOS: false,
   );
   if (!consented ||
       !locationGranted ||

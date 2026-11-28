@@ -16,7 +16,9 @@ import 'package:flutter/widgets.dart';
 /// `inactive`: a launch dialog is a visible app, and if the app leaves
 /// `inactive` for the background a `paused` is dispatched then. Neither the
 /// Android nor the iOS embedder sends `hidden`, and the `detached` seed is
-/// left through a dispatched `resumed`.
+/// left through a dispatched `resumed` — or, in an iOS process no scene has
+/// connected to, never: only a view controller in a window sends lifecycle
+/// messages.
 bool pausedAtMount(AppLifecycleState? lifecycle) =>
     lifecycle == AppLifecycleState.paused;
 
@@ -46,8 +48,12 @@ enum LaunchSession {
 /// pause even when it mounted under `inactive` or `detached`, where none may
 /// ever be dispatched, and that pause — whichever path delivers it, and
 /// whether it lands before or after the launch's reads resolve — is handed
-/// the [LaunchSession] once ([takeLaunchSession]). The foreground consent step
-/// is shown only while the app reads `resumed`, owed to the first resume.
+/// the [LaunchSession] once ([takeLaunchSession]). The native side marks
+/// such a process at its first location delivery, which can follow the
+/// mount's read: until a lifecycle change reaches the shell, each
+/// [locationLaunches] report reads the launch again. The foreground consent
+/// step is shown only while the app reads `resumed`, owed to the first
+/// resume.
 mixin ForegroundStartUpGate<T extends StatefulWidget> on State<T> {
   /// The lifecycle the binding reads now.
   @protected
@@ -80,6 +86,11 @@ mixin ForegroundStartUpGate<T extends StatefulWidget> on State<T> {
   @protected
   Future<bool> launchedForLocation();
 
+  /// Fires when the native side has just marked this process launched for
+  /// location.
+  @protected
+  Stream<void> get locationLaunches;
+
   /// In a location relaunch only: reads what the launch's first pause needs —
   /// the sharing consent, the current-disclosure predicate and the roster,
   /// bounded — and answers whether that pause may start sharing.
@@ -95,7 +106,7 @@ mixin ForegroundStartUpGate<T extends StatefulWidget> on State<T> {
   bool _consentStepOwed = false;
 
   /// The launch's reads, from the mount; completes with what is owed.
-  final Completer<LaunchSession> _launch = Completer<LaunchSession>();
+  Completer<LaunchSession> _launch = Completer<LaunchSession>();
 
   /// What [_launch] completed with, once it has.
   LaunchSession? _launchRead;
@@ -109,11 +120,41 @@ mixin ForegroundStartUpGate<T extends StatefulWidget> on State<T> {
   /// Whether any resume has been dispatched to this shell.
   bool _resumeSeen = false;
 
+  /// Whether the pause in effect is one this gate took while the binding
+  /// still read the `detached` seed.
+  bool _pausedOverSeed = false;
+
+  StreamSubscription<void>? _launchReports;
+
+  /// `paused` while a pause this gate took over the never-replaced `detached`
+  /// seed is in effect, else what the binding reads: no lifecycle message
+  /// reaches an iOS process no scene has connected to, and a burst that read
+  /// the seed there would want no session.
+  @protected
+  AppLifecycleState? get effectiveLifecycle =>
+      _pausedOverSeed &&
+          _pauseInEffect &&
+          currentLifecycle == AppLifecycleState.detached
+      ? AppLifecycleState.paused
+      : currentLifecycle;
+
   /// From `initState`.
   void gateMount() {
     final paused = pausedAtMount(currentLifecycle);
     if (!paused) stampForeground();
+    _launchReports = locationLaunches.listen((_) => unawaited(_relaunch()));
     unawaited(_resolveMount(pausedAtMount: paused));
+  }
+
+  @override
+  void dispose() {
+    unawaited(_launchReports?.cancel());
+    super.dispose();
+  }
+
+  void _takeGatePause() {
+    _pausedOverSeed = currentLifecycle == AppLifecycleState.detached;
+    takePause();
   }
 
   // Never inside the build that mounts the shell: the pause writes provider
@@ -133,17 +174,38 @@ mixin ForegroundStartUpGate<T extends StatefulWidget> on State<T> {
     // Only a launch that may resume takes a pause of its own: one the
     // current disclosure does not cover stays as it was (R-2).
     if (lifecycleTurn == 0) {
-      if (pausedAtMount || launch == LaunchSession.resume) takePause();
+      if (pausedAtMount || launch == LaunchSession.resume) _takeGatePause();
       return;
     }
     // A dispatched change reached the shell first. A pause has been handed the
     // launch; a resume owns the shell — unless it was the one the binding
-    // synthesizes when a background launch's first message arrives over the
-    // `detached` seed (detached → resumed → inactive). The native flag tells
-    // the two apart: the first foreground clears it.
+    // synthesizes when a scene connecting to a background launch sends its
+    // first message over the `detached` seed (detached → resumed → inactive).
+    // The native flag tells the two apart: the scene's first foreground
+    // clears it.
     if (launch != LaunchSession.resume || !_awayWithLaunchOwed()) return;
     if (await _stillLaunched(launch) == LaunchSession.none) return;
-    if (mounted && _awayWithLaunchOwed()) takePause();
+    if (mounted && _awayWithLaunchOwed()) _takeGatePause();
+  }
+
+  // Only a launch read as none is read again, and only before any lifecycle
+  // change reached the shell: after one, a pause or a resume owns what is
+  // owed.
+  bool _relaunchOpen() =>
+      mounted &&
+      lifecycleTurn == 0 &&
+      !_launchTaken &&
+      _launchRead == LaunchSession.none;
+
+  // What the mount would have done had the flag been set when it read it.
+  Future<void> _relaunch() async {
+    await _launch.future;
+    if (!_relaunchOpen()) return;
+    final launch = await _readLaunch();
+    if (launch == LaunchSession.none || !_relaunchOpen()) return;
+    _launchRead = launch;
+    _launch = Completer<LaunchSession>()..complete(launch);
+    if (launch == LaunchSession.resume) _takeGatePause();
   }
 
   bool _awayWithLaunchOwed() =>
@@ -205,6 +267,7 @@ mixin ForegroundStartUpGate<T extends StatefulWidget> on State<T> {
   /// From the resume handler, first.
   void noteResume() {
     _pauseInEffect = false;
+    _pausedOverSeed = false;
     _resumeSeen = true;
   }
 

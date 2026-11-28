@@ -80,4 +80,11 @@ class FakeIosLocationSource implements IosLocationSource {
 
   @override
   Future<IosLocationStreamStatus> status() async => statusValue;
+
+  /// Fires [locationLaunches], as the native side does once it has set the
+  /// launch flag.
+  final StreamController<void> launches = StreamController<void>.broadcast();
+
+  @override
+  Stream<void> get locationLaunches => launches.stream;
 }

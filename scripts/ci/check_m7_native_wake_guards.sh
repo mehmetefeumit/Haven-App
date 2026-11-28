@@ -1713,7 +1713,7 @@ code_has 'stopWithTask' "$MGR" &&
 
 # 14k. The Kotlin resume rule reads the SAME preferences the Dart side writes
 #      and the FGS gate reads: each literal in ResumeRule.kt is 'flutter.' plus
-#      its Dart constant, and the version is the Dart version. A drift reads a
+#      its Dart constant, and the version is Dart's Android one. A drift reads a
 #      key nobody writes, which fails closed into a notice for everyone, or
 #      reads a stale version, which would resume without current consent.
 dart_const() { # <name> <file>: the value of `const <type> <name> = <literal>;`
@@ -1739,10 +1739,10 @@ DISCLOSURE_BACKGROUND kLocationDisclosureBackgroundAcceptedKey $LOCATION_CONSTS
 DISCLOSURE_BACKGROUND_VERSION kLocationDisclosureBackgroundVersionKey $LOCATION_CONSTS
 LOCALE kLocaleKey $LOCALE_PROVIDER
 EOF14K
-  want_version="$(dart_const kBackgroundDisclosureVersion "$LOCATION_CONSTS")L"
+  want_version="$(dart_const kAndroidBackgroundDisclosureVersion "$LOCATION_CONSTS")L"
   got_version="$(kt_const BACKGROUND_DISCLOSURE_VERSION)"
   [[ "$want_version" != "L" && "$got_version" == "$want_version" ]] ||
-    fail "14k: ResumeRule.kt BACKGROUND_DISCLOSURE_VERSION is '${got_version:-absent}', must be '$want_version' (Dart kBackgroundDisclosureVersion)"
+    fail "14k: ResumeRule.kt BACKGROUND_DISCLOSURE_VERSION is '${got_version:-absent}', must be '$want_version' (Dart kAndroidBackgroundDisclosureVersion)"
   for key in kBackgroundSharingKey kLocationDisclosureAcceptedKey \
     kLocationDisclosureBackgroundAcceptedKey kLocationDisclosureBackgroundVersionKey; do
     code_has "$key" "$RESUME_GATE_DART" ||

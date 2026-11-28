@@ -53,7 +53,7 @@ object HavenPrefs {
     const val DISCLOSURE_BACKGROUND_VERSION = "flutter.haven.location.disclosure_background_version"
     const val LOCALE = "flutter.haven.locale.tag"
 
-    /** Twin of Dart's `kBackgroundDisclosureVersion`. */
+    /** Twin of Dart's `kAndroidBackgroundDisclosureVersion`. */
     const val BACKGROUND_DISCLOSURE_VERSION = 2L
 
     fun open(context: Context): SharedPreferences =

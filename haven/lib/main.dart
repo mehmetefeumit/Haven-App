@@ -259,9 +259,9 @@ Future<void> main() async {
   // value before arming any scheduler. Must run before runApp so the value is
   // in UserDefaults before any SLC or BGTask wake can fire on
   // first-cold-launch. Because AppDelegate's launch-time arm runs BEFORE this
-  // write, applicationDidEnterBackground re-arms with the fresh value (A3) —
-  // and a rolled-back build re-inerts the native side here on its first
-  // launch by rewriting false. No-op on non-iOS platforms.
+  // write, the scene's sceneDidEnterBackground re-arms with the fresh value
+  // (A3) — and a rolled-back build re-inerts the native side here on its
+  // first launch by rewriting false. No-op on non-iOS platforms.
   await writeCatchupEnabledMirror();
 
   final overrides = [
@@ -310,8 +310,10 @@ Future<void> main() async {
 
   // M7-D: Register the iOS background catch-up channel handler.
   // Must run after the ProviderContainer is created (the handler reads
-  // CatchupService from it) but before runApp completes (so it is ready for
-  // the first SLC or BGTask wake). No-op on non-iOS platforms.
+  // CatchupService from it) and before runApp. A wake can still arrive first —
+  // AppDelegate runs the engine, and arms both wakes, before `main()` gets
+  // here — which the native handlers absorb (the main()-race note in
+  // `ios_background_catchup.dart`). No-op on non-iOS platforms.
   registerIosBackgroundCatchupHandler(
     catchupService: container.read(catchupServiceProvider),
   );

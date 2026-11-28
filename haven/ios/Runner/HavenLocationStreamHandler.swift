@@ -30,20 +30,22 @@ import UIKit
 /// one until peers stop receiving; a foreground-intent start from there is
 /// never Haven's intent at all. `onListen` therefore refuses EVERY start while
 /// `applicationState == .background` — `== .background` and never `!=
-/// .active`, because Flutter's `resumed` is delivered from
-/// `applicationDidBecomeActive`, so a legitimate foreground start can land
-/// while UIKit still reports `.inactive`.
+/// .active`, because Flutter's `resumed` follows UIKit's did-become-active
+/// notification, so a legitimate foreground start can land while UIKit still
+/// reports `.inactive`.
 ///
-/// The exception is the owner's (2026-11-26, OD-R1): a background-capable
-/// start in a process iOS launched for a location event, under Always, for a
-/// user who accepted the CURRENT background disclosure
-/// (`backgroundStartPermitted`). Each conjunct closes a case: a process the
-/// user launched and then backgrounded never sets `launchedForLocation` (the
-/// case CI run 32661622879 recorded iOS refusing); iOS never relaunches a
-/// While-Using app, and a While-Using start from the background is the one it
-/// refuses; and an older acceptance did not cover sharing that starts again by
-/// itself. A permitted start iOS rejects anyway stays observable: no fix
-/// arrives, and Dart's bounded wait for one throws.
+/// The exception is the owner's (2026-11-26, OD-R1): a background-capable start
+/// in a location launch, under Always, for a user who accepted the CURRENT
+/// background disclosure (`backgroundStartPermitted`). A location launch is
+/// `AppDelegate`'s rule (D4, 2026-11-28): a location event reached the process
+/// before any scene came to the front, which includes the fix iOS delivers when
+/// a background-refresh launch restarts monitoring. Each conjunct closes a
+/// case: a process the user opened and then backgrounded never keeps
+/// `launchedForLocation` (the case CI run 32661622879 recorded iOS refusing);
+/// iOS never relaunches a While-Using app, and a While-Using start from the
+/// background is the one it refuses; and an older acceptance did not cover
+/// sharing that starts again by itself. A permitted start iOS rejects anyway
+/// stays observable: no fix arrives, and Dart's bounded wait for one throws.
 ///
 /// `beginLaunchWindow` holds a background task over the gap between the
 /// relaunch's catch-up sweep, whose own task ends when Dart replies, and the
@@ -114,6 +116,9 @@ final class HavenLocationStreamHandler: NSObject, CLLocationManagerDelegate, Flu
 
   private let manager = CLLocationManager()
 
+  /// The method channel, kept to send `locationLaunch`.
+  private var channel: FlutterMethodChannel?
+
   /// The live event sink, or nil while nothing is subscribed. Doubles as the
   /// "running" flag: no fix is emitted or cached without a subscriber.
   private var sink: FlutterEventSink?
@@ -129,9 +134,8 @@ final class HavenLocationStreamHandler: NSObject, CLLocationManagerDelegate, Flu
   /// position while backgrounded. Cleared with the subscription and on demand.
   private var lastBestFix: CLLocation?
 
-  /// Whether iOS launched this process into the background for a location
-  /// event and the user has not brought it to the front since. Written only
-  /// by `AppDelegate`.
+  /// Whether this process is a location launch (`AppDelegate`'s rule) and no
+  /// scene has come to the front since. Written only by `AppDelegate`.
   var launchedForLocation = false
 
   /// The background task that keeps a location relaunch executing through
@@ -172,6 +176,7 @@ final class HavenLocationStreamHandler: NSObject, CLLocationManagerDelegate, Flu
       name: Self.channelName,
       binaryMessenger: messenger
     )
+    self.channel = channel
     channel.setMethodCallHandler { [weak self] call, result in
       guard let self = self else {
         result(FlutterError(
@@ -285,6 +290,14 @@ final class HavenLocationStreamHandler: NSObject, CLLocationManagerDelegate, Flu
     guard launchWindow != .invalid else { return }
     UIApplication.shared.endBackgroundTask(launchWindow)
     launchWindow = .invalid
+  }
+
+  /// Tells Dart `launchedForLocation` has just been set: the event that sets
+  /// it can land after Dart's start-up read `status()`, and nothing else
+  /// follows it in a process no scene has brought to the front. Payload-free:
+  /// Dart re-reads `status()`, and the result is not awaited.
+  func notifyLocationLaunch() {
+    channel?.invokeMethod("locationLaunch", arguments: nil)
   }
 
   // MARK: - Profile

@@ -66,14 +66,15 @@
 /// test, the Android B1 lane) dispatches `AppLifecycleState.paused`
 /// IN-PROCESS via `tester.binding.handleAppLifecycleStateChanged`. That runs
 /// MapShell's genuine `_onPaused()`, but the OS never saw a transition: no
-/// `applicationDidEnterBackground` fired, the Flutter engine never flipped
+/// `sceneDidEnterBackground` fired, the Flutter engine never flipped
 /// its own lifecycle plumbing, and the native
 /// `HavenBackgroundSessionHandler`'s sessions were never held across an
 /// actual backgrounding. This lane closes that gap: the HOST wrapper
 /// (`tooling/e2e/ci/run-ios-bg-publish.sh`) launches ANOTHER app
-/// (com.apple.Preferences) over Haven mid-drive, so iOS itself delivers
-/// `UIApplicationDidEnterBackground` and the engine dispatches the paused
-/// state through the same channel a production backgrounding uses.
+/// (com.apple.Preferences) over Haven mid-drive, so iOS itself moves the
+/// scene to the background and posts `UIApplicationDidEnterBackground`, which
+/// the view controller turns into the paused state over the same channel a
+/// production backgrounding uses.
 ///
 /// ## Two tier jobs, and why the tier is an INPUT here
 ///
@@ -160,7 +161,7 @@
 /// What this lane proves is that the production background stack — plist
 /// mode, `HavenLocationStreamHandler`'s updates session, the native session
 /// handler's tier posture, the Dart publish pipeline — survives a genuinely
-/// fired `applicationDidEnterBackground` and keeps kind-445 events reaching
+/// fired `sceneDidEnterBackground` and keeps kind-445 events reaching
 /// the relay for the lane's window. The physical-device checklist
 /// (`docs/M7_BACKGROUND_SHARING.md` §6, item 0) remains the final proof.
 ///
@@ -1205,6 +1206,7 @@ void main() {
   // The REAL `paused` this test waits for still arrives over it. See
   // `e2e/_lib/app_lifecycle.dart`.
   resumeAppBeforeEachTest();
+  setUpAll(awaitPlatformResumed);
 
   testWidgets(
     'iOS bg-publish: native session arms, publishes continue across a REAL '

@@ -53,19 +53,20 @@ final isIOSProvider = Provider<bool>((_) => Platform.isIOS);
 /// background.
 ///
 /// The initial value is DERIVED from the binding rather than defaulting to a
-/// literal: on a background launch (an iOS SLC/region relaunch, which builds
-/// providers before the first frame) a literal `true` would let the provider
-/// open a background-capable session that iOS refuses outright — failing OPEN
-/// on the invariant that no such session is ever started from the background.
-/// A not-yet-dispatched state (`null`) maps to `true`, which is the ordinary
+/// literal: on a background launch (iOS runs the engine before any scene
+/// connects, and one may never connect, so the providers build under the
+/// `detached` seed) a literal `true` would let the provider open a
+/// background-capable session that iOS refuses outright — failing OPEN on the
+/// invariant that no such session is ever started from the background. A
+/// not-yet-dispatched state (`null`) maps to `true`, which is the ordinary
 /// foreground launch; it never occurs on iOS, whose embedder seeds
 /// `detached`. `inactive` is usually the transient the OS sandwiches around
 /// `resumed` and is not treated as backgrounded — which fails OPEN on an iOS
-/// background launch that loads its window: `viewWillAppear` sends `inactive`,
-/// read here as the overwritten seed or as the delivered message, and no
-/// `resumed` follows. The native session refuses that start, so the invariant
-/// holds, and the location service keeps its stream open so the next
-/// foreground `resumeStream()` starts the session.
+/// background launch a scene connects to: its `viewWillAppear` sends
+/// `inactive`, read here as the overwritten seed or as the delivered message,
+/// and no `resumed` follows. The native session refuses that start, so the
+/// invariant holds, and the location service keeps its stream open so the
+/// next foreground `resumeStream()` starts the session.
 ///
 /// Never a claim to the live-sync engine: see `appIsResumed`.
 final appForegroundProvider = StateProvider<bool>((_) {

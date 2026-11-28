@@ -34,8 +34,28 @@
 	<true/>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
-	<key>UIMainStoryboardFile</key>
-	<string>Main</string>
+	<!-- Haven's one scene, built in code (SceneDelegate.swift) on the engine
+	     AppDelegate runs from launch. No storyboard: a storyboard's view
+	     controller would start an engine of its own, a second main(). -->
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleApplication</key>
+			<array>
+				<dict>
+					<key>UISceneClassName</key>
+					<string>UIWindowScene</string>
+					<key>UISceneConfigurationName</key>
+					<string>flutter</string>
+					<key>UISceneDelegateClassName</key>
+					<string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
@@ -56,11 +76,11 @@
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Haven needs your location to share it securely with your trusted circles. Your location is always end-to-end encrypted.</string>
 	<!-- Any claim that sharing starts again after Haven is closed MUST state
-	     its condition (Always, movement, not guaranteed) and the While-Using
-	     limit; see test/lints/background_claim_accuracy_test.dart, which
-	     states why and enforces it here. -->
+	     its condition (Always, even without movement, not guaranteed) and the
+	     While-Using limit; see test/lints/background_claim_accuracy_test.dart,
+	     which states why and enforces it here. -->
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Haven shares your location with your trusted circles while it runs in the background. With &apos;Always&apos;, if Haven is closed, it starts sharing again by itself once you have moved a few hundred metres and iOS allows it. iOS decides when, so it is not guaranteed. With &apos;While Using the App&apos;, sharing stops when Haven is closed and stays stopped until you open it again. Your location is always end-to-end encrypted.</string>
+	<string>Haven shares your location with your trusted circles while it runs in the background. With &apos;Always&apos;, sharing can start again by itself after Haven is closed, even if you have not moved; iOS decides when, so it is not guaranteed. iOS can wake Haven after you have moved a few hundred metres, and also when it refreshes apps in the background. With &apos;While Using the App&apos;, sharing stops when Haven is closed and stays stopped until you open it again. Your location is always end-to-end encrypted.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Haven uses the camera only to scan a QR code when you add someone to a circle. No photos or video are taken or stored.</string>
 	<key>NSPhotoLibraryUsageDescription</key>

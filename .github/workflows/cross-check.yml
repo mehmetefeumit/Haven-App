@@ -10,10 +10,19 @@ on:
 jobs:
   apple:
     name: Apple (macOS + iOS)
-    runs-on: macos-latest
+    # The iOS toolchain runner: the build scripts (cc) compile against the
+    # SDKs of the Xcode that builds what ships.
+    runs-on: xcode-27
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      # The image's default Xcode is not its newest; select the newest stable
+      # one, the Xcode release-build.yml archives TestFlight builds with.
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -26,7 +35,7 @@ jobs:
           workspaces: |
             haven-core
             haven/rust_builder
-          key: cross-apple
+          key: cross-apple-xcode27
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check macOS (aarch64-apple-darwin)

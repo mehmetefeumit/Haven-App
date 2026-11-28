@@ -501,6 +501,12 @@
 #     opens exports every symbol the bridge looks up. Self-test here; the real
 #     run is on the archive before TestFlight and on the gate's simulator app.
 #
+#   iOS app SDK floor                 scripts/ci/check_ios_app_sdk.sh
+#     From April 2027 App Store Connect refuses (ITMS-90725) a build below the
+#     iOS 27 SDK, and only the built bundle's Info.plist says which SDK built
+#     it. Self-test here; the real run is on the archive before TestFlight, on
+#     the launch gate's simulator app and on build-check.yml's device build.
+#
 #   Session-busy marker is log-only   scripts/ci/check_session_busy_marker_not_routed.sh
 #     The Rule-14 "an MLS session is already open" marker must never drive a
 #     decision — Haven's FFI errors interpolate remote-authored text, so a
@@ -1586,6 +1592,14 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_ios_app_loadable.sh --self-test
 
+      # plistlib fixtures, XML and binary: an SDK below the floor fails, and a
+      # missing, malformed or disagreeing reading cannot vouch. The check runs
+      # for real on the archive in release-build.yml, on the simulator app in
+      # launch-gate-ios.yml and on build-check.yml's device build.
+      - name: iOS app SDK floor self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_ios_app_sdk.sh --self-test
+
       - name: Release APK loadable self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_apk_loadable.sh --self-test
@@ -2410,6 +2424,14 @@ jobs:
       - name: E2E harness self-test (iOS launch gate)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-launch-gate-ios.sh --self-test
+
+      # Against a stubbed xcrun: the newest runtime (of two of one version, the
+      # one supporting the preferred type, then the higher build), a device on
+      # THAT runtime, and a type it supports, with a warning on the fallback;
+      # no iOS runtime or no supported iPhone fails.
+      - name: E2E harness self-test (iOS simulator boot)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/boot-ios-sim.sh --self-test
 
       # The Android launch gate's runner against a stubbed adb: a crash at
       # launch, a restart or ANR mid-journey, Intro after a relaunch, a name

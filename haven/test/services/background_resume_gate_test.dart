@@ -113,6 +113,15 @@ void main() {
       expect(decide(acceptedVersion: 1), SystemResumeDecision.notify);
     });
 
+    test("a version-2 acceptance resumes: Android's disclosure did not change "
+        'at version 3', () {
+      expect(
+        decide(acceptedVersion: kAndroidBackgroundDisclosureVersion),
+        SystemResumeDecision.start,
+      );
+      expect(decide(acceptedVersion: 2), SystemResumeDecision.start);
+    });
+
     test('each disclosure flag is required, and a missing one refuses', () {
       expect(decide(foregroundAccepted: null), SystemResumeDecision.notify);
       expect(decide(backgroundAccepted: false), SystemResumeDecision.notify);

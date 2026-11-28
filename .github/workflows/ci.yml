@@ -346,7 +346,7 @@ jobs:
     uses: ./.github/workflows/e2e-ios-auth-tier.yml
 
   # A REAL OS-level background transition on iOS: mid-drive, the host launches
-  # another app over Haven, so iOS itself fires applicationDidEnterBackground —
+  # another app over Haven, so iOS itself fires sceneDidEnterBackground —
   # which no other lane produces (B7 and the Android B1 lane dispatch the
   # paused lifecycle event in-process). THREE legs over two axes. The
   # CoreLocation grant is one, because the two tiers must produce OPPOSITE

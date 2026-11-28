@@ -50,7 +50,7 @@ on:
 jobs:
   e2e_ios_real_gps:
     name: e2e_ios_real_gps
-    runs-on: macos-latest # Apple Silicon; arm64 simulator (no Linux Docker).
+    runs-on: xcode-27 # Apple Silicon; arm64 simulator (no Linux Docker).
     # Envelope sized for a COLD first run: setup (~10-15m) + the scanner
     # build's 10m ceiling + the pre-build step's 35m ceiling + the boot step's
     # 15m ceiling + the drive step's 75m ceiling (+ uncapped diagnostics, which since 2026-09-12 also run two
@@ -108,6 +108,13 @@ jobs:
         id: checkout
         uses: actions/checkout@v6
 
+      # The image's default Xcode is not its newest; select the newest stable
+      # one, the Xcode release-build.yml archives TestFlight builds with.
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -121,7 +128,7 @@ jobs:
             haven-core
             tooling/e2e/local-relay
             tooling/logscan
-          key: e2e-ios-real-gps
+          key: e2e-ios-real-gps-xcode27
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The runtime log scanner, release-built ONCE, before Flutter and the
@@ -158,11 +165,11 @@ jobs:
 
       - name: Boot iOS simulator
         id: sim
-        # macos-* runners have no GNU `timeout`, so GitHub's step cap is the
+        # macOS runners have no GNU `timeout`, so GitHub's step cap is the
         # only available bound on a boot that never reaches Booted. Measured
         # boots are 136-215 s; 15 min is ~4x the observed max.
         timeout-minutes: 15
-        run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 15"
+        run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 17"
 
       # `nick-fields/retry` is the inner bound on macOS (no coreutils
       # `timeout`), and it retries on ANY non-zero exit — it has no `retry_on`

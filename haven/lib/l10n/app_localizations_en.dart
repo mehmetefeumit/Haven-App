@@ -567,7 +567,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get locationSettingsIntroIos =>
-      'With location set to \'Always\', sharing starts again by itself after Haven is closed, once you have moved a few hundred metres and iOS allows it. After your phone restarts, this happens only once you have also unlocked it. iOS decides when this happens, so it is not guaranteed. With \'While Using the App\', sharing stops when Haven is closed and starts again when you open it.';
+      'With location set to \'Always\', sharing can start again by itself after Haven is closed, even if you have not moved; iOS decides when, so it is not guaranteed. iOS can wake Haven after you have moved a few hundred metres, and also when it refreshes apps in the background. After your phone restarts, this happens only once you have also unlocked it. With \'While Using the App\', sharing stops when Haven is closed and starts again when you open it.';
 
   @override
   String get locationSettingsToggleTitle => 'Share in background';
@@ -578,7 +578,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'Sharing keeps working in the background with your current permission, and iOS shows its blue location bar at the top of the screen while it does. If Haven is closed, sharing stops until you open it again. Choose \'Always\' for Haven in Settings so sharing can start again by itself after Haven is closed, once you have moved a few hundred metres and iOS allows it. Under \'Always\', iOS may show its location arrow in the status bar instead of the bar.';
+      'Sharing keeps working in the background with your current permission, and iOS shows its blue location bar at the top of the screen while it does. If Haven is closed, sharing stops until you open it again. With \'Always\' for Haven in Settings, sharing can start again by itself after Haven is closed, even if you have not moved; iOS decides when. Under \'Always\', iOS may show its location arrow in the status bar instead of the bar.';
 
   @override
   String get locationSettingsResumeConsentNote =>
@@ -646,7 +646,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get locationDisclosureBackgroundIos =>
-      'This app uses location data to enable sharing with your circles even when Haven is in the background and you are not using it. If location is set to \'Always\' and Haven is closed, even by you, Haven starts sharing again by itself once you have moved a few hundred metres and iOS allows it. After a restart, this happens only once you have also unlocked your phone. iOS decides when, so it is not guaranteed. With \'While Using the App\', sharing stops when Haven is closed and stays stopped until you open it again.';
+      'This app uses location data to enable sharing with your circles even when Haven is in the background and you are not using it. If location is set to \'Always\', sharing can start again by itself after Haven is closed, even by you, and even if you have not moved; iOS decides when, so it is not guaranteed. iOS can wake Haven after you have moved a few hundred metres, and also when it refreshes apps in the background. After a restart, this happens only once you have also unlocked your phone. With \'While Using the App\', sharing stops when Haven is closed and stays stopped until you open it again.';
 
   @override
   String get locationDisclosureManage =>

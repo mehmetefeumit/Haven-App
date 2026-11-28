@@ -190,7 +190,8 @@ class LiveSyncHealBackstop {
   /// `detached`, `inactive` or `paused`, with nobody looking. Armed there, a
   /// tick re-establishes a dead session — every group REQ and the inbox REQ,
   /// over fresh sockets — every 90-150 s for as long as that process lives.
-  /// The first `resumed` this shell is dispatched arms it instead ([start]).
+  /// The first `resumed` this shell is dispatched arms it instead ([start]);
+  /// an iOS process no scene has connected to is dispatched none.
   /// The cost is a window that is visible and never focused: it has no heal
   /// timer until it is.
   void startAtMount() {
@@ -449,6 +450,15 @@ class MapShell extends ConsumerStatefulWidget {
     required bool backgroundSharingEnabled,
   }) => !(isIOS && backgroundSharingEnabled);
 
+  /// Whether moving from the identity [before] to [after] (hex pubkeys,
+  /// `null` for none) ends what was built for [before]: a logout, or another
+  /// identity. A first resolution, or a reload of the same one, ends nothing.
+  @visibleForTesting
+  static bool identityEnded({
+    required String? before,
+    required String? after,
+  }) => before != null && before != after;
+
   /// Whether a live-sync session may be up in [lifecycle] — what the
   /// re-subscriber reads immediately before and after every start it makes.
   ///
@@ -482,19 +492,14 @@ class MapShell extends ConsumerStatefulWidget {
   /// At a mount the lifecycle is whatever the platform last reported —
   /// usually `resumed`, and then this mount's start is the first. Only if no
   /// message has arrived does it read the engine's `detached` seed and
-  /// decline; the first `resumed` is then dispatched and the resume handler
-  /// starts it. A shell mounted under `inactive`, `hidden`, or (iOS, sharing
-  /// on) `paused` starts a session here that nothing pauses while the process
-  /// stays there (open; `haven-core/SECURITY.md`, P4 residual 12).
-  /// Whether moving from the identity [before] to [after] (hex pubkeys,
-  /// `null` for none) ends what was built for [before]: a logout, or another
-  /// identity. A first resolution, or a reload of the same one, ends nothing.
-  @visibleForTesting
-  static bool identityEnded({
-    required String? before,
-    required String? after,
-  }) => before != null && before != after;
-
+  /// decline; the first message is then dispatched `resumed` first and the
+  /// resume handler starts it. An iOS process no scene has connected to is
+  /// sent none and reads the seed throughout: the start a burst makes there
+  /// reads the gate's lifecycle instead
+  /// (`ForegroundStartUpGate.effectiveLifecycle`). A shell mounted under
+  /// `inactive`, `hidden`, or (iOS, sharing on) `paused` starts a session here
+  /// that nothing pauses while the process stays there (open;
+  /// `haven-core/SECURITY.md`, P4 residual 12).
   @visibleForTesting
   static bool liveSyncWanted({
     required AppLifecycleState? lifecycle,
@@ -508,6 +513,17 @@ class MapShell extends ConsumerStatefulWidget {
     ),
     _ => true,
   };
+
+  /// Whether a shell mounted under [lifecycle] leaves the location service's
+  /// foreground hint as it is. Not in an iOS process still reading the
+  /// `detached` seed: one no scene has connected to is dispatched no pause,
+  /// and a hint left in front would let a background read raise a permission
+  /// prompt. The first `resumed` dispatched sets it back.
+  @visibleForTesting
+  static bool foregroundActiveAtMount({
+    required AppLifecycleState? lifecycle,
+    required bool isIOS,
+  }) => !(isIOS && lifecycle == AppLifecycleState.detached);
 
   /// Hands this isolate's MLS session to the Android foreground service at a
   /// pause, and tells [announce] whether it did.
@@ -1357,6 +1373,13 @@ class _MapShellState extends ConsumerState<MapShell>
     // send — so the foreground service reads the silence as a dead UI isolate
     // and releases a session this isolate is actively using. Idempotent.
     ensureForegroundTaskComms();
+    // The service alone: a provider written here is written during a build.
+    if (!MapShell.foregroundActiveAtMount(
+      lifecycle: WidgetsBinding.instance.lifecycleState,
+      isIOS: Platform.isIOS,
+    )) {
+      _geolocatorService?.foregroundActive = false;
+    }
     // The foreground stamp, or — mounted under `paused` — the pause the mount
     // missed, which cancels what `_startTimers` just armed.
     gateMount();
@@ -1448,6 +1471,10 @@ class _MapShellState extends ConsumerState<MapShell>
   @override
   Future<bool> launchedForLocation() =>
       _geolocatorService?.launchedForLocation() ?? Future.value(false);
+
+  @override
+  Stream<void> get locationLaunches =>
+      _geolocatorService?.locationLaunches ?? const Stream<void>.empty();
 
   // The roster too: a burst over no eligible circle closes idle, and the first
   // publish would then wait a whole scheduler tick, past the relaunch's wake.
@@ -2034,7 +2061,16 @@ class _MapShellState extends ConsumerState<MapShell>
   Future<BurstStart?> _prepareStartIntoBurst(Duration budget) async {
     if (!liveSyncEnabled || !mounted) return null;
     await ref.read(backgroundSharingProvider.notifier).loaded;
-    if (!mounted || !_liveSyncWanted()) return null;
+    // The gate's lifecycle, not the binding's: a location launch no scene has
+    // connected to reads the `detached` seed under the pause the gate took.
+    if (!mounted ||
+        !MapShell.liveSyncWanted(
+          lifecycle: effectiveLifecycle,
+          isIOS: Platform.isIOS,
+          backgroundSharingEnabled: ref.read(backgroundSharingProvider),
+        )) {
+      return null;
+    }
     final engine = ref.read(subscriptionServiceProvider);
     final circles = await ref.read(circlesProvider.future);
     if (!mounted) return null;
@@ -2402,7 +2438,8 @@ class _MapShellState extends ConsumerState<MapShell>
       // Lets a pause the grace is holding go on to hand the session over. It
       // cannot promise that here: Haven's engine is destroyed right after
       // `detached`, so the platform writes the hand-off awaits may never
-      // answer.
+      // answer. On iOS that is termination: `AppDelegate` keeps its one view
+      // controller for the process's life, so no released one sends it.
       _excursions.endGrace(HandoffGraceEnd.detached);
       _setForegroundActive(false);
       unawaited(_onDetached());

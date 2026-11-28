@@ -23,12 +23,28 @@ private let HAVEN_RUNNER_LOG = OSLog(subsystem: "haven_ios", category: "runner")
 
 @main
 @objc class AppDelegate: FlutterAppDelegate {
-  // Privacy: a blur overlay shown while the app is inactive so the OS-captured
-  // app-switcher snapshot does not reveal member locations or avatars. It is
-  // removed once the app becomes active again. iOS has no FLAG_SECURE
-  // equivalent, so this snapshot blur is the available protection for the
-  // recents thumbnail (it does not block in-app screenshots).
-  private var privacyBlurView: UIVisualEffectView?
+  // The app's one engine, run from didFinishLaunching on every launch: a
+  // location or BGTask wake reaches Dart before any scene connects, or with
+  // none at all. The registry overrides below hand every registrar out from
+  // it, so no second engine — a second main() beside this one (Rule 14) — is
+  // ever started. `@objc`: RunnerTests reads it through the runtime.
+  @objc let flutterEngine = FlutterEngine(name: "io.flutter")
+
+  // The one view controller on that engine, kept for the app's lifetime and
+  // shown by every scene's window (SceneDelegate); no scene builds its own.
+  // A controller freed with a disconnected scene would make the engine send
+  // Dart `detached`, stopping live sync in a process that is still sharing.
+  @objc private(set) lazy var flutterViewController: FlutterViewController = {
+    let controller = FlutterViewController(engine: self.flutterEngine, nibName: nil, bundle: nil)
+    // The launch screen until Flutter's first frame: a storyboard controller
+    // loaded it by itself, an engine-attached one only when asked.
+    controller.loadDefaultSplashScreenView()
+    return controller
+  }()
+
+  // Whether a scene of this process has entered the foreground. Until one
+  // has, the user has not opened it.
+  private var foregroundSeen = false
 
   // Bridges CoreLocation "Always" authorization to Flutter. Retained for the
   // app's lifetime so its CLLocationManager and pending result survive.
@@ -101,43 +117,51 @@ private let HAVEN_RUNNER_LOG = OSLog(subsystem: "haven_ios", category: "runner")
     os_log("logscan-plant-swift-open-N48X2CR93Y", log: HAVEN_RUNNER_LOG)
     #endif
 
+    // Before any registration: a handler set on an engine that is not yet
+    // running is dropped (asserted only in a debug engine), so every channel
+    // below would be silently missing.
+    flutterEngine.run()
     GeneratedPluginRegistrant.register(with: self)
     if let registrar = self.registrar(forPlugin: "HavenQrScanner") {
       qrScannerHandler.register(with: registrar)
     }
 
-    if let controller = window?.rootViewController as? FlutterViewController {
-      let messenger = controller.binaryMessenger
+    let messenger = flutterEngine.binaryMessenger
 
-      // Existing handler: CoreLocation "Always" authorization bridge.
-      locationAuthHandler.register(with: messenger)
+    // Existing handler: CoreLocation "Always" authorization bridge.
+    locationAuthHandler.register(with: messenger)
 
-      // M7-D: Register the BGTask catch-up channel (strong channel capture).
-      bgTaskHandler.register(with: messenger)
+    // M7-D: Register the BGTask catch-up channel (strong channel capture).
+    bgTaskHandler.register(with: messenger)
 
-      // M7-D: Register the SLC catch-up channel (strong channel capture).
-      slcHandler.register(with: messenger)
+    // M7-D: Register the SLC catch-up channel (strong channel capture).
+    slcHandler.register(with: messenger)
 
-      // Register the background-session arm/disarm/status channel.
-      backgroundSessionHandler.register(with: messenger)
+    // Register the background-session arm/disarm/status channel.
+    backgroundSessionHandler.register(with: messenger)
 
-      // The two handlers share one tier decision: the session handler owns the
-      // Always-confirmed predicate, the stream handler applies the indicator
-      // half of it and re-arms from its authorization delegate. Both wirings
-      // are assigned AFTER the session handler is registered, so the
-      // authorization callback CoreLocation fires when the stream handler's
-      // manager was created (before this method ran) finds nothing to call and
-      // the synchronous arm() below keeps its documented meaning.
-      locationStreamHandler.sessionHandler = backgroundSessionHandler
-      backgroundSessionHandler.onAlwaysConfirmedChanged = { [weak self] in
-        self?.locationStreamHandler.applyIndicatorPolicy()
-      }
-      locationStreamHandler.register(with: messenger)
-      locationStreamHandler.onAuthorizationChanged = { [weak self] in
-        self?.backgroundSessionHandler.arm()
-      }
+    // The two handlers share one tier decision: the session handler owns the
+    // Always-confirmed predicate, the stream handler applies the indicator
+    // half of it and re-arms from its authorization delegate. Both wirings
+    // are assigned AFTER the session handler is registered, so the
+    // authorization callback CoreLocation fires when the stream handler's
+    // manager was created (before this method ran) finds nothing to call and
+    // the synchronous arm() below keeps its documented meaning.
+    locationStreamHandler.sessionHandler = backgroundSessionHandler
+    backgroundSessionHandler.onAlwaysConfirmedChanged = { [weak self] in
+      self?.locationStreamHandler.applyIndicatorPolicy()
+    }
+    locationStreamHandler.register(with: messenger)
+    locationStreamHandler.onAuthorizationChanged = { [weak self] in
+      self?.backgroundSessionHandler.arm()
+    }
 
-      networkChangeHandler.register(with: messenger)
+    networkChangeHandler.register(with: messenger)
+
+    // In place before startMonitoring() below, whose restart makes
+    // CoreLocation deliver the event a location relaunch is for.
+    slcHandler.onLocationEvent = { [weak self] in
+      self?.noteLocationLaunch()
     }
 
     let result = super.application(application, didFinishLaunchingWithOptions: launchOptions)
@@ -152,29 +176,20 @@ private let HAVEN_RUNNER_LOG = OSLog(subsystem: "haven_ios", category: "runner")
     // launch the key may not yet exist when this block runs (first launch of
     // this build) — both startMonitoring() and scheduleNextCatchup() read the
     // key at call time, guarded by isEnabled() → guard bgSharing && enabled,
-    // so they no-op here and are re-armed by applicationDidEnterBackground
-    // below once Dart has written the mirror (A3).
+    // so they no-op here and are re-armed by sceneDidEnterBackground below
+    // once Dart has written the mirror (A3).
     //
     // Location relaunch: iOS relaunches a terminated Haven into the background
-    // for a significant-change, region or visit event with
-    // launchOptions[.location] set. Monitoring restarts on every launch, so the
-    // OS redelivers the pending event to the SLC delegate (which triggers the
-    // Dart catch-up), and the BGTask floor stays scheduled on a relaunch too.
-    // Both are no-ops while either UserDefaults flag is false.
-    let launchedForLocation = launchOptions?[.location] != nil
-      && application.applicationState == .background
+    // for a significant-change or region event. Monitoring restarts on every
+    // launch, so the OS redelivers the pending event to the SLC delegate
+    // (which triggers the Dart catch-up and noteLocationLaunch), and the
+    // BGTask floor stays scheduled on a relaunch too. Both are no-ops while
+    // either UserDefaults flag is false.
     slcHandler.startMonitoring()
     bgTaskHandler.scheduleNextCatchup()
-    if launchedForLocation {
-      // The one fact that lets the stream handler start a background-capable
-      // session from the background (OD-R1, owner-directed 2026-11-26); its
-      // own predicate still needs Always and the current disclosure.
-      locationStreamHandler.launchedForLocation = true
-      locationStreamHandler.beginLaunchWindow()
-    }
 
-    // Arm the CoreLocation background sessions SYNCHRONOUSLY, on BOTH launch
-    // branches: a session held when the app was previously terminated can be
+    // Arm the CoreLocation background sessions SYNCHRONOUSLY, on EVERY
+    // launch: a session held when the app was previously terminated can be
     // retaken only for a few seconds after a background relaunch, and a
     // normal-launch session simply stays inactive until foreground. The
     // handler re-reads the background-sharing consent predicate and disarms
@@ -184,9 +199,50 @@ private let HAVEN_RUNNER_LOG = OSLog(subsystem: "haven_ios", category: "runner")
     return result
   }
 
-  override func applicationWillEnterForeground(_ application: UIApplication) {
-    super.applicationWillEnterForeground(application)
-    // The user is in front: this is no longer a background launch.
+  // FlutterAppDelegate answers these from its own window, which stays nil
+  // under scenes, by starting an engine of its own.
+  override func registrar(forPlugin pluginKey: String) -> FlutterPluginRegistrar? {
+    flutterEngine.registrar(forPlugin: pluginKey)
+  }
+
+  override func hasPlugin(_ pluginKey: String) -> Bool {
+    flutterEngine.hasPlugin(pluginKey)
+  }
+
+  override func valuePublished(byPlugin pluginKey: String) -> NSObject? {
+    flutterEngine.valuePublished(byPlugin: pluginKey)
+  }
+
+  // OD-R1's location launch, by the owner's rule (D4, 2026-11-28): the first
+  // location event CoreLocation delivers to a process no scene has brought to
+  // the front. Under scenes UIKit passes no launch options and every launch
+  // starts in .background, so the event is the only witness; iOS delivers one
+  // at every start of significant-change monitoring, so a background-refresh
+  // launch counts too, as the owner accepted. Once per process. On a user's
+  // cold launch that first fix can land before the scene's foreground:
+  // sceneWillEnterForeground clears it, and Dart heals at its first lifecycle
+  // message. `@objc`: RunnerTests calls it through the runtime.
+  @objc func noteLocationLaunch() {
+    guard !foregroundSeen, !locationStreamHandler.launchedForLocation else { return }
+    // The one fact that lets the stream handler start a background-capable
+    // session from the background (OD-R1, owner-directed 2026-11-26); its
+    // own predicate still needs Always and the current disclosure.
+    locationStreamHandler.launchedForLocation = true
+    locationStreamHandler.beginLaunchWindow()
+    // Dart may already have read status() and settled its start-up on it.
+    locationStreamHandler.notifyLocationLaunch()
+  }
+
+  // For RunnerTests, which reads it through the runtime.
+  @objc var isLocationLaunch: Bool {
+    locationStreamHandler.launchedForLocation
+  }
+
+  /// From `SceneDelegate.sceneWillEnterForeground`.
+  func sceneWillEnterForeground() {
+    // The user is in front: this is no longer a background launch, and no
+    // later location event in this process makes it one.
+    foregroundSeen = true
     locationStreamHandler.launchedForLocation = false
     locationStreamHandler.endLaunchWindow()
     // Re-arm on every foreground return: covers a toggle-enable whose Dart
@@ -196,8 +252,8 @@ private let HAVEN_RUNNER_LOG = OSLog(subsystem: "haven_ios", category: "runner")
     backgroundSessionHandler.arm()
   }
 
-  override func applicationDidEnterBackground(_ application: UIApplication) {
-    super.applicationDidEnterBackground(application)
+  /// From `SceneDelegate.sceneDidEnterBackground`.
+  func sceneDidEnterBackground() {
     // M7-E (A3): re-arm the background wake paths on every backgrounding.
     // The didFinishLaunching block above runs BEFORE Dart writes the
     // backgroundCatchupEnabled mirror in main(), so on the FIRST launch of an
@@ -211,21 +267,5 @@ private let HAVEN_RUNNER_LOG = OSLog(subsystem: "haven_ios", category: "runner")
     // mirror) is off — user opt-out is unaffected.
     slcHandler.startMonitoring()
     bgTaskHandler.scheduleNextCatchup()
-  }
-
-  override func applicationWillResignActive(_ application: UIApplication) {
-    super.applicationWillResignActive(application)
-    guard let window = window, privacyBlurView == nil else { return }
-    let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
-    blur.frame = window.bounds
-    blur.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-    window.addSubview(blur)
-    privacyBlurView = blur
-  }
-
-  override func applicationDidBecomeActive(_ application: UIApplication) {
-    super.applicationDidBecomeActive(application)
-    privacyBlurView?.removeFromSuperview()
-    privacyBlurView = nil
   }
 }

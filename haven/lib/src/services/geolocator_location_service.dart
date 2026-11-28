@@ -456,6 +456,11 @@ class GeolocatorLocationService implements LocationService {
   Future<bool> launchedForLocation() async =>
       _isIOS && (await _iosSource.status()).launchedForLocation;
 
+  /// Fires when the native side sets that flag after the process started
+  /// ([IosLocationSource.locationLaunches]); never off iOS.
+  Stream<void> get locationLaunches =>
+      _isIOS ? _iosSource.locationLaunches : const Stream<void>.empty();
+
   /// Starts the native session background-capable in a process iOS launched
   /// into the background for a location event, with no provider listening.
   ///

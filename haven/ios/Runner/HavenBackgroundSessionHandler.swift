@@ -84,7 +84,7 @@ final class HavenBackgroundSessionHandler: NSObject {
   /// launched for a location event. Equal to Dart's
   /// `kBackgroundDisclosureVersion` (check 20 of
   /// `check_ios_background_publish.sh`).
-  private static let kBgDisclosureResumeVersion = 2
+  private static let kBgDisclosureResumeVersion = 3
 
   /// Whether sharing may start again without the user opening Haven: the
   /// toggle on, both disclosures accepted, the background one at the current

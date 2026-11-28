@@ -27,8 +27,14 @@ void main() {
   Widget buildHost({
     required bool includeBackground,
     required ValueNotifier<bool?> result,
+    bool isIOS = false,
   }) {
     return ProviderScope(
+      overrides: [
+        locationDisclosureControllerProvider.overrideWith(
+          (_) => LocationDisclosureController(isIOS: isIOS),
+        ),
+      ],
       child: MaterialApp(
         // The disclosure dialog reads its copy through AppLocalizations since
         // the strings moved out of hard-coded Dart, so the harness must supply
@@ -108,30 +114,26 @@ void main() {
       },
     );
 
-    testWidgets(
-      'fresh state: Not Now returns false and does not persist key',
-      (tester) async {
-        SharedPreferences.setMockInitialValues({});
+    testWidgets('fresh state: Not Now returns false and does not persist key', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
 
-        final result = ValueNotifier<bool?>(null);
-        await tester.pumpWidget(
-          buildHost(includeBackground: false, result: result),
-        );
+      final result = ValueNotifier<bool?>(null);
+      await tester.pumpWidget(
+        buildHost(includeBackground: false, result: result),
+      );
 
-        await tester.tap(find.text('Trigger'));
-        await tester.pumpAndSettle();
-        await tester.tap(find.byKey(WidgetKeys.locationDisclosureNotNow));
-        await tester.pumpAndSettle();
+      await tester.tap(find.text('Trigger'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureNotNow));
+      await tester.pumpAndSettle();
 
-        expect(result.value, isFalse);
+      expect(result.value, isFalse);
 
-        final prefs = await SharedPreferences.getInstance();
-        expect(
-          prefs.getBool(kLocationDisclosureAcceptedKey),
-          isNot(isTrue),
-        );
-      },
-    );
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool(kLocationDisclosureAcceptedKey), isNot(isTrue));
+    });
 
     testWidgets(
       'short-circuit: foreground already accepted — no dialog shown',
@@ -152,170 +154,187 @@ void main() {
         await tester.pump();
 
         // No dialog should have appeared.
-        expect(
-          find.byKey(WidgetKeys.locationDisclosureAgree),
-          findsNothing,
-        );
+        expect(find.byKey(WidgetKeys.locationDisclosureAgree), findsNothing);
 
         // Future must have resolved to true immediately.
         expect(result.value, isTrue);
       },
     );
 
-    testWidgets(
-      'background separation: foreground accepted but background not'
-      ' — dialog is shown for background request',
-      (tester) async {
-        // Only foreground key is set; background key is absent.
-        SharedPreferences.setMockInitialValues({
-          kLocationDisclosureAcceptedKey: true,
-        });
+    testWidgets('background separation: foreground accepted but background not'
+        ' — dialog is shown for background request', (tester) async {
+      // Only foreground key is set; background key is absent.
+      SharedPreferences.setMockInitialValues({
+        kLocationDisclosureAcceptedKey: true,
+      });
 
-        final result = ValueNotifier<bool?>(null);
-        await tester.pumpWidget(
-          buildHost(includeBackground: true, result: result),
-        );
+      final result = ValueNotifier<bool?>(null);
+      await tester.pumpWidget(
+        buildHost(includeBackground: true, result: result),
+      );
 
-        await tester.tap(find.text('Trigger'));
-        await tester.pumpAndSettle();
+      await tester.tap(find.text('Trigger'));
+      await tester.pumpAndSettle();
 
-        // Dialog must appear because background consent is still needed.
-        expect(
-          find.byKey(WidgetKeys.locationDisclosureAgree),
-          findsOneWidget,
-        );
+      // Dialog must appear because background consent is still needed.
+      expect(find.byKey(WidgetKeys.locationDisclosureAgree), findsOneWidget);
 
-        // Dismiss without confirming to avoid leaking state.
-        await tester.tap(find.byKey(WidgetKeys.locationDisclosureNotNow));
-        await tester.pumpAndSettle();
-        expect(result.value, isFalse);
-      },
-    );
+      // Dismiss without confirming to avoid leaking state.
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureNotNow));
+      await tester.pumpAndSettle();
+      expect(result.value, isFalse);
+    });
 
-    testWidgets(
-      'background accept persists both fg and bg keys',
-      (tester) async {
-        SharedPreferences.setMockInitialValues({});
+    testWidgets('background accept persists both fg and bg keys', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
 
-        final result = ValueNotifier<bool?>(null);
-        await tester.pumpWidget(
-          buildHost(includeBackground: true, result: result),
-        );
+      final result = ValueNotifier<bool?>(null);
+      await tester.pumpWidget(
+        buildHost(includeBackground: true, result: result),
+      );
 
-        await tester.tap(find.text('Trigger'));
-        await tester.pumpAndSettle();
-        await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
-        await tester.pumpAndSettle();
+      await tester.tap(find.text('Trigger'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await tester.pumpAndSettle();
 
-        expect(result.value, isTrue);
+      expect(result.value, isTrue);
 
-        final prefs = await SharedPreferences.getInstance();
-        // Background acceptance implies foreground acceptance.
-        expect(prefs.getBool(kLocationDisclosureAcceptedKey), isTrue);
-        expect(
-          prefs.getBool(kLocationDisclosureBackgroundAcceptedKey),
-          isTrue,
-        );
-      },
-    );
+      final prefs = await SharedPreferences.getInstance();
+      // Background acceptance implies foreground acceptance.
+      expect(prefs.getBool(kLocationDisclosureAcceptedKey), isTrue);
+      expect(prefs.getBool(kLocationDisclosureBackgroundAcceptedKey), isTrue);
+    });
 
-    testWidgets(
-      'persists the acceptance BEFORE it publishes it in memory',
-      (tester) async {
-        // THE ORDERING ANOTHER READER DEPENDS ON.
-        //
-        // `LocationAccessNotifier._disclosureAccepted` gates the whole
-        // location-access banner and consults SharedPreferences and nothing
-        // else. It used to read this controller's in-memory state first, with
-        // a doc claiming that closed a race — but the race cannot happen in
-        // this direction: prefs is written and awaited before `state` is
-        // touched, and the only other write path (`_syncFromPrefs`) derives
-        // memory FROM prefs. So in-memory-true always implied prefs-true, the
-        // extra read was unreachable as load-bearing, and deleting it changed
-        // nothing. It is gone.
-        //
-        // Which makes THIS the invariant to pin. If someone later reorders
-        // `ensureDisclosed` to publish in memory first and persist afterwards,
-        // the deleted read would silently become load-bearing again and a
-        // probe landing in that window would misread a consenting user as
-        // un-disclosed — staying quiet through a real outage. Asserting the
-        // two flags at the end could not catch that; both are true by then.
-        // So the pref is sampled AT the moment the state changes.
-        SharedPreferences.setMockInitialValues({});
-        final prefs = await SharedPreferences.getInstance();
+    testWidgets('persists the acceptance BEFORE it publishes it in memory', (
+      tester,
+    ) async {
+      // THE ORDERING ANOTHER READER DEPENDS ON.
+      //
+      // `LocationAccessNotifier._disclosureAccepted` gates the whole
+      // location-access banner and consults SharedPreferences and nothing
+      // else. It used to read this controller's in-memory state first, with
+      // a doc claiming that closed a race — but the race cannot happen in
+      // this direction: prefs is written and awaited before `state` is
+      // touched, and the only other write path (`_syncFromPrefs`) derives
+      // memory FROM prefs. So in-memory-true always implied prefs-true, the
+      // extra read was unreachable as load-bearing, and deleting it changed
+      // nothing. It is gone.
+      //
+      // Which makes THIS the invariant to pin. If someone later reorders
+      // `ensureDisclosed` to publish in memory first and persist afterwards,
+      // the deleted read would silently become load-bearing again and a
+      // probe landing in that window would misread a consenting user as
+      // un-disclosed — staying quiet through a real outage. Asserting the
+      // two flags at the end could not catch that; both are true by then.
+      // So the pref is sampled AT the moment the state changes.
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
 
-        bool? prefAtPublish;
-        final container = ProviderContainer();
-        addTearDown(container.dispose);
-        final controller = container.read(
-          locationDisclosureControllerProvider.notifier,
-        );
-        // Fires synchronously on every `state = ...`, so it observes the
-        // ordering rather than the outcome.
-        controller.addListener((state) {
-          if (state.foregroundAccepted) {
-            prefAtPublish ??= prefs.getBool(kLocationDisclosureAcceptedKey);
-          }
-        });
+      bool? prefAtPublish;
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final controller = container.read(
+        locationDisclosureControllerProvider.notifier,
+      );
+      // Fires synchronously on every `state = ...`, so it observes the
+      // ordering rather than the outcome.
+      controller.addListener((state) {
+        if (state.foregroundAccepted) {
+          prefAtPublish ??= prefs.getBool(kLocationDisclosureAcceptedKey);
+        }
+      });
 
-        final result = ValueNotifier<bool?>(null);
-        await tester.pumpWidget(
-          UncontrolledProviderScope(
-            container: container,
-            child: MaterialApp(
-              localizationsDelegates: AppLocalizations.localizationsDelegates,
-              supportedLocales: AppLocalizations.supportedLocales,
-              home: Scaffold(
-                body: Consumer(
-                  builder: (context, ref, _) => ElevatedButton(
-                    onPressed: () async {
-                      result.value = await ref
-                          .read(locationDisclosureControllerProvider.notifier)
-                          .ensureDisclosed(context, includeBackground: false);
-                    },
-                    child: const Text('Trigger'),
-                  ),
+      final result = ValueNotifier<bool?>(null);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: Consumer(
+                builder: (context, ref, _) => ElevatedButton(
+                  onPressed: () async {
+                    result.value = await ref
+                        .read(locationDisclosureControllerProvider.notifier)
+                        .ensureDisclosed(context, includeBackground: false);
+                  },
+                  child: const Text('Trigger'),
                 ),
               ),
             ),
           ),
-        );
+        ),
+      );
 
-        await tester.tap(find.text('Trigger'));
-        await tester.pumpAndSettle();
-        await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
-        await tester.pumpAndSettle();
+      await tester.tap(find.text('Trigger'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await tester.pumpAndSettle();
 
-        expect(result.value, isTrue);
-        expect(
-          prefAtPublish,
-          isTrue,
-          reason: 'The persisted flag must already be set the instant the '
-              'in-memory state says accepted. Everything that reads consent '
-              'from prefs alone — the location-access banner\'s gate, the '
-              'publishers — depends on prefs never being behind memory.',
-        );
-      },
-    );
+      expect(result.value, isTrue);
+      expect(
+        prefAtPublish,
+        isTrue,
+        reason:
+            'The persisted flag must already be set the instant the '
+            'in-memory state says accepted. Everything that reads consent '
+            'from prefs alone — the location-access banner\'s gate, the '
+            'publishers — depends on prefs never being behind memory.',
+      );
+    });
   });
 
   group('versioned background consent (OD-R3)', () {
     test('backgroundResumeDisclosureAccepted needs both disclosures at the '
         'current version; anything missing is a refusal', () {
-      bool accepted(bool? fg, bool? bg, int? version) =>
-          backgroundResumeDisclosureAccepted(
-            foregroundAccepted: fg,
-            backgroundAccepted: bg,
-            acceptedVersion: version,
-          );
-      expect(accepted(null, null, null), isFalse);
-      expect(accepted(true, true, null), isFalse, reason: 'v1 (no int)');
-      expect(accepted(true, true, 1), isFalse);
-      expect(accepted(true, true, kBackgroundDisclosureVersion), isTrue);
-      expect(accepted(true, true, kBackgroundDisclosureVersion + 1), isTrue);
-      expect(accepted(false, true, kBackgroundDisclosureVersion), isFalse);
-      expect(accepted(true, false, kBackgroundDisclosureVersion), isFalse);
-      expect(accepted(null, true, kBackgroundDisclosureVersion), isFalse);
+      for (final isIOS in [false, true]) {
+        final current = resumeDisclosureVersion(isIOS: isIOS);
+        bool accepted(bool? fg, bool? bg, int? version) =>
+            backgroundResumeDisclosureAccepted(
+              foregroundAccepted: fg,
+              backgroundAccepted: bg,
+              acceptedVersion: version,
+              isIOS: isIOS,
+            );
+        final on = isIOS ? 'iPhone' : 'Android';
+        expect(accepted(null, null, null), isFalse, reason: on);
+        expect(accepted(true, true, null), isFalse, reason: '$on: v1');
+        expect(accepted(true, true, 1), isFalse, reason: on);
+        expect(accepted(true, true, current - 1), isFalse, reason: on);
+        expect(accepted(true, true, current), isTrue, reason: on);
+        expect(accepted(true, true, current + 1), isTrue, reason: on);
+        expect(accepted(false, true, current), isFalse, reason: on);
+        expect(accepted(true, false, current), isFalse, reason: on);
+        expect(accepted(null, true, current), isFalse, reason: on);
+      }
+    });
+
+    test('a version-2 acceptance resumes on Android, never on iPhone', () {
+      // Version 3 told iPhone users that sharing can start again without
+      // movement (owner decision D4); Android's text and behaviour did not
+      // change, so its users are not asked again.
+      expect(kAndroidBackgroundDisclosureVersion, 2);
+      expect(kBackgroundDisclosureVersion, 3);
+      expect(
+        resumeDisclosureVersion(isIOS: true),
+        kBackgroundDisclosureVersion,
+      );
+      expect(
+        resumeDisclosureVersion(isIOS: false),
+        kAndroidBackgroundDisclosureVersion,
+      );
+      bool v2(bool isIOS) => backgroundResumeDisclosureAccepted(
+        foregroundAccepted: true,
+        backgroundAccepted: true,
+        acceptedVersion: 2,
+        isIOS: isIOS,
+      );
+      expect(v2(true), isFalse, reason: 'iPhone resumed on version-2 consent');
+      expect(v2(false), isTrue, reason: 'Android re-asked for unchanged text');
     });
 
     testWidgets('accepting the background disclosure records the current '
@@ -383,6 +402,56 @@ void main() {
       expect(find.byKey(WidgetKeys.locationDisclosureAgree), findsNothing);
       expect(result.value, isTrue);
     });
+
+    testWidgets('a version-2 acceptance is asked again on iPhone, in the '
+        'iPhone text, and Agree records the current version', (tester) async {
+      SharedPreferences.setMockInitialValues({
+        kLocationDisclosureAcceptedKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true,
+        kLocationDisclosureBackgroundVersionKey: 2,
+      });
+      final en = await AppLocalizations.delegate.load(const Locale('en'));
+      final result = ValueNotifier<bool?>(null);
+      await tester.pumpWidget(
+        buildHost(includeBackground: true, result: result, isIOS: true),
+      );
+      await tester.tap(find.text('Trigger'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text(en.locationDisclosureBackgroundIos),
+        findsOneWidget,
+        reason:
+            'version-2 consent passed for sharing that starts again '
+            'without movement',
+      );
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await tester.pumpAndSettle();
+      final prefs = await SharedPreferences.getInstance();
+      expect(
+        prefs.getInt(kLocationDisclosureBackgroundVersionKey),
+        kBackgroundDisclosureVersion,
+      );
+      expect(backgroundResumeDisclosureAcceptedIn(prefs, isIOS: true), isTrue);
+    });
+
+    testWidgets('a version-2 acceptance is not asked again on Android', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({
+        kLocationDisclosureAcceptedKey: true,
+        kLocationDisclosureBackgroundAcceptedKey: true,
+        kLocationDisclosureBackgroundVersionKey: 2,
+      });
+      final result = ValueNotifier<bool?>(null);
+      await tester.pumpWidget(
+        buildHost(includeBackground: true, result: result),
+      );
+      await tester.tap(find.text('Trigger'));
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(WidgetKeys.locationDisclosureAgree), findsNothing);
+      expect(result.value, isTrue);
+    });
   });
 
   group('reconfirmBackgroundIfOwed', () {
@@ -393,25 +462,33 @@ void main() {
       kLocationDisclosureBackgroundAcceptedKey: true,
     };
 
-    Widget host(ValueNotifier<bool?> result, {bool force = false}) =>
-        ProviderScope(
-          child: MaterialApp(
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: Scaffold(
-              body: Consumer(
-                builder: (context, ref, _) => ElevatedButton(
-                  onPressed: () async {
-                    result.value = await ref
-                        .read(locationDisclosureControllerProvider.notifier)
-                        .reconfirmBackgroundIfOwed(context, force: force);
-                  },
-                  child: const Text('Trigger'),
-                ),
-              ),
+    Widget host(
+      ValueNotifier<bool?> result, {
+      bool force = false,
+      bool isIOS = false,
+    }) => ProviderScope(
+      overrides: [
+        locationDisclosureControllerProvider.overrideWith(
+          (_) => LocationDisclosureController(isIOS: isIOS),
+        ),
+      ],
+      child: MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: Consumer(
+            builder: (context, ref, _) => ElevatedButton(
+              onPressed: () async {
+                result.value = await ref
+                    .read(locationDisclosureControllerProvider.notifier)
+                    .reconfirmBackgroundIfOwed(context, force: force);
+              },
+              child: const Text('Trigger'),
             ),
           ),
-        );
+        ),
+      ),
+    );
 
     Future<void> trigger(WidgetTester tester) async {
       await tester.tap(find.text('Trigger'));
@@ -491,6 +568,51 @@ void main() {
       });
     }
 
+    testWidgets('an iPhone user at version 2 is shown the update once, though '
+        'version 2 was already shown; Agree records the current version', (
+      tester,
+    ) async {
+      final v2 = <String, Object>{
+        ...v1SharingOn,
+        kLocationDisclosureBackgroundVersionKey: 2,
+        kLocationDisclosureBackgroundPromptedVersionKey: 2,
+      };
+      SharedPreferences.setMockInitialValues(v2);
+      final en = await AppLocalizations.delegate.load(const Locale('en'));
+      final result = ValueNotifier<bool?>(null);
+      await tester.pumpWidget(host(result, isIOS: true));
+      await trigger(tester);
+      expect(find.textContaining(updateLeadFragment), findsOneWidget);
+      expect(find.text(en.locationDisclosureBackgroundIos), findsOneWidget);
+      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+      await tester.pumpAndSettle();
+
+      expect(result.value, isTrue);
+      final prefs = await SharedPreferences.getInstance();
+      expect(
+        prefs.getInt(kLocationDisclosureBackgroundVersionKey),
+        kBackgroundDisclosureVersion,
+      );
+      expect(backgroundResumeDisclosureAcceptedIn(prefs, isIOS: true), isTrue);
+
+      result.value = true;
+      await trigger(tester);
+      expect(result.value, isNull, reason: 'asked twice');
+    });
+
+    testWidgets('an Android user at version 2 is owed nothing', (tester) async {
+      SharedPreferences.setMockInitialValues({
+        ...v1SharingOn,
+        kLocationDisclosureBackgroundVersionKey: 2,
+        kLocationDisclosureBackgroundPromptedVersionKey: 2,
+      });
+      final result = ValueNotifier<bool?>(true);
+      await tester.pumpWidget(host(result));
+      await trigger(tester);
+      expect(find.byKey(WidgetKeys.locationDisclosureAgree), findsNothing);
+      expect(result.value, isNull);
+    });
+
     testWidgets('force re-asks a user who already chose Not now (the '
         'settings advisory)', (tester) async {
       SharedPreferences.setMockInitialValues({
@@ -519,6 +641,7 @@ void main() {
       int prompted = 0,
       BackgroundLocationStatus allTime = missing,
       bool allTimePrompted = false,
+      bool isIOS = false,
     }) => foregroundConsentStepDue(
       sharingOn: sharingOn,
       backgroundAccepted: true,
@@ -526,9 +649,10 @@ void main() {
       promptedVersion: prompted,
       allTime: allTime,
       allTimePrompted: allTimePrompted,
+      isIOS: isIOS,
     );
 
-    const v2 = kBackgroundDisclosureVersion;
+    const v2 = kAndroidBackgroundDisclosureVersion;
 
     test('the re-confirm wins, carrying the all-time step where it is '
         'missing; the all-time step alone only at the current version', () {
@@ -544,9 +668,39 @@ void main() {
         reason: 'an older acceptance is never asked for "all the time"',
       );
       expect(due(version: v2), ForegroundConsentStep.allTime);
-      expect(due(version: v2, allTimePrompted: true), ForegroundConsentStep.none);
+      expect(
+        due(version: v2, allTimePrompted: true),
+        ForegroundConsentStep.none,
+      );
       expect(due(version: v2, allTime: granted), ForegroundConsentStep.none);
       expect(due(sharingOn: false), ForegroundConsentStep.none);
+    });
+
+    test('on iPhone a version-2 acceptance owes the re-confirm once; the '
+        'current version owes nothing', () {
+      const notRequired = BackgroundLocationStatus.notRequired;
+      ForegroundConsentStep ios({required int version, int prompted = 0}) =>
+          due(
+            version: version,
+            prompted: prompted,
+            allTime: notRequired,
+            isIOS: true,
+          );
+      expect(ios(version: 2, prompted: 2), ForegroundConsentStep.reconfirm);
+      expect(
+        ios(version: 2, prompted: kBackgroundDisclosureVersion),
+        ForegroundConsentStep.none,
+        reason: 'asked again after Not now',
+      );
+      expect(
+        ios(version: kBackgroundDisclosureVersion),
+        ForegroundConsentStep.none,
+      );
+      expect(
+        due(version: 2, prompted: 2, allTime: notRequired),
+        ForegroundConsentStep.none,
+        reason: 'Android re-asked for a text that did not change',
+      );
     });
 
     late _FakeAllTime allTime;
@@ -589,7 +743,9 @@ void main() {
     setUp(() => resumedReads = []);
 
     testWidgets('Android 11+ with an older acceptance: ONE dialog, carrying '
-        'the all-time step; Agree records v2, then requests', (tester) async {
+        'the all-time step; Agree records the current version, then requests', (
+      tester,
+    ) async {
       SharedPreferences.setMockInitialValues({
         kBackgroundSharingKey: true,
         kLocationDisclosureAcceptedKey: true,
@@ -609,6 +765,10 @@ void main() {
       expect(find.byType(AlertDialog), findsNothing, reason: 'a 2nd dialog');
       expect(allTime.requests, 1);
       final prefs = await SharedPreferences.getInstance();
+      expect(
+        prefs.getInt(kLocationDisclosureBackgroundVersionKey),
+        kBackgroundDisclosureVersion,
+      );
       expect(backgroundResumeDisclosureAcceptedIn(prefs), isTrue);
       expect(prefs.getBool(kAndroidBackgroundLocationPromptedKey), isTrue);
 
@@ -693,8 +853,9 @@ void main() {
       expect(resumedReads, isEmpty, reason: 'nothing to show, nothing read');
     });
 
-    testWidgets('an app that left the front shows nothing and owes the step',
-        (tester) async {
+    testWidgets('an app that left the front shows nothing and owes the step', (
+      tester,
+    ) async {
       SharedPreferences.setMockInitialValues({
         kBackgroundSharingKey: true,
         kLocationDisclosureAcceptedKey: true,

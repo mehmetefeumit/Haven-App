@@ -156,6 +156,7 @@ import 'package:haven/src/test_keys.dart' show WidgetKeys;
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'e2e/_lib/app_lifecycle.dart' show awaitPlatformResumed;
 import 'e2e/_lib/circle_creation.dart'
     show DeliveredCircle, createCircleDelivered, settleLiveSession;
 import 'e2e/_lib/coordination.dart' show waitForKeyPackage;
@@ -316,6 +317,7 @@ Future<void> _heartbeatWhile(
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  setUpAll(awaitPlatformResumed);
 
   testWidgets(
     'B7: observes the granted CoreLocation tier and renders honest copy '

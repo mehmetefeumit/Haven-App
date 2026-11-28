@@ -1191,7 +1191,7 @@ jobs:
   # ==========================================================================
   e2e_profile_ios:
     name: e2e_profile_ios
-    runs-on: macos-latest # Apple Silicon; arm64 simulator (no Linux Docker).
+    runs-on: xcode-27 # Apple Silicon; arm64 simulator (no Linux Docker).
     # Clears the sum of its step caps, by the rule stated on the Android job:
     # Build the runtime log scanner 10 + Pre-build the iOS app 35 + Boot iOS
     # simulator 15 + the drive step 65 + at most 6.0 min of work no step cap
@@ -1253,6 +1253,13 @@ jobs:
         id: checkout
         uses: actions/checkout@v6
 
+      # The image's default Xcode is not its newest; select the newest stable
+      # one, the Xcode release-build.yml archives TestFlight builds with.
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -1271,7 +1278,7 @@ jobs:
             tooling/e2e/local-relay
             tooling/e2e/local-blossom
             tooling/logscan
-          key: e2e-profile-ios-sim
+          key: e2e-profile-ios-sim-xcode27
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The runtime log scanner, release-built ONCE, before Flutter and the
@@ -1320,13 +1327,13 @@ jobs:
 
       - name: Boot iOS simulator
         id: sim
-        # The macos-* runners have no GNU coreutils `timeout`, so this step's
+        # macOS runners have no GNU coreutils `timeout`, so this step's
         # only available bound is GitHub's — and it had none, meaning a sim
         # that never reaches Booted ran to the JOB cap and skipped every
         # if: always() diagnostic. Measured across 32 successful runs (ci.yml,
         # 2026-07/08) the boot takes 136-215 s; 15 min is ~4x the observed max.
         timeout-minutes: 15
-        run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 15"
+        run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 17"
 
       # `nick-fields/retry` absorbs the iOS-simulator launch/attach flake (which
       # presents as a HANG). Each attempt restarts EVERY server first so a
