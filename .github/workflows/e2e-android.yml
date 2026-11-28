@@ -64,10 +64,9 @@ jobs:
     # plus the most the work no step cap bounds has taken:
     #                                                          poll / flag-on
     #   Build the runtime log scanner                            10
-    #   Fetch + Install this run's Gradle dependencies           5 + 2
+    #   Fetch + Install this run's Gradle dependencies           7 + 2
     #   Build E2E test APK                                       25
     #   Provision the Android SDK (derived in that script)       11
-    #   Create AVD snapshot (on an AVD-cache miss)               15
     #   Start recording wire proxy                               20
     #   Run e2e_combined on the emulator (derived there; the
     #     flag-on drive adds the 10 live-sync scenarios)         45 / 61
@@ -76,12 +75,12 @@ jobs:
     #     both paths of this job (ci.yml and e2e-nightly.yml,
     #     2026-07-29..09-11), 11.1 of it one Setup Flutter
     #     stall (run 30792258968)                                12.9
-    #                                               = 145.9 / 161.9 -> 146 / 162
+    #                                               = 132.9 / 148.9 -> 133 / 149
     # Measured time alone is not the rule. Sized that way (14.5 min before
     # the drive + 45 + 0.3 = 59.8, so 65) a 24-minute build and a 44-minute
     # drive, each inside its own cap, would have died here.
     # job-uncapped-minutes: 12.9 (149 runs, worst 30792258968)
-    timeout-minutes: ${{ inputs.live_sync && 162 || 146 }}
+    timeout-minutes: ${{ inputs.live_sync && 149 || 133 }}
     env:
       # 7788, NOT the relay's own port: this lane runs the recording wire proxy
       # (tooling/e2e/ci/start-wire-proxy.sh) in front of strfry. strfry keeps
@@ -187,7 +186,7 @@ jobs:
       # `continue-on-error`: a lane without its set cannot build, and says so
       # here (scripts/ci/check_gradle_build_hardened.sh).
       - name: Fetch this run's Gradle dependencies
-        timeout-minutes: 5
+        timeout-minutes: 7  # sized in android-gradle-deps.yml
         uses: actions/download-artifact@v6
         with:
           name: gradle-deps
@@ -291,9 +290,8 @@ jobs:
       # and the last thing it printed was its teardown's "could not connect to
       # TCP port 5554" — a message about the emulator, from a job that ran no
       # test.
-      # Unconditional, deliberately — the AVD cache holds `~/.android/avd/*`
-      # only, so a cache HIT still needs the emulator binary and the system
-      # image. The arguments MUST equal the api-level/target/arch of every
+      # Unconditional, deliberately. The arguments MUST equal the
+      # api-level/target/arch of every
       # emulator step in this job (check_android_sdk_provisioned.sh). Once the
       # packages are present the action's own installs are no-ops (5 s).
       # The cap is the script's worst case, 9.5 min (its 360 s budget + the one
@@ -302,42 +300,6 @@ jobs:
       - name: Provision the Android SDK
         timeout-minutes: 11
         run: bash tooling/e2e/ci/provision-android-sdk.sh 34 google_apis x86_64
-
-      - name: Restore AVD cache
-        uses: actions/cache/restore@v4
-        id: avd-cache
-        with:
-          path: |
-            ~/.android/avd/*
-            ~/.android/adb*
-          key: avd-api34-x86_64-google_apis-single-v1
-
-      - name: Create AVD snapshot
-        if: steps.avd-cache.outputs.cache-hit != 'true'
-        # This step's entire job is booting an emulator, and until 2026-08-03 it
-        # had no bound of any kind — a wedged boot here ran to the JOB cap,
-        # which SIGKILLs the runner before any if: failure() step, so the lane
-        # died slow and with no artifacts. Measured across 23 successful runs
-        # (ci.yml, 2026-07/08) the snapshot takes 91-130 s; 15 min is ~7x the
-        # observed max, so it can only ever fire on a genuine wedge. The
-        # emulator-boot-timeout below is the action's own inner bound (7 min,
-        # matching the drive steps) and fires first with the action's message.
-        timeout-minutes: 15
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          arch: x86_64
-          target: google_apis
-          profile: pixel_6
-          force-avd-creation: false
-          emulator-options: >-
-            -no-snapshot-save -no-window -gpu swiftshader_indirect
-            -noaudio -no-boot-anim -camera-back none
-          disable-animations: false
-          # Bound the boot itself (the only thing this step does) so a wedged
-          # emulator fails inside the step rather than at the step cap above.
-          emulator-boot-timeout: 420
-          script: echo "Generated AVD snapshot for caching."
 
       - name: Start strfry relay
         env:
@@ -469,6 +431,7 @@ jobs:
           # Bound a hung emulator BOOT so it fails fast (≤7 min) rather
           # than stalling toward the job timeout with no diagnostics.
           emulator-boot-timeout: 420
+          pre-emulator-launch-script: bash tooling/e2e/ci/require-adb.sh
           # Single-line `script:` — the reactivecircus action runs each
           # line of a multi-line `script:` in a separate `sh -c`, so any
           # shell state would be lost across lines; chaining with `&&`
@@ -1110,17 +1073,3 @@ jobs:
           bash tooling/e2e/ci/stop-strfry.sh
           STRFRY_CONTAINER=strfry-gated STRFRY_DATA_DIR=/tmp/strfry-gated-data \
             bash tooling/e2e/ci/stop-strfry.sh
-
-      # Saved from main only (a pull request's run reads main's AVD and writes
-      # none, so it cannot evict one), and as actions/cache's own post step
-      # did: from a run that built the AVD on a miss and passed. A lost save is
-      # a cold snapshot next time, never a red lane.
-      - name: Save AVD cache
-        if: ${{ success() && github.ref == 'refs/heads/main' && steps.avd-cache.outputs.cache-hit != 'true' }}
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ~/.android/avd/*
-            ~/.android/adb*
-          key: avd-api34-x86_64-google_apis-single-v1

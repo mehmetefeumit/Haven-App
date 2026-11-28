@@ -164,7 +164,10 @@ settings observer, so an ANR first handled after readiness still shows a dialog
 if that observer has not run by the time the ANR's traces are dumped.
 `am broadcast` waits for the ordered broadcast to finish, which one hung
 receiver stretches to 60 s, so the broadcast is bounded like an adb read and
-sent in a pass of its own.
+sent in a pass of its own. The read and the wait live in
+`tooling/e2e/ci/photo-picker-lib.sh` (`pp_error_state`, `pp_settle_errors`),
+which the debug photo UI lane's sidecar runs the same way before its first
+round.
 
 **Legs:**
 

@@ -35,9 +35,14 @@
 # attempt and by the action alike, and an archive kept from the failed attempt
 # would make the retry an unzip of the same bytes.
 #
+# platform-tools is graded by running `adb version`, as the emulator is by its
+# probe: a platform-tools directory whose manifest outlived its `adb` passed the
+# old directory-and-manifest grading, and the action then polled a missing adb
+# for its whole boot timeout (CI jobs 137207551525, 140270147003, among five).
+#
 # The grading has limits, stated so nobody reads more into an OK than is there:
-# only the emulator is EXECUTED. A system image whose `system.img` is present
-# but damaged passes here and fails at boot, inside the action. And the removal
+# only the emulator and adb are EXECUTED. A system image whose `system.img` is
+# present but damaged passes here and fails at boot, inside the action. And the removal
 # is of whatever sits at the package path, including a copy the runner image
 # shipped — harmless on an ephemeral runner, and the reason this step has no
 # business on a persistent one.
@@ -107,6 +112,8 @@ readonly ATTEMPT_TIMEOUT_SECS=180
 readonly BUDGET_SECS=360
 # The emulator smoke probe. It runs once per emulator attempt, so it is a term
 # of the worst case; 30 s is far past the ~1 s it takes to print a version.
+# adb's probe shares the bound, so the worst case is the same whichever package
+# the last attempt installs.
 readonly EMULATOR_PROBE_SECS=30
 # How much of a failed probe's output is shown: its LAST lines, which is where a
 # loader error lands.
@@ -178,6 +185,20 @@ verify_package() {
     printf '%s:   %s: manifest present, system.img absent or empty.\n' "${SCRIPT_NAME}" "${pkg}" >&2
     return 1
   fi
+  if [[ "${pkg}" == "platform-tools" ]]; then
+    if [[ ! -x "${dir}/adb" ]]; then
+      printf '%s:   platform-tools: adb is missing or not executable; the directory holds:\n' "${SCRIPT_NAME}" >&2
+      ls -la "${dir}" 2>&1 | sed 's/^/    | /' >&2
+      return 1
+    fi
+    probe_rc=0
+    probe_out="$(timeout "${EMULATOR_PROBE_SECS}" "${dir}/adb" version 2>&1)" || probe_rc=$?
+    if (( probe_rc != 0 )); then
+      printf '%s:   platform-tools: `adb version` exited %d; its last lines:\n' "${SCRIPT_NAME}" "${probe_rc}" >&2
+      tail -n "${PROBE_TAIL_LINES}" <<<"${probe_out}" | sed 's/^/    | /' >&2
+      return 1
+    fi
+  fi
   if [[ "${pkg}" == "emulator" ]]; then
     if [[ ! -x "${dir}/emulator" ]]; then
       printf '%s:   emulator: the launcher is missing or not executable.\n' "${SCRIPT_NAME}" >&2
@@ -210,10 +231,21 @@ remove_partial() {
   return 0
 }
 
+# package_revision <pkg> — the Pkg.Revision sdkmanager recorded for <pkg>.
+package_revision() {
+  local props
+  props="$(package_dir "$1")/source.properties"
+  if [[ -f "${props}" ]]; then
+    sed -n 's/^Pkg\.Revision=//p' "${props}"
+  else
+    printf 'unrecorded\n'
+  fi
+}
+
 # install_package <pkg> — 0 once <pkg> verifies, 1 when the attempts or the
 # budget run out.
 install_package() {
-  local pkg="$1" attempt rc elapsed
+  local pkg="$1" attempt rc elapsed out
   for (( attempt = 1; attempt <= PACKAGE_ATTEMPTS; attempt++ )); do
     elapsed="$(provision_elapsed_secs)"
     if (( elapsed >= BUDGET_SECS )); then
@@ -222,18 +254,28 @@ install_package() {
       return 1
     fi
     rc=0
-    # sdkmanager's own output is discarded, as the action discards it: it is
-    # progress bars and download hosts, and the attributable line is the one
-    # printed here.
-    timeout -k 10 "${ATTEMPT_TIMEOUT_SECS}" "${SDKMANAGER}" --install "${pkg}" --channel=0 \
-      >/dev/null 2>&1 <<<"${LICENSE_REPLIES}" || rc=$?
+    out="$(timeout -k 10 "${ATTEMPT_TIMEOUT_SECS}" "${SDKMANAGER}" --install "${pkg}" --channel=0 \
+      2>&1 <<<"${LICENSE_REPLIES}")" || rc=$?
     if verify_package "${pkg}"; then
-      printf '%s: %s verified on attempt %d/%d (sdkmanager rc %d).\n' \
-        "${SCRIPT_NAME}" "${pkg}" "${attempt}" "${PACKAGE_ATTEMPTS}" "${rc}"
+      # The revision is what a later step that finds the package changed (the
+      # action runs its own `sdkmanager --install`) is compared against.
+      printf '%s: %s verified on attempt %d/%d (sdkmanager rc %d, revision %s).\n' \
+        "${SCRIPT_NAME}" "${pkg}" "${attempt}" "${PACKAGE_ATTEMPTS}" "${rc}" "$(package_revision "${pkg}")"
+      # A package the retry rescued is the fault require-adb.sh stops a lane
+      # on, caught here: an annotation, so recurrences can be counted while
+      # the cause is unknown.
+      if (( attempt > 1 )); then
+        echo "::warning::${SCRIPT_NAME}: ${pkg} verified only on attempt ${attempt}/${PACKAGE_ATTEMPTS}; earlier attempts left it unusable (infrastructure, ridden out)."
+      fi
       return 0
     fi
-    printf '%s: %s did NOT verify on attempt %d/%d (sdkmanager rc %d); removing the partial package directory.\n' \
+    # sdkmanager's own words are the evidence for why the package did not land;
+    # its progress bars redraw with carriage returns, so only their last state
+    # survives.
+    printf '%s: %s did NOT verify on attempt %d/%d (sdkmanager rc %d); sdkmanager'"'"'s last lines:\n' \
       "${SCRIPT_NAME}" "${pkg}" "${attempt}" "${PACKAGE_ATTEMPTS}" "${rc}"
+    tr '\r' '\n' <<<"${out}" | grep -v '^[[:space:]]*$' | tail -n "${PROBE_TAIL_LINES}" | sed 's/^/    | /' || true
+    printf '%s: removing the partial package directory.\n' "${SCRIPT_NAME}"
     remove_partial "${pkg}"
     # No pause once the budget is spent: the loop's next act would be to refuse
     # the attempt anyway, and a backoff slept first is time the stated worst
@@ -296,7 +338,7 @@ provision_android_sdk() {
 # and both clock functions replaced, so nothing here sleeps or waits.
 # ---------------------------------------------------------------------------
 
-readonly SELF_TEST_FIXTURES=15
+readonly SELF_TEST_FIXTURES=16
 
 # write_fake_sdkmanager <root> <mode>
 #
@@ -323,6 +365,7 @@ readonly SELF_TEST_FIXTURES=15
 #   corrupt  installs the emulator with a binary that exits non-zero
 #   hollow   installs the system image with its manifest and NO system.img, and
 #            leaves an archive in the download cache as a failed unzip would
+#   noadb    installs platform-tools with its manifest and NO adb
 write_fake_sdkmanager() {
   local root="$1" mode="$2" bin="$1/cmdline-tools/latest/bin"
   mkdir -p "${bin}"
@@ -357,6 +400,12 @@ if [[ "\${pkg}" == system-images\;* ]]; then
   else
     echo img > "\${dir}/system.img"
   fi
+fi
+if [[ "\${pkg}" == "platform-tools" && "\${mode}" != "noadb" ]]; then
+  # Like the real adb, it answers only the subcommand the probe sends.
+  printf '%s\n' '#!/usr/bin/env bash' '[[ "\$*" == version ]] || exit 1' \
+    'echo "Android Debug Bridge version 1.0.41"' > "\${dir}/adb"
+  chmod +x "\${dir}/adb"
 fi
 if [[ "\${pkg}" == "emulator" ]]; then
   if [[ "\${mode}" == "corrupt" ]]; then
@@ -407,8 +456,12 @@ run_self_test() {
     echo "SELF-TEST FAIL (a): a clean provisioning must exit 0 after exactly 4 installs; got rc=${rc}, ${n} invocation(s)" >&2
     fail=1
   fi
-  if [[ ! -x "${root}/emulator/emulator" || ! -d "${root}/system-images/android-34/google_apis/x86_64" ]]; then
-    echo "SELF-TEST FAIL (a): the emulator and the system image named by the arguments are not on disk" >&2
+  if [[ ! -x "${root}/emulator/emulator" || ! -x "${root}/platform-tools/adb" || ! -d "${root}/system-images/android-34/google_apis/x86_64" ]]; then
+    echo "SELF-TEST FAIL (a): the emulator, adb and the system image named by the arguments are not on disk" >&2
+    fail=1
+  fi
+  if [[ "${out}" != *"platform-tools verified on attempt 1/3 (sdkmanager rc 0, revision 1)"* ]]; then
+    echo "SELF-TEST FAIL (a): a verified package must log the revision sdkmanager recorded, the baseline a later step's reading is compared with" >&2
     fail=1
   fi
 
@@ -434,6 +487,11 @@ run_self_test() {
     echo "SELF-TEST FAIL (b): two transient failures must be ridden out on the third attempt; got rc=${rc}, ${n} invocation(s)" >&2
     fail=1
   fi
+  if [[ "${out}" != *"::warning::${SCRIPT_NAME}: platform-tools verified only on attempt 3/3"* ]] \
+     || [[ "$(grep -c '::warning::' <<<"${out}")" != 1 ]]; then
+    echo "SELF-TEST FAIL (b): a package the retry rescued must raise exactly one ::warning:: naming it, and one verified on its first attempt none" >&2
+    fail=1
+  fi
 
   # (c) The observed failure: sdkmanager exits 0 and installs nothing, every
   #     time. Trusting that exit code is exactly what let a lane boot an
@@ -448,6 +506,10 @@ run_self_test() {
      || [[ "${out}" != *"INFRASTRUCTURE"* ]] \
      || [[ "${out}" != *"no test ran"* ]]; then
     echo "SELF-TEST FAIL (c): an sdkmanager that exits 0 and installs nothing must fail CLOSED with one ::error:: naming the package and saying no test ran; got rc=${rc}" >&2
+    fail=1
+  fi
+  if [[ "${out}" != *"    | Warning: Failed to download package!"* ]]; then
+    echo "SELF-TEST FAIL (c): a failed attempt must show sdkmanager's own last lines — they are the only evidence of why the package did not land" >&2
     fail=1
   fi
 
@@ -484,6 +546,27 @@ run_self_test() {
   fi
   if [[ -e "${root}/.downloadIntermediates" || -e "${root}/system-images/android-34/google_apis/x86_64" ]]; then
     echo "SELF-TEST FAIL (d2): the hollow image or sdkmanager's download cache survived — the retry would unzip the same archive" >&2
+    fail=1
+  fi
+
+  # (d3) platform-tools whose manifest landed and whose adb did not — the shape
+  #      that left five lanes polling a missing adb for their whole boot
+  #      timeout. It must fail closed, say adb is what is missing, and not
+  #      survive into the retry; (a) is the control that a real adb passes.
+  ran=$(( ran + 1 ))
+  root="${tmp}/d3"; write_fake_sdkmanager "${root}" noadb
+  rc=0
+  out="$(ANDROID_HOME="${root}" ANDROID_SDK_ROOT="" provision_android_sdk 34 google_apis x86_64 2>&1)" || rc=$?
+  if (( rc != RC_PROVISION_FAILED )) || [[ "${out}" != *"::error::"*"platform-tools"* ]] || [[ "${out}" != *"adb is missing or not executable"* ]]; then
+    echo "SELF-TEST FAIL (d3): platform-tools without adb must fail closed, name the package and say adb is missing; got rc=${rc}" >&2
+    fail=1
+  fi
+  if [[ -e "${root}/platform-tools" ]]; then
+    echo "SELF-TEST FAIL (d3): the platform-tools directory without adb survived — the action would read it as installed" >&2
+    fail=1
+  fi
+  if [[ "$(invocation_count "${root}")" != "${PACKAGE_ATTEMPTS}" ]]; then
+    echo "SELF-TEST FAIL (d3): a platform-tools without adb must be reinstalled on every attempt, not read as installed" >&2
     fail=1
   fi
 
@@ -669,7 +752,7 @@ run_self_test() {
     echo "${SCRIPT_NAME}: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${SELF_TEST_FIXTURES}; a fixture was added or removed without moving the pin" >&2
     return 1
   fi
-  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a clean run installs and verifies exactly the four packages the arguments name; two transient failures are ridden out on the third attempt; an sdkmanager that exits 0 having installed nothing fails closed with one ::error:: naming the package, calling it infrastructure and saying no test ran; the fake emulator refuses a probe without -no-window, as a headless runner's does, so the clean run proves the flag is passed; an emulator whose binary does not run is caught by the probe, which says why, and its directory removed before the retry; a system image whose manifest landed without its system.img fails closed naming what is missing, and sdkmanager's download cache does not survive into the retry; an sdkmanager absent from both the SDK root and PATH exits ${RC_BROKEN}, distinct from that, while one reachable only through PATH still provisions; the fake sdkmanager itself answers ONLY the production argv, \`--install <package> --channel=0\`, refusing a missing --install, a missing package and an extra flag without installing anything, so a production call that drifts reds these fixtures instead of passing against a yes-machine; every wrong argument list prints usage, exits ${RC_BROKEN} and runs nothing; a package that exhausts the attempts stops the run at exactly ${PACKAGE_ATTEMPTS} invocations; a spent budget fails closed without starting another attempt, and an attempt that spends it is followed by no backoff; no operand-less \`return\`, no pipeline ending in a quiet grep, one backoff per pause; and the header's worst case is the one the constants add up to)."
+  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: a clean run installs and verifies exactly the four packages the arguments name; two transient failures are ridden out on the third attempt, with one ::warning:: naming the rescued package; an sdkmanager that exits 0 having installed nothing fails closed with one ::error:: naming the package, calling it infrastructure and saying no test ran; the fake emulator refuses a probe without -no-window, as a headless runner's does, so the clean run proves the flag is passed; an emulator whose binary does not run is caught by the probe, which says why, and its directory removed before the retry; a system image whose manifest landed without its system.img fails closed naming what is missing, and sdkmanager's download cache does not survive into the retry; platform-tools whose manifest landed without a runnable adb fails closed saying so and is reinstalled on every attempt; a failed attempt shows sdkmanager's own last lines and a verified one its recorded revision; an sdkmanager absent from both the SDK root and PATH exits ${RC_BROKEN}, distinct from that, while one reachable only through PATH still provisions; the fake sdkmanager itself answers ONLY the production argv, \`--install <package> --channel=0\`, refusing a missing --install, a missing package and an extra flag without installing anything, so a production call that drifts reds these fixtures instead of passing against a yes-machine; every wrong argument list prints usage, exits ${RC_BROKEN} and runs nothing; a package that exhausts the attempts stops the run at exactly ${PACKAGE_ATTEMPTS} invocations; a spent budget fails closed without starting another attempt, and an attempt that spends it is followed by no backoff; no operand-less \`return\`, no pipeline ending in a quiet grep, one backoff per pause; and the header's worst case is the one the constants add up to)."
   return 0
 }
 

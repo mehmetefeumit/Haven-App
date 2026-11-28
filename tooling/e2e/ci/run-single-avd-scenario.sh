@@ -1250,8 +1250,9 @@ adb logcat -v threadtime > /tmp/adb-logcat.log &
 readonly LOGCAT_PID=$!
 
 # captive_portal_mode as the guest had it before the network settle changed it
-# (empty until then). Put back on exit because every Android lane shares one
-# AVD cache key; the network it already validated keeps its own reading.
+# (empty until then). Put back on exit for the next target of a multi-target
+# caller on the same device; the network it already validated keeps its own
+# reading.
 captive_mode_prev=""
 # 1 while the settle holds mobile data down: a run that dies there would leave
 # the next target of a multi-target caller with no route, failing for our cause.

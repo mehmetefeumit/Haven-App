@@ -56,8 +56,9 @@
 #      the device answered (a push or query it refused, or a media store that
 #      never listed them), or
 #      run-single-avd-scenario.sh refusing its configuration (its rc 2)
-#   3  infrastructure: no device, error dialogs that could not be hidden, the
-#      device gone when the drive ended, no
+#   3  infrastructure: no device, error dialogs that could not be hidden, a
+#      process the boot left in an error state that CLOSE_SYSTEM_DIALOGS did
+#      not clear, the device gone when the drive ended, no
 #      answer while the gallery was seeded, shared storage that never
 #      attached, or another process's "isn't responding" or "keeps stopping"
 #      dialog holding the picker's or uCrop's focus — re-run
@@ -70,6 +71,8 @@
 # need. With no dialog to show, the system kills a foreground app that stops
 # responding (AOSP AppErrors.handleShowAnrUi), so Haven's own ANR still ends
 # the drive, red; the dialog verdicts above remain for a dialog shown anyway.
+# The setting stops only dialogs decided after it, so one the boot decided
+# first is then waited out as the launch gate does (pp_settle_errors).
 #
 # The sidecar log (/tmp/photo-sidecar.log) is fixed vocabulary: round
 # numbers, selector names, cause and class words, seconds (`focus=<s>s` is
@@ -309,6 +312,12 @@ main() {
   if [[ "$(adb -s "${DEVICE}" shell settings get global hide_error_dialogs 2>/dev/null | tr -d '\r' || true)" != 1 ]]; then
     RC=3; MSG="hide_error_dialogs did not read back 1"; exit 0
   fi
+  # A dialog the boot decided before the setting applied stays over the picker
+  # the rounds read (job 137248796793: another app's "isn't responding" dialog
+  # held input focus for the picker's whole 60 s); the launch gate waits it out
+  # the same way.
+  pp_settle_errors "${DEVICE}" "${WORK}/priv" || { RC=$?; MSG="${PP_MSG}"; exit 0; }
+  record "errors=settled"
   pp_seed_gallery "${DEVICE}" "${WORK}/priv" || { RC=$?; MSG="gallery (API ${API_LEVEL}): ${PP_MSG}"; exit 0; }
   record "api=${API_LEVEL} gallery=seeded"
   watch &
@@ -359,7 +368,7 @@ main() {
 # for Haven to be back and for the sidecar's record of the round. Bounds are
 # shrunk through the PHOTO_* overrides only.
 # ---------------------------------------------------------------------------
-readonly SELF_TEST_FIXTURES=68
+readonly SELF_TEST_FIXTURES=72
 
 _st_stub_adb() { # <bin dir>
   cat > "$1/adb" <<'STUB'
@@ -512,6 +521,17 @@ if [[ "${cmd}" == "content delete "* ]]; then
 fi
 case "${cmd}" in
   "getprop ro.build.version.sdk") echo "${STUB_API:-34}" ;;
+  # The activity manager's processes, filtered as the runner asks. STUB_BOOT_ANR:
+  # the boot left System UI marked not responding, until CLOSE_SYSTEM_DIALOGS
+  # (never, with STUB_BOOT_ANR_STUCK) dismisses its dialog.
+  "dumpsys activity processes | grep -E '^ACTIVITY MANAGER RUNNING PROCESSES|^  [*](APP|PERS)[*] UID |mCrashing='")
+    echo 'ACTIVITY MANAGER RUNNING PROCESSES (dumpsys activity processes)'
+    echo '  *PERS* UID 1000 ProcessRecord{5e1a 512:system/1000}'
+    echo '  *PERS* UID 10123 ProcessRecord{7c0d 900:com.android.systemui/u0a123}'
+    if [[ -n "${STUB_BOOT_ANR:-}" && ! -e "${S}/boot_anr_closed" ]]; then
+      echo '     mCrashing=false null mNotResponding=true [com.android.server.am.AppNotRespondingDialog@1f2e] bad=false'
+    fi ;;
+  "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS") [[ -n "${STUB_BOOT_ANR_STUCK:-}" ]] || : > "${S}/boot_anr_closed" ;;
   "settings put global hide_error_dialogs 1") [[ -n "${STUB_HIDE_REFUSED:-}" ]] || : > "${S}/hide" ;;
   "settings get global hide_error_dialogs") [[ -e "${S}/hide" ]] && echo 1 || echo 0 ;;
   "run-as ${PKG} touch files/pp_recorded_"*) [[ -z "${STUB_RUNAS_REFUSED:-}" ]] || exit 1
@@ -621,7 +641,7 @@ self_test() {
     out="$(env PATH="${tmp}/bin:${PATH}" STUB="${tmp}/stub" \
       PHOTO_UI_LOGCAT="${tmp}/stub/logcat.log" PHOTO_UI_SIDECAR_LOG="${tmp}/stub/sidecar.log" PHOTO_UI_WORK="${tmp}/work" \
       PHOTO_UI_NEEDLE_DIR="${tmp}/needles" \
-      PHOTO_STORAGE_SECS=2 PHOTO_MEDIA_SECS=2 PHOTO_PICKER_SECS=3 PHOTO_UCROP_SECS=3 PHOTO_RETURN_SECS=3 PHOTO_UI_GRACE_MARKER_SECS=2 PHOTO_UI_JOIN_SECS=10 \
+      PHOTO_SETTLE_SECS=2 PHOTO_STORAGE_SECS=2 PHOTO_MEDIA_SECS=2 PHOTO_PICKER_SECS=3 PHOTO_UCROP_SECS=3 PHOTO_RETURN_SECS=3 PHOTO_UI_GRACE_MARKER_SECS=2 PHOTO_UI_JOIN_SECS=10 \
       HAVEN_LOGSCAN=true HAVEN_LOGSCAN_BIN="${LOGSCAN_FAKE_BIN}" FAKE_SEAL_ARGV="${tmp}/seal.argv" \
       GITHUB_RUN_ID="photo-ui-self-test-$$-${ran}" GITHUB_RUN_ATTEMPT=1 "$@" \
       bash "${tmp}/ci/run-photo-ui-scenario.sh" integration_test/e2e/e2e_profile_ui_photo.dart 2>&1)" || rc=$?
@@ -724,6 +744,21 @@ self_test() {
   _scenario "error dialogs that cannot be hidden are infrastructure" 3 STUB_HIDE_REFUSED=1
   _has "…named as such" "hide_error_dialogs did not read back 1"
   _scenario "System UI stopping responding as the picker opens takes no focus from it" 0 STUB_ANR=systemui STUB_ROUNDS=cancel
+  # A process the boot left not responding decided its dialog before the
+  # setting applied: it is waited out, CLOSE_SYSTEM_DIALOGS sent, before the
+  # gallery is seeded and any round runs (job 137248796793).
+  _scenario "a process the boot left not responding is closed before the first round" 0 STUB_BOOT_ANR=1
+  ran=$(( ran + 1 ))
+  local close_at seed_at
+  close_at="$(grep -n -m 1 'CLOSE_SYSTEM_DIALOGS' "${tmp}/stub/calls" | cut -d: -f1)"
+  seed_at="$(grep -n -m 1 '^-s [^ ]* push ' "${tmp}/stub/calls" | cut -d: -f1)"
+  if [[ -n "${close_at}" && -n "${seed_at}" ]] && (( close_at < seed_at )) && grep -qF 'errors=settled' <<<"${out}"; then
+    echo '  PASS …by CLOSE_SYSTEM_DIALOGS, before the gallery is seeded'
+  else
+    echo "  FAIL …by CLOSE_SYSTEM_DIALOGS, before the gallery is seeded (broadcast line ${close_at:-none}, first push line ${seed_at:-none})" >&2; fails=1
+  fi
+  _scenario "a process that stays not responding is infrastructure" 3 STUB_BOOT_ANR=1 STUB_BOOT_ANR_STUCK=1
+  _has "…naming whose, before any round" "System UI's process held as not responding"
   _scenario "Haven stopping responding to the crop tap is still a product failure" 1 STUB_ANR=ours STUB_ROUNDS=pick:0
   _has "…the drive losing the app" "the drive failed (rc 1)"
   _scenario "a picker whose window never takes focus gets no input and is a harness verdict" 2 STUB_NEVER_FOCUSED=picker STUB_ROUNDS=cancel

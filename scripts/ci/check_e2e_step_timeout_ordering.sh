@@ -391,8 +391,9 @@ is_soak_body() {
   [[ "$1" == *"--self-test"* || "$1" == *"--scan-only"* ]] && return 1
   [[ "$1" == *"run-soak-core.sh"* ]]
 }
-# A DRIVE step actually runs a lane's harness. An AVD-snapshot step uses the
-# same action but only echoes, so it needs a cap (C5) and no deadline (C1).
+# A DRIVE step actually runs a lane's harness. A step that uses the same
+# action only to boot (the lanes' old AVD-snapshot steps) needs a cap (C5) and
+# no deadline (C1).
 is_drive_body() { [[ "$1" == *"tooling/e2e/ci/run-"* ]]; }
 
 # deadline_token <body> -> the raw inner-deadline token, or "".

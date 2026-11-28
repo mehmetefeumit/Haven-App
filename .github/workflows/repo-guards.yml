@@ -1,10 +1,12 @@
 # Reusable workflow: repository guards.
 #
 # All of Haven's fast, deterministic policy/privacy/correctness invariants,
-# consolidated into ONE job. Every step is a pure grep/bash check over the
-# checked-out tree — no Flutter/Rust toolchain, no emulator. Each guard runs
+# consolidated into ONE job, `guards`. Every step is a pure grep/bash check over
+# the checked-out tree — no Flutter/Rust toolchain, no emulator. Each guard runs
 # even if an earlier guard failed, so a single red run reports EVERY violated
-# guard, not just the first.
+# guard, not just the first. The E2E harnesses' `--self-test`s, minutes of
+# stubbed-device runs rather than greps, run beside it in a second job,
+# `harness`, under the same rules.
 #
 # "The whole job costs seconds" is what this line used to say, and it stopped
 # being true well before the privacy-invariant gate arrived: measured
@@ -469,8 +471,10 @@
 #     The iOS builds on the release path (the launch gate's config pass and
 #     TestFlight's IPA build) run again only when they failed on the network:
 #     v0.1.15's iOS gate died on one lost DNS lookup in `pod install`. Its self-test holds that a real pod or
-#     compile error is never retried and keeps its rc, and that a network
-#     failure gives up after three attempts.
+#     compile error is never retried and keeps its rc, that a network
+#     failure gives up after three attempts, and that a Swift package clone
+#     GitHub refused (job 140577177342) is not retried but named, with its
+#     package, as infrastructure. Every iOS lane's config pass runs through it.
 #
 #   Release APK loads                 scripts/ci/check_apk_loadable.sh
 #     v0.1.14's R8 deleted the constructor WorkManager's database is created
@@ -674,7 +678,10 @@
 #     installed and reds on the missing emulator instead — no test run, and
 #     nothing in the log to say the fault was a download. Every emulator step
 #     must also pass `-no-window`: provisioning verifies the HEADLESS binary,
-#     so that is the only one it can vouch for.
+#     so that is the only one it can vouch for. And every emulator step runs
+#     tooling/e2e/ci/require-adb.sh as its pre-emulator-launch-script, which
+#     stops the action in seconds when the adb it is about to poll does not
+#     run, instead of a boot-timeout of polling and a hang to the step cap.
 #
 #   Gradle build hardening            scripts/ci/check_gradle_build_hardened.sh
 #     Every job that builds the app through Gradle fetches and installs the
@@ -828,7 +835,7 @@
 #     and every tag name each kind may carry, and anything absent from it is
 #     forbidden. That inverts the forbid-list it replaces, under which a new
 #     kind, a new tag, or an MDK-introduced field reached a relay in silence.
-#     Only the self-test runs in this job — the oracle itself runs in the E2E
+#     Only the self-test runs in this workflow — the oracle itself runs in the E2E
 #     lanes, over the journal the recording proxy writes. What the self-test
 #     protects is the oracle's ability to FAIL: every assertion in it is a set
 #     operation over a file that may be absent, empty or truncated, so without
@@ -987,7 +994,7 @@
 #     the fixtures are the whole proof.
 #
 #   Repo-guards step conditions       scripts/ci/check_repo_guards_step_conditions.sh
-#     Every step of this job after its checkout carries the standard `if:`,
+#     Every step of each job after its checkout carries the standard `if:`,
 #     so no earlier red — a guard's, or a tool install's on a mirror outage —
 #     can skip a later setup step or hide a later guard's verdict.
 #
@@ -1016,10 +1023,9 @@ jobs:
     runs-on: ubuntu-latest
     # A hang guard, sized from measurement, far below GitHub's 6-hour default:
     # a hung guard (or a baseline fetch that never returns) should surface as a
-    # bounded red, not burn a runner for the afternoon. Measured: 12.7 min on
-    # main (run 43868543765) before the photo harness self-tests, which add
-    # ~7 min (launch gate 218 s, photo UI 185 s, run 44481804001) — ~20 min of
-    # work; the two slow steps carry their own caps below.
+    # bounded red, not burn a runner for the afternoon. Measured: 14.6 min of
+    # steps in run 45921320644 without the E2E harness self-tests (the
+    # `harness` job below), on a runner that needed 29.7 min with them.
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -1033,23 +1039,11 @@ jobs:
       # archive outage (run 44523702729), or failing here by name; the guards
       # that need one of them then say it is missing, never a violation. The
       # cap is the script's 300 s archive budget plus the untimed local install,
-      # and it keeps the job inside its 30: ~20 min of work + 7 = 27.
+      # and it keeps the job inside its 30: ~15 min of work + 7 = 22.
       - name: Ensure xmllint, jq and zstd
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         timeout-minutes: 7
         run: bash scripts/ci/ensure_ci_tools.sh xmllint=libxml2-utils jq=jq zstd=zstd
-
-      # The one non-bash guard in this job. `check-wire-canaries.dart` is a
-      # plain Dart program with no package dependencies — it imports
-      # `dart:convert`/`math`/`typed_data` and one relative library — so it
-      # needs an SDK but no `pub get` and no Flutter. setup-dart is ~10 s,
-      # which is why the canary self-test can live here with the other
-      # invariants instead of behind the coverage job's toolchain.
-      - name: Set up Dart
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        uses: dart-lang/setup-dart@v1
-        with:
-          sdk: stable
 
       # Every step after the checkout, the setup above included, carries the
       # same `if:` — run whenever checkout succeeded, even if an earlier step
@@ -1932,22 +1926,25 @@ jobs:
       # stopped, and its teardown's adb-port error was the last line of a job
       # that ran no test. Every such job now provisions and VERIFIES the SDK
       # first; this keeps that step present, ahead of the job's FIRST use of
-      # the action (the AVD snapshot boots one too), unconditional (the AVD
-      # cache holds the AVD alone, so a hit still needs the emulator and the
-      # system image) and carrying that job's own api/target/arch. It also
-      # holds every emulator step to `-no-window`, because the headless binary
-      # is the one provisioning ran: in CI run 35536892150 a probe of the
-      # windowed one rejected a sound emulator in every lane. And a job that
-      # builds an APK first must release its build outputs before provisioning:
-      # in CI run 41322563075 one APK's left the system image too little room.
+      # the action, unconditional and carrying that job's own
+      # api/target/arch. It also holds every emulator step to `-no-window`,
+      # because the headless binary is the one provisioning ran: in CI run
+      # 35536892150 a probe of the windowed one rejected a sound emulator in
+      # every lane. A job that builds an APK first must release its build
+      # outputs before provisioning: in CI run 41322563075 one APK's left the
+      # system image too little room. And every emulator step runs
+      # require-adb.sh before its launch: in five jobs (137207551525 among
+      # them) the action polled an adb it could not find for its whole boot
+      # timeout and then hung to the step cap on a teardown that needs adb.
       - name: Android SDK is provisioned before every emulator step
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_android_sdk_provisioned.sh
 
       # Both directions, since a guard that only ever passes is decoration: a
       # missing step, one placed after the action, a wrong api level, target or
-      # arch, a commented-out one, one gated on an `if:` and an emulator step
-      # without the `-no-window` token each fail, as does an APK build whose
+      # arch, a commented-out one, one gated on an `if:`, an emulator step
+      # without the `-no-window` token and one without the adb check each
+      # fail, as does an APK build whose
       # outputs are not released after it and before provisioning; a job that
       # boots no emulator needs none. A step list the reader cannot parse
       # stops the guard rather than passing it, and the case count is pinned by
@@ -1955,16 +1952,6 @@ jobs:
       - name: Android SDK provisioning guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_android_sdk_provisioned.sh --self-test
-
-      # The provisioning step itself: an sdkmanager that exits 0 having
-      # installed nothing, and a package whose binary does not run, must both
-      # fail CLOSED and say infrastructure — the two shapes that reached CI as
-      # a story about the emulator. Its fake emulator refuses a probe without
-      # `-no-window`, as a runner with no desktop libraries does, so a probe
-      # that drops the flag reds here and not in thirteen lanes.
-      - name: E2E harness self-test (Android SDK provisioning)
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash tooling/e2e/ci/provision-android-sdk.sh --self-test
 
       # The same lanes' diagnostics step scans what it wrote and fails two
       # ways: a leak, or a log nothing could certify. Both said `exit 1` until
@@ -1986,32 +1973,6 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_diag_scan_exit_codes.sh --self-test
 
-      # The inner deadline itself. Its critical fixture is exit-code
-      # PASS-THROUGH: if a genuine test failure were ever reported as 124,
-      # run-relay-management.sh's timeout-only retry would start retrying
-      # real reds and a failing lane could flake green.
-      - name: E2E harness self-test (inner deadline wrapper)
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash tooling/e2e/ci/run-with-deadline.sh --self-test
-
-      - name: E2E harness self-test (connect-flake predicate)
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash tooling/e2e/ci/run-single-avd-scenario.sh --self-test
-
-      # Four more orchestrators own a secret-leak gate of their own. Each
-      # fixture pins the containment that matters: on a leak (rc 1) exactly
-      # the scanned `*.log` files are removed and a labels-only marker is
-      # left, and rc 3 (nothing scannable) and rc 0 touch nothing — so a leak
-      # can never be uploaded `if: failure()` and a clean run never loses its
-      # evidence.
-      - name: E2E harness self-test (integration-lane leak gate)
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash tooling/e2e/ci/run-integration-tests.sh --self-test
-
-      - name: E2E harness self-test (relay-management leak gate)
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash tooling/e2e/ci/run-relay-management.sh --self-test
-
       - name: Relay status states covered (every Relays-page state proved)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_relay_status_states_covered.sh
@@ -2020,72 +1981,9 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_relay_status_states_covered.sh --self-test
 
-      - name: E2E harness self-test (background-catchup leak gate)
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash tooling/e2e/ci/run-m7-background-catchup.sh --self-test
-
-      - name: E2E harness self-test (Android resume lane)
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash tooling/e2e/ci/run-android-resume.sh --self-test
-
       - name: Release-APK resume wiring guard self-test
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_apk_resume_wiring.sh --self-test
-
-      - name: E2E harness self-test (secret-leak scanner)
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash tooling/e2e/ci/scan-logs-for-secrets.sh --self-test
-
-      # The log-privacy gate that runs the scanner above TOGETHER with the
-      # runtime identifier scanner (tooling/logscan) and contains on a leak.
-      # Driven here with a FAKE haven-logscan (HAVEN_LOGSCAN_BIN) and the REAL
-      # key-material floor, so this toolchain-free job pins the wrapper's own
-      # contract: the two verdicts fold 1 > 2 > 3 > 4 > 0, only a leak deletes
-      # and it deletes every named sink, an absent or non-executable scanner is
-      # rc 2 and never a skip, and the manifest is named by basename only. The
-      # wrapper meets the REAL binary in rust-check.yml's logscan-tooling job
-      # (its mutation check: a clean sink keeps, a planted prefix deletes, a
-      # missed plant is unusable) — that job builds the crate; this one
-      # deliberately builds nothing.
-      - name: E2E harness self-test (log-privacy scan wrapper)
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash tooling/e2e/ci/scan-logs.sh --self-test
-
-      # The host-needle library every proxy-less lane seals from: the four
-      # seeds, the role coordinates and the canary stems pinned literally
-      # against the harness (the crate's tie test cross-checks the same
-      # constants), the proxy and host argv, and the bash-3.2 constraint the
-      # macOS runners impose.
-      - name: E2E harness self-test (host needles)
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash tooling/e2e/ci/host-needles.sh --self-test
-
-      # The one gate every runner calls. Under a fake scanner with the REAL
-      # wrapper and floor: each profile's seal argv, every sink handed on, the
-      # two verdicts folded, containment on a leak even under a failed seal,
-      # fail-closed on an absent binary or sidecar, the directory walker's
-      # typing by name, and the flag-off arm being the floor alone.
-      - name: E2E harness self-test (log-privacy gate library)
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash tooling/e2e/ci/logscan-gate.sh --self-test
-
-      # The per-attempt needle-directory rotation the iOS retry command runs
-      # (a retry command may hold only tooling scripts): owner-only directory,
-      # every previous sidecar shape removed and nothing else.
-      - name: E2E harness self-test (needle-directory rotation)
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash tooling/e2e/ci/rotate-needle-dir.sh --self-test
-
-      # The recorder's shutdown summary is the only place a run says whether
-      # its declaration channel recorded, refused or lost anything, or found a
-      # previous run's sidecar already there. e2e-android.yml reads it back
-      # through this helper before anything trusts the sealed manifest; the
-      # fixtures pin every shape it must refuse (a refused or lost count, a
-      # STALE marker, a missing line, an earlier unhealthy summary, an absent
-      # or empty log), the one it must accept, and that it prints counts only.
-      - name: E2E harness self-test (proxy declaration-channel summary)
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash tooling/e2e/ci/check-proxy-sidecar-summary.sh --self-test
 
       # The retry ENGINE, not just its predicate: a transient 429 is ridden out,
       # a compile error and a full disk are not, a persistent 429 stops at
@@ -2144,23 +2042,6 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash scripts/ci/check_all_jobs_passed.sh --self-test
 
-      # The fresh-install broadcast barrier every Android lane installs through.
-      # Against a stub device: a fresh install is checked, then followed by a
-      # drained package-manager handler and a loopers-flushing barrier under the
-      # full 120 s bound, whose four exit codes the GUEST prints and the host
-      # branches on — two of them controls, commands the guest cannot have, so a
-      # shell answering 0 to everything cannot read as a barrier that ran. A
-      # device that cannot run it, a runner that could not run it AT ALL (rc
-      # 125-127), a queue that never drains, a missing or truncated verdict line
-      # and a failed install each fail by name; and an install over an installed
-      # package — a replace, which cannot relaunch anything — takes no barrier,
-      # so a sound lane never reds on one. The stub `timeout` is checked against
-      # coreutils' real one first, since those verdicts are told apart by its
-      # exit code. Its fixture count is pinned by equality.
-      - name: E2E harness self-test (fresh-install broadcast barrier)
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash tooling/e2e/ci/app-install-lib.sh --self-test
-
       # The ENFORCING half: no lane installs the app except through that
       # library, none redefines it, and every adb-using run-*.sh that launches
       # the app also installs through it. Comments, messages and fixtures that
@@ -2169,15 +2050,6 @@ jobs:
       - name: Android lanes install only through the flushed fresh-install step
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/app-install-lib.sh --check-installs
-
-      # Guards the predicate that catches `flutter drive` exiting 0 on a FAILED
-      # test. Its critical fixture is the verbatim run-30753193231 log in which
-      # a setUpAll failure was reported to the driver as "All tests passed." —
-      # if that stops being detected, every drive-based lane can go green on a
-      # red suite again.
-      - name: E2E harness self-test (drive-log failure predicate)
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash tooling/e2e/ci/drive-log-lib.sh --self-test
 
       # The ENFORCING half of the same library, and the only one that can run
       # without a device. A RUNTIME skip (`markTestSkipped`) is invisible to
@@ -2210,6 +2082,514 @@ jobs:
         run: |
           bash scripts/ci/check_no_flag_guarded_test_bodies.sh --self-test
           bash scripts/ci/check_no_flag_guarded_test_bodies.sh
+
+      # The recorder that PRODUCES that journal is itself a privacy hazard: it
+      # captures full event JSON, ciphertext, and REQ filters carrying identity
+      # pubkeys, mapped to named endpoints. Same shape as the exporter-label ban
+      # and the M7 test-hook boundary — a capability that must exist for the
+      # harness and must be unreachable from the shipped app. The guard also
+      # enforces the ARTIFACT decision (the raw .ndjson is never uploaded; the
+      # redacted summary is) and the one property that makes the recorder safe
+      # to run at all: fail-open is a property of the recorder's TYPE, not of
+      # its call sites.
+      - name: Wire proxy stays test-only
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_wire_proxy_test_only.sh
+
+      # The guard above is greps and one small YAML-block parser, so its
+      # fixtures pin both directions of each check plus the three ways it could
+      # rot into a rubber stamp: a .ndjson named OUTSIDE an upload step must be
+      # ALLOWED (starting the recorder has to name its path), a doc comment
+      # naming `unwrap()` must not count as code (the module has to be able to
+      # explain why it avoids it), and a rename that leaves the signature
+      # extractor matching NOTHING must fail rather than pass for want of
+      # anything to check.
+      - name: Wire-proxy guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_wire_proxy_test_only.sh --self-test
+
+      # The POSITIVE half. Everything above proves the wire instrument is
+      # SAFE — unreachable from the app, and each oracle able to fail its own
+      # fixtures. None of it proves the instrument is USED. The wire oracles'
+      # steps in the `harness` job are `--self-test` invocations; that is the whole of
+      # their CI presence, and it is precisely the shape
+      # docs/CI_HARDENING_BACKLOG.md catalogues ten times over as "written,
+      # reviewed, passes its own self-test, executes nowhere".
+      #
+      # So this guard asserts the chain that makes those verdicts mean
+      # something: some lane starts the recorder, points the app at IT rather
+      # than past it, stops it on every path, and runs an oracle over the
+      # journal afterwards under the same sentinel the drive emitted. It is
+      # pure bash over the workflow YAML, so it belongs here rather than in a
+      # lane — and putting it in a lane would be circular anyway.
+      - name: Wire oracles are reached by a lane
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_wire_oracle_lane_reachable.sh
+
+      # ...and its own fixtures, for the same reason every other guard in this
+      # job has them: this one's entire subject is an ABSENCE, and a check that
+      # has stopped matching reports every lane as compliant. The fixtures pin
+      # a break of each of the four links, every route by which the guard could
+      # find nothing to reason over (which must be BROKEN, a distinct exit
+      # code, never a clean pass), and both false-positive directions — a
+      # correctly wired lane and a declared exemption must BOTH stay green, or
+      # the guard gets deleted rather than fixed.
+      - name: Wire-reachability guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_wire_oracle_lane_reachable.sh --self-test
+
+      # The wrapper is a guarantee only where it RUNS. Every job that captures
+      # a device, simulator or test log invokes scan-logs.sh or a gated runner
+      # from the checked-in list (each pinned to its own gate-before-echo
+      # fixture); every uploaded .log is a --sink earlier in the job; no
+      # cat/tail/head precedes the first scan; no set -x in the harness; no
+      # .logarchive or .txt upload; every tee'd test transcript is scanned;
+      # --rules-only stays in rust-check.yml/coverage.yml; a recording lane
+      # accounts and discards; a scanning lane builds and rotates.
+      - name: Every captured log reaches the log-privacy wrapper
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_logscan_wired_everywhere.sh
+
+      # Each of the nine rules has a fixture in both directions over a
+      # synthetic tree (an emulator `script:` lane, a retry `command:` lane, a
+      # `${RUNNER_TEMP}` tee, a self-test-only guards workflow), plus the
+      # floors and the extractor cross-check that make a silent parser BROKEN
+      # rather than clean. Count pinned by equality.
+      - name: Log-privacy wiring guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_logscan_wired_everywhere.sh --self-test
+
+      # The scanner's policy is what "clean" means in every lane. Read from
+      # the text without cargo: no deferral vocabulary, structural rules on
+      # except the listed relay sink, the declared-plant expectation pinned
+      # per sink and explained in the README, every allowlist entry shaped,
+      # live and proven, every class ledgered.
+      - name: Log-scanner policy and allowlist shape
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_logscan_policy.sh
+
+      # Both directions per rule over mutated copies of the shipped policy
+      # and README and allowlists written from scratch; a section the parser
+      # cannot find is BROKEN, never clean. Count pinned by equality.
+      - name: Log-scanner policy guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_logscan_policy.sh --self-test
+
+      # The Tier-1 soak rig links haven-core with `test-utils` ON: the five
+      # probe seams and the unencrypted-store constructors. This is the
+      # negative half of its boundary — no production reach, no build path, the
+      # feature still a DEV edge of rust_builder, and the one line that would
+      # disarm haven-core's `compile_error!` trap (`debug-assertions = true`
+      # under any shipped `[profile.*]`) absent from every manifest but the
+      # rig's own. Plus the two rules the rig's own tests cannot see: no `{:?}`
+      # of a haven_core/cgka/nostr/openmls value, and a timeline field-class
+      # test whose case count is pinned.
+      - name: Soak rig stays test-only
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_soak_test_only.sh
+
+      # Both directions per check over synthetic trees — including the arm that
+      # is the whole reason this is not a bare grep: `test-utils` as a
+      # DEV-dependency of rust_builder must PASS, and as a normal, build- or
+      # target-scoped dependency must fail. Count pinned by equality.
+      - name: Soak test-only guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_soak_test_only.sh --self-test
+
+      # The rig steps a clock forward on purpose — that is how a five-minute
+      # run reaches a 288-second horizon — and exactly one kind of seam may see
+      # the offset. A policy instant at a cursor, anchor or delivery-window seam
+      # does not accelerate anything: it fabricates the fork the run then
+      # reports, indistinguishably from a real one. The seam vocabulary is
+      # derived from haven-core, so a rename is BROKEN rather than clean.
+      - name: Soak clock partition
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_soak_clock_partition.sh
+
+      # Fixtures for every converting shape (both `From` directions, a named
+      # `into_wall()`, one outside clock.rs), both partition directions, and
+      # every route to blindness: a renamed newtype, a missing clock module, a
+      # seam that no longer exists in haven-core. Count pinned by equality.
+      - name: Soak clock-partition guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_soak_clock_partition.sh --self-test
+
+      # The POSITIVE half: does anything RUN the rig? A soak rig nothing drives
+      # is the most expensive instance of the failure mode
+      # docs/CI_HARDENING_BACKLOG.md catalogues — written, reviewed, green on
+      # its own fixtures, executed nowhere. Eight links: ci.yml calls the pr
+      # profile on `needs: [rust-tooling]`, the caller that runs rust-check.yml's
+      # soak-tooling job (L1); a scheduler's matrix caller carries its slot in
+      # its name, which the issue filer finds each slot's job by (L2);
+      # rust-check.yml runs the shipped binary's `--self-test` (L3); every job
+      # in every soak-*.yml drives through the gated runner under an inner
+      # deadline and uploads only after it (L4); every such job also scans in a
+      # step of its own that the drive's outcome cannot switch off (L7); the
+      # profiles nest over (scenario, arm) pairs (L5); the TOML's deadline
+      # equals the workflow's literal (L6); and soak-nightly.yml calls the
+      # nightly profile with per-slot seeds, off every other cron,
+      # non-cancelling, each checkout granted, one artifact name per slot (L8).
+      - name: Soak lane is reached and its numbers agree
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_soak_lane_reachable.sh
+
+      # Every link broken in turn over synthetic workflow trees, plus both
+      # false-positive directions and every way the extractor could go blind
+      # (no matrix caller to read, a job list it cannot parse, a profile
+      # declaring nothing). Count pinned by equality.
+      - name: Soak lane-reachability guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_soak_lane_reachable.sh --self-test
+
+      # The one definition of a scheduled soak seed (`0x` + 16 hex of
+      # sha256("<profile>|<date>|<slot>")), from the RUN's created_at, never the
+      # local clock and never `/attempts/<n>`. Not a `check_*`: it is the
+      # scheduler's tool, so its fixtures are the proof — a known vector from an
+      # independent hash, every refusal printing no seed, and a recording `gh`
+      # that reds if the re-run's attempt URL is ever built. Count pinned by
+      # equality.
+      - name: Soak seed derivation self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/soak_seed.sh --self-test
+
+      # The nightly's issue path. Not a `check_*`: its subject is the GitHub
+      # API, so its fixtures are the proof — the body EQUALS the allowlist, each
+      # field from its one source; one refusal per shape, each with zero `gh`
+      # calls; a tree full of stray names, endpoints and instants contributes
+      # nothing but verdict.log; no-verdict (an empty AND a missing slot) and
+      # leak-contained carry no tree field; one issue per key, a second night
+      # comments, a doubled or saturated dedup refuses; no `--file`, no call of
+      # any kind; and the backstop scan refuses on anything but clean. `gh` and
+      # the scanner binary are stubs; scan-logs.sh and its key-material floor
+      # are real. Count pinned by equality.
+      - name: Soak issue filing self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/file_soak_issue.sh --self-test
+
+      - name: Identity-delete prefs residue
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_identity_delete_prefs_residue.sh
+
+      # The guard above is a hand-written extractor, so its fixtures pin the
+      # regression found while writing it: a mutated-out clear left behind as
+      # a comment still contains the literal `.remove(name)` text and must not
+      # read as live. The rest cover the read-vs-clear distinction the whole
+      # guard exists for, a stale keep-list entry, and both anti-vacuity floors
+      # — zero keys found at all, and a partially-broken extractor that finds
+      # some but far fewer than the real tree has.
+      - name: Identity-delete residue guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_identity_delete_prefs_residue.sh --self-test
+
+      # Both guards below are advisory-layer infrastructure, and both reason
+      # about things a green verdict cannot demonstrate: that a hallucinated
+      # citation is DEMOTED rather than published, and that a model edit
+      # outside the manifest is REFUSED rather than proposed. Neither ever runs
+      # in an enforcing mode here — their subject is another workflow's
+      # behaviour — so the fixtures are the only proof they still work.
+      - name: Advisory-finding anchor verifier self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_ai_finding_anchors.sh --self-test
+
+      - name: Manifest-author diff bound self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_manifest_author_diff.sh --self-test
+
+      # Its subject is the author job's failure log, so only the fixtures can
+      # prove it prints the reason alone, escaped, and nothing else.
+      - name: Manifest-author failure reporter self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/report_manifest_author_failure.sh --self-test
+
+      # The manifest is a join table between what the app PROMISES the user and
+      # what makes that promise true, and nothing about a JSON file resists rot:
+      # a test gets renamed, a guard stops being wired, a warning gets deleted,
+      # and the manifest keeps asserting the world it was written against. This
+      # re-derives every row from the tree — cited symbols, cited tests (present,
+      # not `#[ignore]`d, not `skip:`ed, not in expected_test_skips.txt, no
+      # `markTestSkipped` under integration_test/, and actually asserting),
+      # cited guards (present AND wired in an ENFORCING run here, not merely as
+      # their own --self-test), every `privacy*` string classified, every iOS
+      # usage description and consent-dialog sentence classified, and every
+      # event-kind construction token declared. The ratchet then compares
+      # against the base ref: CI cannot judge whether weakening a guarantee is
+      # justified, only force it to be stated where review sees it. The fetch
+      # lives in the same step as the check because `actions/checkout` is
+      # shallow — a separate step could be skipped, and a ratchet that cannot
+      # read its baseline must fail, never pass. It runs LAST because it cites
+      # the other guards, so every specific verdict has already printed above.
+      # The baseline this step names is the commit the change is BUILT ON,
+      # never the live tip of the default branch. On a pull request that is
+      # `pull_request.base.sha`; on a push it is `event.before`, the PREVIOUS
+      # TIP OF THE SAME BRANCH — a push to main therefore ratchets against what
+      # main was a moment earlier, not against a diverged branch. Anchoring on
+      # the tip was wrong twice: a tag build (release-build.yml then called
+      # this job too) would fetch a main that had moved on and report every newer
+      # invariant as `.deleted`, failing the release gate on a phantom
+      # weakening; and on a push to main the tip IS the pushed commit, so the
+      # baseline equalled HEAD and the ratchet — the thing this workstream is
+      # built around — was silently vacuous on the one path that has no branch
+      # protection in front of it. `event.before` fixes that: a direct push that
+      # deletes an invariant is now caught.
+      #
+      # NAMING THE REF IS NOT OPTIONAL. The script's own default when invoked
+      # with no flags is `origin/main` — precisely the live tip condemned above
+      # — so every caller that cares must pass `--baseline-ref`. This step does;
+      # `privacy-manifest-author.yml` does NOT, and validates its proposal
+      # against main's tip on purpose (its branch is cut from that tip, so the
+      # two coincide, and its proposals are additive by construction).
+      # Where no base commit exists (tag, new branch, manual run) there is no
+      # "change" to ratchet, so rules 1-14 run and only the comparison is
+      # skipped — announced, never silent.
+      - name: Privacy invariants describe this repository
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -Eeuo pipefail
+          baseline=""
+          if [[ -n "${PR_BASE_SHA:-}" ]]; then
+            baseline="${PR_BASE_SHA}"
+          elif [[ -n "${PUSH_BEFORE:-}" \
+               && "${PUSH_BEFORE}" != "0000000000000000000000000000000000000000" ]]; then
+            baseline="${PUSH_BEFORE}"
+          fi
+          if [[ -z "${baseline}" ]]; then
+            echo "::notice::no base commit for this event (tag build, new branch or manual run) —" \
+                 "running every rule, skipping only the ratchet comparison"
+            bash scripts/ci/check_privacy_invariants.sh --no-ratchet
+            exit 0
+          fi
+          git fetch --no-tags --depth=1 origin "${baseline}"
+          bash scripts/ci/check_privacy_invariants.sh --baseline-ref "${baseline}"
+
+      # The guard above is a hand-written extractor over four languages, so its
+      # fixtures pin each way it could be wrong on CORRECT input as well as on
+      # broken input: a PROSE `#[ignore]` comment must not read as an attribute
+      # (there are five such comments in-tree), a Dart name split across
+      # adjacent literals with a `\u` escape must resolve, one key may be an
+      # assertion under one invariant and a disclosure under another (~24
+      # strings promise and warn in one paragraph), and a decoy kind inside
+      # `#[cfg(test)]` must not read as a new wire kind. The five that matter
+      # most are the ones this workstream exists for: an assertion on an
+      # accepted deviation, a deleted disclosure, an unwired guard, a
+      # self-test-only wiring cited as proof, and a stale ratchet override.
+      #
+      # All of them are driven through the same `run_all_checks` list the
+      # enforcing step above uses, so a check unwired from production is
+      # unwired from these fixtures too and its fixtures go red. (They used to
+      # be two independent lists, and had already drifted.) One fixture is
+      # structural rather than a manifest mutation: every `check_*` must be in
+      # that list — or, for the two that cannot run over a miniature fixture
+      # tree, invoked by `main` AND carrying fixtures of its own — and `main`
+      # must still drive the list, so neither a check nor the list itself can
+      # be written and wired nowhere while counting as coverage.
+      - name: Privacy-invariants guard self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_privacy_invariants.sh --self-test
+
+      # The one guard in this job whose subject is a workflow, not the tree, so
+      # its fixtures are the only thing that can catch a widened re-run rule.
+      # They are hermetic: `gh` is stubbed, and the `curl` stub is checked in
+      # the same run against the real curl talking to a loopback server, so
+      # nothing leaves the runner and the fake cannot drift from the tool. One
+      # fixture DOES read the tree — the signature must appear in
+      # exactly one file — and it reads untracked files too, so a second copy
+      # is caught in the commit that introduces it rather than the one after.
+      - name: Runner-loss re-run gate self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/rerun_runner_losses.sh --self-test
+
+      # A step without the standard `if:` is skipped after any earlier red:
+      # run 44523702729 lost its Dart setup that way, behind a failed xmllint
+      # install, and two Dart guards then failed for want of `dart`.
+      - name: Repo-guards step conditions
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_repo_guards_step_conditions.sh
+
+      - name: Repo-guards step conditions (self-test)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_repo_guards_step_conditions.sh --self-test
+
+      # The installer's subject is the archive, so its fixtures are the proof:
+      # a stubbed apt-get that is healthy, stale, down or hung.
+      - name: CI tool installer self-test
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/ensure_ci_tools.sh --self-test
+
+  # The E2E harnesses' hermetic self-tests: each drives a lane's real runner
+  # against a stub device, simulator or relay, so they are minutes of process
+  # churn rather than greps, and beside the static checks they took the one job
+  # to 29.7 of its 30 minutes on a slow runner (run 45921320644; 492 s of it the
+  # launch gate's). A job of their own runs them in parallel with the static
+  # checks, under the same `if:` rule (check_repo_guards_step_conditions.sh).
+  harness:
+    name: E2E harness self-tests
+    runs-on: ubuntu-latest
+    # A hang guard sized from measurement: these steps took 15.1 min in run
+    # 45921320644 (907 s, 492 s of it the launch gate's, at its old cap), on
+    # a runner that took 29.7 min for the job they were part of; the job's
+    # setup is under a minute. 30 is ~2x that.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v6
+
+      # The same tools as the static checks' job, for the harnesses that parse
+      # XML or JSON.
+      - name: Ensure xmllint, jq and zstd
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 7
+        run: bash scripts/ci/ensure_ci_tools.sh xmllint=libxml2-utils jq=jq zstd=zstd
+
+      # The one non-bash step in this workflow. `check-wire-canaries.dart`
+      # is a plain Dart program with no package dependencies — it imports
+      # `dart:convert`/`math`/`typed_data` and one relative library — so it
+      # needs an SDK but no `pub get` and no Flutter. setup-dart is ~10 s,
+      # which is why the canary self-test can live here with the other
+      # harnesses instead of behind the coverage job's toolchain.
+      - name: Set up Dart
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      # The provisioning step itself: an sdkmanager that exits 0 having
+      # installed nothing, and a package whose binary does not run, must both
+      # fail CLOSED and say infrastructure — the two shapes that reached CI as
+      # a story about the emulator — and so must a platform-tools whose adb
+      # is missing. Its fake emulator refuses a probe without `-no-window`, as
+      # a runner with no desktop libraries does, so a probe that drops the
+      # flag reds here and not in thirteen lanes.
+      - name: E2E harness self-test (Android SDK provisioning)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/provision-android-sdk.sh --self-test
+
+      # The emulator steps' pre-launch adb check: a runnable adb passes; a
+      # missing or failing one is rc 3, says infrastructure with the evidence
+      # that explains it, and ends the emulator action's own process (proved
+      # on the real process table) so the step fails in seconds, not at its
+      # cap.
+      - name: E2E harness self-test (pre-launch adb check)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/require-adb.sh --self-test
+
+      # The inner deadline itself. Its critical fixture is exit-code
+      # PASS-THROUGH: if a genuine test failure were ever reported as 124,
+      # run-relay-management.sh's timeout-only retry would start retrying
+      # real reds and a failing lane could flake green.
+      - name: E2E harness self-test (inner deadline wrapper)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-with-deadline.sh --self-test
+
+      - name: E2E harness self-test (connect-flake predicate)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-single-avd-scenario.sh --self-test
+
+      # Four more orchestrators own a secret-leak gate of their own. Each
+      # fixture pins the containment that matters: on a leak (rc 1) exactly
+      # the scanned `*.log` files are removed and a labels-only marker is
+      # left, and rc 3 (nothing scannable) and rc 0 touch nothing — so a leak
+      # can never be uploaded `if: failure()` and a clean run never loses its
+      # evidence.
+      - name: E2E harness self-test (integration-lane leak gate)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-integration-tests.sh --self-test
+
+      - name: E2E harness self-test (relay-management leak gate)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-relay-management.sh --self-test
+
+      - name: E2E harness self-test (background-catchup leak gate)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-m7-background-catchup.sh --self-test
+
+      - name: E2E harness self-test (Android resume lane)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-android-resume.sh --self-test
+
+      - name: E2E harness self-test (secret-leak scanner)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/scan-logs-for-secrets.sh --self-test
+
+      # The log-privacy gate that runs the scanner above TOGETHER with the
+      # runtime identifier scanner (tooling/logscan) and contains on a leak.
+      # Driven here with a FAKE haven-logscan (HAVEN_LOGSCAN_BIN) and the REAL
+      # key-material floor, so this toolchain-free job pins the wrapper's own
+      # contract: the two verdicts fold 1 > 2 > 3 > 4 > 0, only a leak deletes
+      # and it deletes every named sink, an absent or non-executable scanner is
+      # rc 2 and never a skip, and the manifest is named by basename only. The
+      # wrapper meets the REAL binary in rust-check.yml's logscan-tooling job
+      # (its mutation check: a clean sink keeps, a planted prefix deletes, a
+      # missed plant is unusable) — that job builds the crate; this one
+      # deliberately builds nothing.
+      - name: E2E harness self-test (log-privacy scan wrapper)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/scan-logs.sh --self-test
+
+      # The host-needle library every proxy-less lane seals from: the four
+      # seeds, the role coordinates and the canary stems pinned literally
+      # against the harness (the crate's tie test cross-checks the same
+      # constants), the proxy and host argv, and the bash-3.2 constraint the
+      # macOS runners impose.
+      - name: E2E harness self-test (host needles)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/host-needles.sh --self-test
+
+      # The one gate every runner calls. Under a fake scanner with the REAL
+      # wrapper and floor: each profile's seal argv, every sink handed on, the
+      # two verdicts folded, containment on a leak even under a failed seal,
+      # fail-closed on an absent binary or sidecar, the directory walker's
+      # typing by name, and the flag-off arm being the floor alone.
+      - name: E2E harness self-test (log-privacy gate library)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/logscan-gate.sh --self-test
+
+      # The per-attempt needle-directory rotation the iOS retry command runs
+      # (a retry command may hold only tooling scripts): owner-only directory,
+      # every previous sidecar shape removed and nothing else.
+      - name: E2E harness self-test (needle-directory rotation)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/rotate-needle-dir.sh --self-test
+
+      # The recorder's shutdown summary is the only place a run says whether
+      # its declaration channel recorded, refused or lost anything, or found a
+      # previous run's sidecar already there. e2e-android.yml reads it back
+      # through this helper before anything trusts the sealed manifest; the
+      # fixtures pin every shape it must refuse (a refused or lost count, a
+      # STALE marker, a missing line, an earlier unhealthy summary, an absent
+      # or empty log), the one it must accept, and that it prints counts only.
+      - name: E2E harness self-test (proxy declaration-channel summary)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/check-proxy-sidecar-summary.sh --self-test
+
+      # The fresh-install broadcast barrier every Android lane installs through.
+      # Against a stub device: a fresh install is checked, then followed by a
+      # drained package-manager handler and a loopers-flushing barrier under the
+      # full 120 s bound, whose four exit codes the GUEST prints and the host
+      # branches on — two of them controls, commands the guest cannot have, so a
+      # shell answering 0 to everything cannot read as a barrier that ran. A
+      # device that cannot run it, a runner that could not run it AT ALL (rc
+      # 125-127), a queue that never drains, a missing or truncated verdict line
+      # and a failed install each fail by name; and an install over an installed
+      # package — a replace, which cannot relaunch anything — takes no barrier,
+      # so a sound lane never reds on one. The stub `timeout` is checked against
+      # coreutils' real one first, since those verdicts are told apart by its
+      # exit code. Its fixture count is pinned by equality.
+      - name: E2E harness self-test (fresh-install broadcast barrier)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/app-install-lib.sh --self-test
+
+      # Guards the predicate that catches `flutter drive` exiting 0 on a FAILED
+      # test. Its critical fixture is the verbatim run-30753193231 log in which
+      # a setUpAll failure was reported to the driver as "All tests passed." —
+      # if that stops being detected, every drive-based lane can go green on a
+      # red suite again.
+      - name: E2E harness self-test (drive-log failure predicate)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/drive-log-lib.sh --self-test
 
       # Guards the B1 lane's publish-count PARSER. Its critical fixture is the
       # `Published to 0/1` line — P0-1's own signature, which a substring grep
@@ -2422,9 +2802,14 @@ jobs:
       # will not turn on, no leg reaching MapShell (rc 2), a gallery the device
       # would not seed (rc 2) or never answered for (rc 3) — and no picker
       # description ever reaches a transcript.
+      #
+      # Its stub device answers on a call-counting clock, so nothing in it
+      # waits on time; it is ~150 fixtures of process churn, 305-492 s over 81
+      # runs since b0be108 (2026-11-21..27, bimodal by runner), over the old 8-minute cap
+      # on the slow ones (run 45921320644). 12 is ~1.5x that worst.
       - name: E2E harness self-test (Android launch gate)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        timeout-minutes: 8
+        timeout-minutes: 12
         run: bash tooling/e2e/ci/run-launch-gate-android.sh --self-test
 
       # The screen reader the Android gate decides on: exact-line matching,
@@ -2592,189 +2977,6 @@ jobs:
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: dart tooling/e2e/ci/bgp-wire-probe.dart --self-test
 
-      # The recorder that PRODUCES that journal is itself a privacy hazard: it
-      # captures full event JSON, ciphertext, and REQ filters carrying identity
-      # pubkeys, mapped to named endpoints. Same shape as the exporter-label ban
-      # and the M7 test-hook boundary — a capability that must exist for the
-      # harness and must be unreachable from the shipped app. The guard also
-      # enforces the ARTIFACT decision (the raw .ndjson is never uploaded; the
-      # redacted summary is) and the one property that makes the recorder safe
-      # to run at all: fail-open is a property of the recorder's TYPE, not of
-      # its call sites.
-      - name: Wire proxy stays test-only
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_wire_proxy_test_only.sh
-
-      # The guard above is greps and one small YAML-block parser, so its
-      # fixtures pin both directions of each check plus the three ways it could
-      # rot into a rubber stamp: a .ndjson named OUTSIDE an upload step must be
-      # ALLOWED (starting the recorder has to name its path), a doc comment
-      # naming `unwrap()` must not count as code (the module has to be able to
-      # explain why it avoids it), and a rename that leaves the signature
-      # extractor matching NOTHING must fail rather than pass for want of
-      # anything to check.
-      - name: Wire-proxy guard self-test
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_wire_proxy_test_only.sh --self-test
-
-      # The POSITIVE half. Everything above proves the wire instrument is
-      # SAFE — unreachable from the app, and each oracle able to fail its own
-      # fixtures. None of it proves the instrument is USED. The three oracle
-      # steps in this job are `--self-test` invocations; that is the whole of
-      # their CI presence, and it is precisely the shape
-      # docs/CI_HARDENING_BACKLOG.md catalogues ten times over as "written,
-      # reviewed, passes its own self-test, executes nowhere".
-      #
-      # So this guard asserts the chain that makes those verdicts mean
-      # something: some lane starts the recorder, points the app at IT rather
-      # than past it, stops it on every path, and runs an oracle over the
-      # journal afterwards under the same sentinel the drive emitted. It is
-      # pure bash over the workflow YAML, so it belongs here rather than in a
-      # lane — and putting it in a lane would be circular anyway.
-      - name: Wire oracles are reached by a lane
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_wire_oracle_lane_reachable.sh
-
-      # ...and its own fixtures, for the same reason every other guard in this
-      # job has them: this one's entire subject is an ABSENCE, and a check that
-      # has stopped matching reports every lane as compliant. The fixtures pin
-      # a break of each of the four links, every route by which the guard could
-      # find nothing to reason over (which must be BROKEN, a distinct exit
-      # code, never a clean pass), and both false-positive directions — a
-      # correctly wired lane and a declared exemption must BOTH stay green, or
-      # the guard gets deleted rather than fixed.
-      - name: Wire-reachability guard self-test
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_wire_oracle_lane_reachable.sh --self-test
-
-      # The wrapper is a guarantee only where it RUNS. Every job that captures
-      # a device, simulator or test log invokes scan-logs.sh or a gated runner
-      # from the checked-in list (each pinned to its own gate-before-echo
-      # fixture); every uploaded .log is a --sink earlier in the job; no
-      # cat/tail/head precedes the first scan; no set -x in the harness; no
-      # .logarchive or .txt upload; every tee'd test transcript is scanned;
-      # --rules-only stays in rust-check.yml/coverage.yml; a recording lane
-      # accounts and discards; a scanning lane builds and rotates.
-      - name: Every captured log reaches the log-privacy wrapper
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_logscan_wired_everywhere.sh
-
-      # Each of the nine rules has a fixture in both directions over a
-      # synthetic tree (an emulator `script:` lane, a retry `command:` lane, a
-      # `${RUNNER_TEMP}` tee, a self-test-only guards workflow), plus the
-      # floors and the extractor cross-check that make a silent parser BROKEN
-      # rather than clean. Count pinned by equality.
-      - name: Log-privacy wiring guard self-test
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_logscan_wired_everywhere.sh --self-test
-
-      # The scanner's policy is what "clean" means in every lane. Read from
-      # the text without cargo: no deferral vocabulary, structural rules on
-      # except the listed relay sink, the declared-plant expectation pinned
-      # per sink and explained in the README, every allowlist entry shaped,
-      # live and proven, every class ledgered.
-      - name: Log-scanner policy and allowlist shape
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_logscan_policy.sh
-
-      # Both directions per rule over mutated copies of the shipped policy
-      # and README and allowlists written from scratch; a section the parser
-      # cannot find is BROKEN, never clean. Count pinned by equality.
-      - name: Log-scanner policy guard self-test
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_logscan_policy.sh --self-test
-
-      # The Tier-1 soak rig links haven-core with `test-utils` ON: the five
-      # probe seams and the unencrypted-store constructors. This is the
-      # negative half of its boundary — no production reach, no build path, the
-      # feature still a DEV edge of rust_builder, and the one line that would
-      # disarm haven-core's `compile_error!` trap (`debug-assertions = true`
-      # under any shipped `[profile.*]`) absent from every manifest but the
-      # rig's own. Plus the two rules the rig's own tests cannot see: no `{:?}`
-      # of a haven_core/cgka/nostr/openmls value, and a timeline field-class
-      # test whose case count is pinned.
-      - name: Soak rig stays test-only
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_soak_test_only.sh
-
-      # Both directions per check over synthetic trees — including the arm that
-      # is the whole reason this is not a bare grep: `test-utils` as a
-      # DEV-dependency of rust_builder must PASS, and as a normal, build- or
-      # target-scoped dependency must fail. Count pinned by equality.
-      - name: Soak test-only guard self-test
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_soak_test_only.sh --self-test
-
-      # The rig steps a clock forward on purpose — that is how a five-minute
-      # run reaches a 288-second horizon — and exactly one kind of seam may see
-      # the offset. A policy instant at a cursor, anchor or delivery-window seam
-      # does not accelerate anything: it fabricates the fork the run then
-      # reports, indistinguishably from a real one. The seam vocabulary is
-      # derived from haven-core, so a rename is BROKEN rather than clean.
-      - name: Soak clock partition
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_soak_clock_partition.sh
-
-      # Fixtures for every converting shape (both `From` directions, a named
-      # `into_wall()`, one outside clock.rs), both partition directions, and
-      # every route to blindness: a renamed newtype, a missing clock module, a
-      # seam that no longer exists in haven-core. Count pinned by equality.
-      - name: Soak clock-partition guard self-test
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_soak_clock_partition.sh --self-test
-
-      # The POSITIVE half: does anything RUN the rig? A soak rig nothing drives
-      # is the most expensive instance of the failure mode
-      # docs/CI_HARDENING_BACKLOG.md catalogues — written, reviewed, green on
-      # its own fixtures, executed nowhere. Eight links: ci.yml calls the pr
-      # profile on `needs: [rust-tooling]`, the caller that runs rust-check.yml's
-      # soak-tooling job (L1); a scheduler's matrix caller carries its slot in
-      # its name, which the issue filer finds each slot's job by (L2);
-      # rust-check.yml runs the shipped binary's `--self-test` (L3); every job
-      # in every soak-*.yml drives through the gated runner under an inner
-      # deadline and uploads only after it (L4); every such job also scans in a
-      # step of its own that the drive's outcome cannot switch off (L7); the
-      # profiles nest over (scenario, arm) pairs (L5); the TOML's deadline
-      # equals the workflow's literal (L6); and soak-nightly.yml calls the
-      # nightly profile with per-slot seeds, off every other cron,
-      # non-cancelling, each checkout granted, one artifact name per slot (L8).
-      - name: Soak lane is reached and its numbers agree
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_soak_lane_reachable.sh
-
-      # Every link broken in turn over synthetic workflow trees, plus both
-      # false-positive directions and every way the extractor could go blind
-      # (no matrix caller to read, a job list it cannot parse, a profile
-      # declaring nothing). Count pinned by equality.
-      - name: Soak lane-reachability guard self-test
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_soak_lane_reachable.sh --self-test
-
-      # The one definition of a scheduled soak seed (`0x` + 16 hex of
-      # sha256("<profile>|<date>|<slot>")), from the RUN's created_at, never the
-      # local clock and never `/attempts/<n>`. Not a `check_*`: it is the
-      # scheduler's tool, so its fixtures are the proof — a known vector from an
-      # independent hash, every refusal printing no seed, and a recording `gh`
-      # that reds if the re-run's attempt URL is ever built. Count pinned by
-      # equality.
-      - name: Soak seed derivation self-test
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/soak_seed.sh --self-test
-
-      # The nightly's issue path. Not a `check_*`: its subject is the GitHub
-      # API, so its fixtures are the proof — the body EQUALS the allowlist, each
-      # field from its one source; one refusal per shape, each with zero `gh`
-      # calls; a tree full of stray names, endpoints and instants contributes
-      # nothing but verdict.log; no-verdict (an empty AND a missing slot) and
-      # leak-contained carry no tree field; one issue per key, a second night
-      # comments, a doubled or saturated dedup refuses; no `--file`, no call of
-      # any kind; and the backstop scan refuses on anything but clean. `gh` and
-      # the scanner binary are stubs; scan-logs.sh and its key-material floor
-      # are real. Count pinned by equality.
-      - name: Soak issue filing self-test
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/file_soak_issue.sh --self-test
-
       # The soak runner's own hermetic fixtures: the sink spec, the containment
       # branch (every capture deleted, one harness-authored line left, nothing
       # interpolated into it), the fixed needle directory, the wiring pin
@@ -2787,155 +2989,3 @@ jobs:
       - name: E2E harness self-test (soak lane runner)
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: bash tooling/e2e/ci/run-soak-core.sh --self-test
-
-      - name: Identity-delete prefs residue
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_identity_delete_prefs_residue.sh
-
-      # The guard above is a hand-written extractor, so its fixtures pin the
-      # regression found while writing it: a mutated-out clear left behind as
-      # a comment still contains the literal `.remove(name)` text and must not
-      # read as live. The rest cover the read-vs-clear distinction the whole
-      # guard exists for, a stale keep-list entry, and both anti-vacuity floors
-      # — zero keys found at all, and a partially-broken extractor that finds
-      # some but far fewer than the real tree has.
-      - name: Identity-delete residue guard self-test
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_identity_delete_prefs_residue.sh --self-test
-
-      # Both guards below are advisory-layer infrastructure, and both reason
-      # about things a green verdict cannot demonstrate: that a hallucinated
-      # citation is DEMOTED rather than published, and that a model edit
-      # outside the manifest is REFUSED rather than proposed. Neither ever runs
-      # in an enforcing mode here — their subject is another workflow's
-      # behaviour — so the fixtures are the only proof they still work.
-      - name: Advisory-finding anchor verifier self-test
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_ai_finding_anchors.sh --self-test
-
-      - name: Manifest-author diff bound self-test
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_manifest_author_diff.sh --self-test
-
-      # Its subject is the author job's failure log, so only the fixtures can
-      # prove it prints the reason alone, escaped, and nothing else.
-      - name: Manifest-author failure reporter self-test
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/report_manifest_author_failure.sh --self-test
-
-      # The manifest is a join table between what the app PROMISES the user and
-      # what makes that promise true, and nothing about a JSON file resists rot:
-      # a test gets renamed, a guard stops being wired, a warning gets deleted,
-      # and the manifest keeps asserting the world it was written against. This
-      # re-derives every row from the tree — cited symbols, cited tests (present,
-      # not `#[ignore]`d, not `skip:`ed, not in expected_test_skips.txt, no
-      # `markTestSkipped` under integration_test/, and actually asserting),
-      # cited guards (present AND wired in an ENFORCING run here, not merely as
-      # their own --self-test), every `privacy*` string classified, every iOS
-      # usage description and consent-dialog sentence classified, and every
-      # event-kind construction token declared. The ratchet then compares
-      # against the base ref: CI cannot judge whether weakening a guarantee is
-      # justified, only force it to be stated where review sees it. The fetch
-      # lives in the same step as the check because `actions/checkout` is
-      # shallow — a separate step could be skipped, and a ratchet that cannot
-      # read its baseline must fail, never pass. It runs LAST because it cites
-      # the other guards, so every specific verdict has already printed above.
-      # The baseline this step names is the commit the change is BUILT ON,
-      # never the live tip of the default branch. On a pull request that is
-      # `pull_request.base.sha`; on a push it is `event.before`, the PREVIOUS
-      # TIP OF THE SAME BRANCH — a push to main therefore ratchets against what
-      # main was a moment earlier, not against a diverged branch. Anchoring on
-      # the tip was wrong twice: a tag build (release-build.yml then called
-      # this job too) would fetch a main that had moved on and report every newer
-      # invariant as `.deleted`, failing the release gate on a phantom
-      # weakening; and on a push to main the tip IS the pushed commit, so the
-      # baseline equalled HEAD and the ratchet — the thing this workstream is
-      # built around — was silently vacuous on the one path that has no branch
-      # protection in front of it. `event.before` fixes that: a direct push that
-      # deletes an invariant is now caught.
-      #
-      # NAMING THE REF IS NOT OPTIONAL. The script's own default when invoked
-      # with no flags is `origin/main` — precisely the live tip condemned above
-      # — so every caller that cares must pass `--baseline-ref`. This step does;
-      # `privacy-manifest-author.yml` does NOT, and validates its proposal
-      # against main's tip on purpose (its branch is cut from that tip, so the
-      # two coincide, and its proposals are additive by construction).
-      # Where no base commit exists (tag, new branch, manual run) there is no
-      # "change" to ratchet, so rules 1-14 run and only the comparison is
-      # skipped — announced, never silent.
-      - name: Privacy invariants describe this repository
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        env:
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PUSH_BEFORE: ${{ github.event.before }}
-        run: |
-          set -Eeuo pipefail
-          baseline=""
-          if [[ -n "${PR_BASE_SHA:-}" ]]; then
-            baseline="${PR_BASE_SHA}"
-          elif [[ -n "${PUSH_BEFORE:-}" \
-               && "${PUSH_BEFORE}" != "0000000000000000000000000000000000000000" ]]; then
-            baseline="${PUSH_BEFORE}"
-          fi
-          if [[ -z "${baseline}" ]]; then
-            echo "::notice::no base commit for this event (tag build, new branch or manual run) —" \
-                 "running every rule, skipping only the ratchet comparison"
-            bash scripts/ci/check_privacy_invariants.sh --no-ratchet
-            exit 0
-          fi
-          git fetch --no-tags --depth=1 origin "${baseline}"
-          bash scripts/ci/check_privacy_invariants.sh --baseline-ref "${baseline}"
-
-      # The guard above is a hand-written extractor over four languages, so its
-      # fixtures pin each way it could be wrong on CORRECT input as well as on
-      # broken input: a PROSE `#[ignore]` comment must not read as an attribute
-      # (there are five such comments in-tree), a Dart name split across
-      # adjacent literals with a `\u` escape must resolve, one key may be an
-      # assertion under one invariant and a disclosure under another (~24
-      # strings promise and warn in one paragraph), and a decoy kind inside
-      # `#[cfg(test)]` must not read as a new wire kind. The five that matter
-      # most are the ones this workstream exists for: an assertion on an
-      # accepted deviation, a deleted disclosure, an unwired guard, a
-      # self-test-only wiring cited as proof, and a stale ratchet override.
-      #
-      # All of them are driven through the same `run_all_checks` list the
-      # enforcing step above uses, so a check unwired from production is
-      # unwired from these fixtures too and its fixtures go red. (They used to
-      # be two independent lists, and had already drifted.) One fixture is
-      # structural rather than a manifest mutation: every `check_*` must be in
-      # that list — or, for the two that cannot run over a miniature fixture
-      # tree, invoked by `main` AND carrying fixtures of its own — and `main`
-      # must still drive the list, so neither a check nor the list itself can
-      # be written and wired nowhere while counting as coverage.
-      - name: Privacy-invariants guard self-test
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_privacy_invariants.sh --self-test
-
-      # The one guard in this job whose subject is a workflow, not the tree, so
-      # its fixtures are the only thing that can catch a widened re-run rule.
-      # They are hermetic: `gh` is stubbed, and the `curl` stub is checked in
-      # the same run against the real curl talking to a loopback server, so
-      # nothing leaves the runner and the fake cannot drift from the tool. One
-      # fixture DOES read the tree — the signature must appear in
-      # exactly one file — and it reads untracked files too, so a second copy
-      # is caught in the commit that introduces it rather than the one after.
-      - name: Runner-loss re-run gate self-test
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/rerun_runner_losses.sh --self-test
-
-      # A step without the standard `if:` is skipped after any earlier red:
-      # run 44523702729 lost its Dart setup that way, behind a failed xmllint
-      # install, and two Dart guards then failed for want of `dart`.
-      - name: Repo-guards step conditions
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_repo_guards_step_conditions.sh
-
-      - name: Repo-guards step conditions (self-test)
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/check_repo_guards_step_conditions.sh --self-test
-
-      # The installer's subject is the archive, so its fixtures are the proof:
-      # a stubbed apt-get that is healthy, stale, down or hung.
-      - name: CI tool installer self-test
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: bash scripts/ci/ensure_ci_tools.sh --self-test

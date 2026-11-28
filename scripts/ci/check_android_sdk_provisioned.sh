@@ -22,11 +22,11 @@
 #
 # That only holds where the step RUNS, and there are two ways to lose it
 # silently: leave it out of a new lane, or put it after the first use of the
-# action (the AVD-snapshot step boots an emulator too, so "before the drive" is
-# not far enough). A third is subtler — gating it on the AVD cache miss. The
-# cache holds `~/.android/avd/*` only, so a cache HIT still needs the emulator
-# binary and the system image, which is why the step carries no `if:` and why
-# this guard refuses one.
+# action (a job may boot an emulator in more than one step, so "before the
+# drive" is not far enough). A third is subtler — gating it on a cache, as the
+# lanes once gated an AVD-snapshot step on theirs: the packages live in the
+# SDK, not in any cache, which is why the step carries no `if:` and why this
+# guard refuses one.
 #
 # The arguments are checked against the action's own `with:` block rather than
 # pinned here: a lane that moves to another api level must move both, and a
@@ -46,7 +46,7 @@
 #   P1  A job with an emulator step has a provisioning step.
 #   P2  It sits textually BEFORE the job's first emulator step.
 #   P3  Its three arguments equal that step's api-level/target/arch.
-#   P4  It carries no `if:` — a conditional provisioning is one a cache hit
+#   P4  It carries no `if:` — a conditional provisioning is one some run
 #       skips.
 #   P5  Every emulator step in the job declares the same api/target/arch, since
 #       one provisioning call has to cover all of them.
@@ -61,6 +61,13 @@
 #       too little room for the system image to unpack (CI run 41322563075):
 #       the provisioning step then fails every attempt, for a reason no retry
 #       can fix.
+#   P9  Every emulator step declares `pre-emulator-launch-script:
+#       bash tooling/e2e/ci/require-adb.sh` and no `working-directory` (the
+#       path is the checkout root's). The action runs its own `sdkmanager
+#       --install … platform-tools` after provisioning, and five lanes then
+#       polled an adb that was not there for the whole boot timeout and hung to
+#       their step caps on an `adb emu kill` teardown (CI jobs 137207551525,
+#       140270147003); the script stops the action within seconds instead.
 #
 # Pure bash/awk over the checked-out tree, no toolchain and no Android SDK —
 # belongs in repo-guards.yml.
@@ -71,7 +78,7 @@
 #
 # Exit codes:
 #   0  every emulator job provisions its SDK first
-#   1  a job violates one of P1-P8
+#   1  a job violates one of P1-P9
 #   2  the extractor cannot read a step list it must grade, or the self-test
 #      failed (the guard itself cannot vouch for the lanes)
 
@@ -81,6 +88,7 @@ SCRIPT_NAME="check_android_sdk_provisioned"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly PROVISION_SH="tooling/e2e/ci/provision-android-sdk.sh"
 readonly EMULATOR_ACTION="reactivecircus/android-emulator-runner"
+readonly REQUIRE_ADB="bash tooling/e2e/ci/require-adb.sh"
 
 log() { printf '\033[1;34m[%s]\033[0m %s\n' "${SCRIPT_NAME}" "$*"; }
 fail_msg() { printf '\033[1;31m[%s] FAIL:\033[0m %s\n' "${SCRIPT_NAME}" "$*" >&2; }
@@ -137,19 +145,20 @@ extract_steps() {
         }
         headless = "-"
         if (has_opts) headless = ((" " opts " ") ~ / -no-window /) ? "yes" : "no"
-        printf "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\n",
-          file, job, idx, stepname, uses, api, target, arch, has_if, headless, args, build_at, release_at
+        if (prelaunch == "") prelaunch = "-"
+        printf "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
+          file, job, idx, stepname, uses, api, target, arch, has_if, headless, args, build_at, release_at, prelaunch, wd
         idx++
       }
       in_step = 0
       stepname = "(unnamed)"; uses = "-"; api = "-"; target = "-"; arch = "-"
-      has_if = "no"; body = ""; has_opts = 0; in_opts = 0; opts = ""
+      has_if = "no"; body = ""; has_opts = 0; in_opts = 0; opts = ""; prelaunch = "-"; wd = "no"
     }
     function value(line) { sub(/^[^:]*:[[:space:]]*/, "", line); sub(/[[:space:]]+#.*$/, "", line); return line }
     BEGIN {
       job = "-"; idx = 0; in_jobs = 0; in_steps = 0; in_step = 0
       stepname = "(unnamed)"; uses = "-"; api = "-"; target = "-"; arch = "-"
-      has_if = "no"; body = ""; has_opts = 0; in_opts = 0; opts = ""
+      has_if = "no"; body = ""; has_opts = 0; in_opts = 0; opts = ""; prelaunch = "-"; wd = "no"
     }
     /^[A-Za-z_][A-Za-z0-9_-]*:/ { flush_step(); in_steps = 0; in_jobs = ($0 ~ /^jobs:/); next }
     !in_jobs { next }
@@ -174,6 +183,8 @@ extract_steps() {
     /^          api-level:/ { api = value($0) }
     /^          target:/ { target = value($0) }
     /^          arch:/ { arch = value($0) }
+    /^          pre-emulator-launch-script:/ { prelaunch = value($0) }
+    /^          working-directory:/ { wd = "yes" }
     in_opts {
       if ($0 ~ /^           /) opts = opts " " $0
       else if (NF) in_opts = 0
@@ -214,20 +225,25 @@ check_dir() {
   GRADED_JOBS=0
   BUILDING_JOBS=0
 
-  local file job idx name uses api target arch has_if headless args build_at release_at base
+  local file job idx name uses api target arch has_if headless args build_at release_at prelaunch wd base
   for f in "${files[@]}"; do
     base="${f##*/}"
     local -A emu_first=() emu_spec=() emu_mixed=() prov_first=() prov_args=() prov_if=() jobs_seen=()
     local -A build_last=() build_name=() release_last=()
-    while IFS=$'\t' read -r file job idx name uses api target arch has_if headless args build_at release_at; do
+    while IFS=$'\t' read -r file job idx name uses api target arch has_if headless args build_at release_at prelaunch wd; do
       jobs_seen[${job}]=1
       if is_emulator_step "${uses}"; then
         EMU_STEPS=$((EMU_STEPS + 1))
-        # P7 — per step, not per job: the snapshot step boots an emulator too.
+        # P7 — per step, not per job: every step that uses the action boots one.
         case "${headless}" in
           no) note_violation "P7 ${base} :: ${job}: '${name}' (step ${idx}) passes emulator-options without \`-no-window\`. ${PROVISION_SH} verifies the HEADLESS emulator binary (\`emulator -no-window -version\`); without the flag this step boots the windowed one, which nothing verified and which links desktop libraries a runner does not have." ;;
           -) note_violation "P7 ${base} :: ${job}: '${name}' (step ${idx}) declares no emulator-options. The action's default options happen to include \`-no-window\`, but a default this repo does not pin is a default that can change — declare the options and keep \`-no-window\` among them." ;;
         esac
+        # P9 — per step: each one polls adb, and each one runs the action's own
+        # sdkmanager first.
+        if [[ "${prelaunch}" != "${REQUIRE_ADB}" || "${wd}" != no ]]; then
+          note_violation "P9 ${base} :: ${job}: '${name}' (step ${idx}) does not run \`pre-emulator-launch-script: ${REQUIRE_ADB}\` from the checkout root (it declares '${prelaunch}'$( [[ "${wd}" == no ]] || printf ' under a working-directory')). Without it, an adb the action cannot run is polled for the whole boot timeout and the step then hangs to its cap on a teardown that needs adb (CI jobs 137207551525, 140270147003)."
+        fi
         local spec="${api}/${target}/${arch}"
         if [[ -z "${emu_first[${job}]:-}" ]]; then
           emu_first[${job}]="${idx}:${name}"
@@ -279,7 +295,7 @@ check_dir() {
       fi
 
       if [[ "${prov_if[${job}]}" == "yes" ]]; then
-        note_violation "P4 ${label}: '${prov_name}' carries an \`if:\`. The AVD cache holds the AVD only, so a cache HIT still needs the emulator binary and the system image; a conditional provisioning is one that is skipped exactly when the packages are least likely to be there."
+        note_violation "P4 ${label}: '${prov_name}' carries an \`if:\`. The packages live in the SDK, not in any cache, so every run needs them; a conditional provisioning is one that is skipped exactly when the packages are least likely to be there."
       fi
 
       local want="${emu_spec[${job}]//\// }"
@@ -324,15 +340,15 @@ check_extractor_sees_the_dir() {
 # Self-test (hermetic: synthetic workflows in a temp dir, no repo access)
 # ---------------------------------------------------------------------------
 
-readonly SELF_TEST_FIXTURES=26
+readonly SELF_TEST_FIXTURES=30
 
 write_wf() {
   local path="$1"; shift
   printf '%s\n' "$@" > "${path}"
 }
 
-# A job body with the real shape: a provisioning step, then the AVD-snapshot
-# step, then the drive step. The arguments follow so a fixture can bend one.
+# A job body with the real shape: a provisioning step, then two emulator steps
+# (a lane may boot more than once). The arguments follow so a fixture can bend one.
 # The two steps spell their options in the two forms the reader takes, and the
 # drive script names the flag as well, at the block's own depth: a reader that
 # ran the folded block past its end would find `-no-window` there and pass
@@ -348,19 +364,21 @@ compliant_job() {
     '        uses: actions/checkout@v6' \
     '      - name: Provision the Android SDK' \
     "        run: bash tooling/e2e/ci/provision-android-sdk.sh ${prov_args}" \
-    '      - name: Create AVD snapshot' \
+    '      - name: Boot first' \
     '        uses: reactivecircus/android-emulator-runner@v2' \
     '        with:' \
     '          api-level: 34' \
     '          target: google_apis' \
     '          arch: x86_64' \
     '          emulator-options: -no-window -gpu swiftshader_indirect' \
+    '          pre-emulator-launch-script: bash tooling/e2e/ci/require-adb.sh' \
     '      - name: Drive' \
     '        uses: reactivecircus/android-emulator-runner@v2' \
     '        with:' \
     '          api-level: 34' \
     '          target: google_apis' \
     '          arch: x86_64' \
+    '          pre-emulator-launch-script: bash tooling/e2e/ci/require-adb.sh # stops a lane with no adb' \
     '          emulator-options: >-' \
     '            -no-snapshot-save -no-window -gpu swiftshader_indirect' \
     '            -noaudio -no-boot-anim -camera-back none' \
@@ -391,7 +409,7 @@ splice_before() {
   done
 }
 readonly PROV_STEP='      - name: Provision the Android SDK'
-readonly SNAPSHOT_STEP='      - name: Create AVD snapshot'
+readonly FIRST_BOOT_STEP='      - name: Boot first'
 readonly BUILD_CMD='../scripts/ci/build_apk_with_retry.sh android-x64 --target=integration_test/e2e/e2e_combined.dart'
 readonly RELEASE_STEP=$'      - name: Release\n        run: bash tooling/e2e/ci/release-apk-build-outputs.sh /tmp'
 
@@ -455,13 +473,14 @@ run_self_test() {
     '  lane:' \
     '    runs-on: ubuntu-latest' \
     '    steps:' \
-    '      - name: Create AVD snapshot' \
+    '      - name: Boot first' \
     '        uses: reactivecircus/android-emulator-runner@v2' \
     '        with:' \
     '          api-level: 34' \
     '          target: google_apis' \
     '          arch: x86_64' \
     '          emulator-options: -no-window -gpu swiftshader_indirect' \
+    '          pre-emulator-launch-script: bash tooling/e2e/ci/require-adb.sh' \
     '      - name: Provision the Android SDK' \
     '        run: bash tooling/e2e/ci/provision-android-sdk.sh 34 google_apis x86_64'
   expect_rc 3 1 "${d}" || fail=1
@@ -480,7 +499,7 @@ run_self_test() {
   compliant_job | sed 's|^      - name: Provision the Android SDK$|#      - name: Provision the Android SDK|; s|^        run: bash tooling/e2e/ci/provision-android-sdk.sh|#        run: bash tooling/e2e/ci/provision-android-sdk.sh|' > "${d}/lane.yml"
   expect_rc 7 1 "${d}" || fail=1
 
-  # (8) P4 — a provisioning step gated on the AVD cache miss.
+  # (8) P4 — a provisioning step gated on a cache miss.
   ran=$(( ran + 1 )); d="${tmp}/gated"; mkdir -p "${d}"
   compliant_job \
     | sed "s|^        run: bash tooling/e2e/ci/provision-android-sdk.sh 34 google_apis x86_64$|        if: steps.avd-cache.outputs.cache-hit != 'true'\n        run: bash tooling/e2e/ci/provision-android-sdk.sh 34 google_apis x86_64|" \
@@ -525,13 +544,13 @@ run_self_test() {
     '  lane:' \
     '    runs-on: ubuntu-latest' \
     '    steps:' \
-    '    - name: Create AVD snapshot' \
+    '    - name: Boot first' \
     '      uses: reactivecircus/android-emulator-runner@v2' \
     '      with:' \
     '        api-level: 34'
   expect_rc 12 2 "${d}" || fail=1
 
-  # (13) P7 — the drive step drops `-no-window`; the snapshot step keeps it.
+  # (13) P7 — the drive step drops `-no-window`; the first boot keeps it.
   ran=$(( ran + 1 )); d="${tmp}/windowed"; mkdir -p "${d}"
   compliant_job | sed 's/-no-snapshot-save -no-window -gpu/-no-snapshot-save -gpu/' > "${d}/lane.yml"
   expect_only 13 P7 "${d}" 'Drive' || fail=1
@@ -539,7 +558,7 @@ run_self_test() {
   # (14) P7 — an emulator step with no emulator-options at all.
   ran=$(( ran + 1 )); d="${tmp}/defaulted"; mkdir -p "${d}"
   grep -v 'emulator-options: -no-window' <(compliant_job) > "${d}/lane.yml"
-  expect_only 14 P7 "${d}" 'Create AVD snapshot' || fail=1
+  expect_only 14 P7 "${d}" 'Boot first' || fail=1
 
   # (15) The flag on the SECOND continuation line of the folded form counts.
   ran=$(( ran + 1 )); d="${tmp}/secondline"; mkdir -p "${d}"
@@ -582,7 +601,7 @@ run_self_test() {
   ran=$(( ran + 1 )); d="${tmp}/laterelease"; mkdir -p "${d}"
   compliant_job \
     | splice_before "${PROV_STEP}" "$(build_step Build "${BUILD_CMD}" norelease)" \
-    | splice_before "${SNAPSHOT_STEP}" "${RELEASE_STEP}" > "${d}/lane.yml"
+    | splice_before "${FIRST_BOOT_STEP}" "${RELEASE_STEP}" > "${d}/lane.yml"
   expect_only 23 P8 "${d}" 'Build' || fail=1
 
   # (24) P8 — a commented-out release is not a release.
@@ -607,6 +626,24 @@ run_self_test() {
     > "${d}/lane.yml"
   expect_rc 26 0 "${d}" || fail=1
 
+  # (27) P9 — one emulator step without the adb check; the other keeps it.
+  ran=$(( ran + 1 )); d="${tmp}/noadbcheck"; mkdir -p "${d}"
+  compliant_job | grep -v 'require-adb.sh # stops' > "${d}/lane.yml"
+  expect_only 27 P9 "${d}" 'Drive' || fail=1
+
+  # (28) P9 — a commented-out check, and one naming another script, are not it.
+  ran=$(( ran + 1 )); d="${tmp}/commentedcheck"; mkdir -p "${d}"
+  compliant_job | sed 's|^          pre-emulator-launch-script: bash tooling/e2e/ci/require-adb.sh # stops|          # pre-emulator-launch-script: bash tooling/e2e/ci/require-adb.sh # stops|' > "${d}/lane.yml"
+  expect_only 28 P9 "${d}" 'Drive' || fail=1
+  ran=$(( ran + 1 )); d="${tmp}/othercheck"; mkdir -p "${d}"
+  compliant_job | sed 's|^          pre-emulator-launch-script: bash tooling/e2e/ci/require-adb.sh$|          pre-emulator-launch-script: adb version|' > "${d}/lane.yml"
+  expect_only 29 P9 "${d}" 'Boot first' || fail=1
+
+  # (30) P9 — a working-directory moves the relative path off the checkout.
+  ran=$(( ran + 1 )); d="${tmp}/movedcheck"; mkdir -p "${d}"
+  compliant_job | sed 's|^          pre-emulator-launch-script: bash tooling/e2e/ci/require-adb.sh$|&\n          working-directory: haven|' > "${d}/lane.yml"
+  expect_only 30 P9 "${d}" 'Boot first' || fail=1
+
   VIOLATIONS=0
   if (( fail )); then
     echo "${SCRIPT_NAME}: SELF-TEST FAILED" >&2
@@ -616,7 +653,7 @@ run_self_test() {
     echo "${SCRIPT_NAME}: SELF-TEST FAILED — ran ${ran} fixture(s), expected exactly ${SELF_TEST_FIXTURES}; a fixture was added or removed without moving the pin" >&2
     return 1
   fi
-  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: the real lane shape passes; a missing provisioning step, one placed after the first use of the action, a wrong api level, target or arch, a commented-out one, and one gated on an \`if:\` each fail; a job that boots no emulator needs none while a provisioning step left in one fails; two emulator steps asking for different images fail; a step list this reader cannot parse stops the guard rather than passing it; and an emulator step that drops \`-no-window\`, declares no emulator-options, or carries only \`-no-window-foo\` fails P7 naming its job and step, while the flag on the second line of a folded block passes; an APK build released before provisioning passes, in its own step or the build's, while one never released — for each of the four ways a lane builds — one released ahead of the build, after provisioning, only in a comment, or ahead of a second build fails P8 naming that build)."
+  echo "${SCRIPT_NAME}: self-test passed (${ran}/${SELF_TEST_FIXTURES} fixtures: the real lane shape passes; a missing provisioning step, one placed after the first use of the action, a wrong api level, target or arch, a commented-out one, and one gated on an \`if:\` each fail; a job that boots no emulator needs none while a provisioning step left in one fails; two emulator steps asking for different images fail; a step list this reader cannot parse stops the guard rather than passing it; and an emulator step that drops \`-no-window\`, declares no emulator-options, or carries only \`-no-window-foo\` fails P7 naming its job and step, while the flag on the second line of a folded block passes; an APK build released before provisioning passes, in its own step or the build's, while one never released — for each of the four ways a lane builds — one released ahead of the build, after provisioning, only in a comment, or ahead of a second build fails P8 naming that build; and an emulator step whose \`pre-emulator-launch-script\` is not ${REQUIRE_ADB} — absent, commented out, another command, or run under a working-directory — fails P9 naming that step)."
   return 0
 }
 
@@ -637,7 +674,7 @@ check_extractor_sees_the_dir "${WORKFLOW_DIR}"
 (( GRADED_JOBS > 0 )) || misconfig "no job uses ${EMULATOR_ACTION}; this guard has gone blind rather than found a clean tree."
 
 if (( VIOLATIONS > 0 )); then
-  fail_msg "${VIOLATIONS} violation(s). Every job that boots an emulator must run ${PROVISION_SH} first, unconditionally, with that job's own api/target/arch, after releasing the outputs of any APK it built; and every emulator step must boot with \`-no-window\`."
+  fail_msg "${VIOLATIONS} violation(s). Every job that boots an emulator must run ${PROVISION_SH} first, unconditionally, with that job's own api/target/arch, after releasing the outputs of any APK it built; and every emulator step must boot with \`-no-window\` and run ${REQUIRE_ADB} before its launch."
   exit 1
 fi
-log "OK — ${GRADED_JOBS} job(s) with ${EMU_STEPS} emulator step(s); each provisions and verifies its SDK first, every emulator step boots the headless binary that was verified, and the ${BUILDING_JOBS} that build an APK first release its build outputs before provisioning."
+log "OK — ${GRADED_JOBS} job(s) with ${EMU_STEPS} emulator step(s); each provisions and verifies its SDK first, every emulator step boots the headless binary that was verified and checks adb before its launch, and the ${BUILDING_JOBS} that build an APK first release its build outputs before provisioning."

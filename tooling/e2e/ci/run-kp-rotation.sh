@@ -366,8 +366,8 @@ kpr_default_network_handovers() {
 # A list rather than two inline `adb` calls so --self-test can assert that
 # every global this script pins to 0 has a matching restore to 1, and that the
 # EXIT trap actually issues them. The pin is the one mutation this lane makes
-# that a clock restore does NOT cover, and every Android lane in this repo
-# shares one AVD cache key.
+# that a clock restore does NOT cover, and the failure diagnostics read the
+# device after this script exits.
 auto_time_restore_cmds() {
   printf '%s\n' \
     'settings put global auto_time 1' \
@@ -1355,9 +1355,8 @@ run_self_test() {
   # --- state restoration ---------------------------------------------------
   # (34) THE STATE-RESTORE FIXTURE. Phase 2 pins `auto_time`/`auto_time_zone`
   #      to 0 so NITZ/NTP cannot undo the backdate. Restoring the clock VALUE
-  #      does not undo that pin, and every Android lane in this repo shares one
-  #      AVD cache key — a leaked pin hands the next lane an AVD that can never
-  #      re-synchronise.
+  #      does not undo that pin, and a leaked pin leaves the device the
+  #      failure diagnostics read with a clock that can never re-synchronise.
   local self restore_list restore_rc=0 g
   self="${BASH_SOURCE[0]}"
   restore_list="$(auto_time_restore_cmds)"
@@ -1458,8 +1457,8 @@ run_self_test() {
   _case "an eth0 10.0.0.0/8 route IS a route outside Wi-Fi" 0 "${rc}"
 
   # (38) THE WI-FI STATE-RESTORE FIXTURE, twin of (34). Phase 2 may turn the
-  #      radio off; every Android lane here shares one AVD cache key, so the
-  #      disable needs a matching re-enable that cleanup() actually issues.
+  #      radio off, and the failure diagnostics read the device after it, so
+  #      the disable needs a matching re-enable that cleanup() actually issues.
   #      Checked against the script's own text because nothing else fails when
   #      one half of the pair is deleted. And the disable is the one run
   #      41322563075 made unconditionally: read through the install library's
@@ -2103,8 +2102,8 @@ wifi_state() {
 # Best-effort for the same reason `restore_auto_time_pin` is: it runs from the
 # EXIT trap, which is also reached when the device was never ready, and a
 # restore that killed the trap would skip the secret scan below it (Security
-# Rule 6). Idempotent, and every Android lane in this repo shares one AVD cache
-# key — a radio left off would be the next lane's mystery, not ours.
+# Rule 6). Idempotent; a radio left off would mislead the failure diagnostics
+# that read the device next.
 restore_wifi_radio() {
   adb -s "${DEVICE}" shell svc wifi enable >/dev/null 2>&1 || true
 }

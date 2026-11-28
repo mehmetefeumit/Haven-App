@@ -63,6 +63,11 @@
 #                                      the shared storage never attached).
 #                                      PP_MSG says why in fixed words.
 #   pp_clear_gallery <device>          best effort, always 0
+#   pp_settle_errors <device> <dir>    0 once no process is in an error state;
+#                                      3 infrastructure when one stays so
+#                                      past PP_SETTLE_SECS (PP_MSG says whose)
+#   pp_error_state <device> <dir>      one read into PP_ERROR_STATE, for a
+#                                      caller with its own window
 #   pp_round <device> <dir> <pick|cancel> <index> <api>
 #       0 done; 1 product; 2 harness (a screen the selectors do not know, or
 #       a system screen that never took focus or ignored the input it was
@@ -111,6 +116,7 @@ readonly PP_PICKER_SECS="${PHOTO_PICKER_SECS:-60}"  # tap -> picker resumed; pic
 readonly PP_UCROP_SECS="${PHOTO_UCROP_SECS:-60}"    # thumbnail -> uCrop resumed; uCrop -> focused, crop tapped
 readonly PP_RETURN_SECS="${PHOTO_RETURN_SECS:-60}"  # crop (or cancel) -> MainActivity resumed
 readonly PP_ADB_SECS="${PHOTO_ADB_SECS:-10}"        # one adb read
+readonly PP_SETTLE_SECS="${PHOTO_SETTLE_SECS:-30}"  # no process the boot left in an error state
 # PP_TRACE opens this long before the round's first read: the caller's tap,
 # the step before it, starts the trip.
 readonly PP_TRACE_LOOKBACK_SECS=5
@@ -120,6 +126,7 @@ _PP_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly _PP_LIB_DIR
 
 PP_MSG=''
+PP_ERROR_STATE=''
 PP_PICKER='-'
 PP_UCROP='-'
 PP_DWELL=-1
@@ -236,7 +243,7 @@ _pp_seed_failed() {
 }
 
 # pp_clear_gallery <device> — the fixtures out of the media store and the
-# disk, so a saved AVD snapshot never carries them into another lane.
+# disk, so nothing the run seeded outlives it on the device.
 pp_clear_gallery() {
   local device="$1"
   timeout "${PP_ADB_SECS}" adb -s "${device}" shell \
@@ -278,6 +285,63 @@ _pp_whose() {
   case "$1" in
     ours) echo "Haven's" ;; systemui) echo "System UI's" ;; system) echo "the system's" ;; *) echo "another app's" ;;
   esac
+}
+
+# pp_error_state <device> <dir> — PP_ERROR_STATE: the first process the
+# activity manager holds in an error state, in fixed words (ui-dump.py errors):
+# `none`, `not-responding-<whose>` or `app-error-<whose>`; empty when adb
+# brought back no process list. One bounded adb read, filtered on the device to
+# the lines ui-dump.py reads.
+pp_error_state() {
+  local device="$1" dir="$2" out
+  PP_ERROR_STATE=''
+  timeout "${PP_ADB_SECS}" adb -s "${device}" shell \
+    "dumpsys activity processes | grep -E '^ACTIVITY MANAGER RUNNING PROCESSES|^  [*](APP|PERS)[*] UID |mCrashing='" \
+    > "${dir}/pp-processes.txt" 2>/dev/null || true
+  out="$(python3 -I "${_PP_LIB_DIR}/ui-dump.py" errors --dumpsys "${dir}/pp-processes.txt" --package "${PP_PKG}" 2>/dev/null || true)"
+  rm -f "${dir}/pp-processes.txt"
+  [[ "${out}" == 'errors '* && "${out}" != 'errors unknown' ]] || return 0
+  PP_ERROR_STATE="${out#errors }"
+}
+
+# pp_error_words <state> — a PP_ERROR_STATE value in fixed words.
+pp_error_words() {
+  case "$1" in
+    '') echo 'unread (adb brought back no process list)' ;;
+    none) echo 'no process in an error state' ;;
+    not-responding-*) echo "$(_pp_whose "${1#not-responding-}") process held as not responding" ;;
+    *) echo "$(_pp_whose "${1#app-error-}") process held as crashing" ;;
+  esac
+}
+
+# pp_settle_errors <device> <dir> — waits, up to PP_SETTLE_SECS, for a read of
+# the activity manager's processes that holds none in an error state, sending
+# CLOSE_SYSTEM_DIALOGS while one is. hide_error_dialogs stops only the dialogs
+# decided after it is set, and the activity manager marks a process before its
+# dialog is drawn or holds focus, so a dialog the boot left (System UI's "isn't
+# responding", release run 44922735173) is seen here before it can sit over a
+# screen the caller reads. The broadcast force-closes such a dialog's app, as
+# dismissing it would; `am broadcast` waits on a hung receiver, so it is bounded
+# and sent in a pass of its own. 0 settled; 3 (PP_MSG) it did not.
+pp_settle_errors() {
+  local device="$1" dir="$2" start close=0 closes=0
+  start="$(date +%s)"
+  while (( $(date +%s) - start < PP_SETTLE_SECS )); do
+    if (( close )); then
+      close=0
+      closes=$(( closes + 1 ))
+      timeout "${PP_ADB_SECS}" adb -s "${device}" shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS >/dev/null 2>&1 || true
+      continue
+    fi
+    pp_error_state "${device}" "${dir}"
+    case "${PP_ERROR_STATE}" in
+      none) return 0 ;;
+      '') ;;
+      *) close=1 ;;
+    esac
+  done
+  PP_MSG="no read of the activity manager's processes within ${PP_SETTLE_SECS} s showed none in an error state (last read: $(pp_error_words "${PP_ERROR_STATE}")), after ${closes} CLOSE_SYSTEM_DIALOGS broadcast(s)"
+  return 3
 }
 
 # _pp_focus_words <focus> — a PP_FOCUSED value in fixed words, for a message.

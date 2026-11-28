@@ -291,11 +291,9 @@ seq_listed() { # seq_listed <seq> <list>
 # the EXIT trap actually issues them. The pin is the one mutation this lane
 # makes that the clock restore does NOT cover: `apply_clock_offset restore 0`
 # puts the VALUE back but leaves `auto_time`/`auto_time_zone` disabled, so the
-# AVD would keep an un-synchronised clock for good. That matters beyond this
-# runner — every Android lane in this repo shares ONE actions/cache key over
-# `~/.android/avd/*`, so a pinned-clock AVD can in principle be published to all
-# of them. B5, B6 and B9 all restore their own device mutations; this closes the
-# only gap.
+# AVD would keep an un-synchronised clock for the rest of the job, which the
+# failure diagnostics read. B5, B6 and B9 all restore their own device
+# mutations; this closes the only gap.
 #
 # Defined ABOVE the --self-test dispatch on purpose: `exit` there means anything
 # declared further down does not exist yet when the fixtures run.
@@ -1274,9 +1272,8 @@ cleanup() {
   # …and un-pin the automatic sync phase 0 disabled. NOT gated on SERVO_PID:
   # the pin is applied in phase 0, long before the servo exists, and phase 0's
   # own `fail` paths exit through here. Restoring the VALUE while leaving
-  # `auto_time 0` in place would still hand the next lane an AVD that can never
-  # re-synchronise its clock — and the AVD image is shared through one
-  # actions/cache key across every Android lane in this repo.
+  # `auto_time 0` in place would still leave the device the diagnostics read
+  # unable to re-synchronise its clock.
   restore_auto_time_pin
   if [[ -n "${LOGCAT_PID}" ]] && kill -0 "${LOGCAT_PID}" 2>/dev/null; then
     kill "${LOGCAT_PID}" 2>/dev/null || true
