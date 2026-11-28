@@ -19,8 +19,18 @@
 # and none holds more than five pull requests open; what must move together is
 # grouped into one pull request, and a bump that needs code Dependabot cannot
 # write (a migration, a regenerated table or bridge) is ignored until a human
-# does it. Dependabot's `ignore` also holds back security updates for what it
-# names; dependency-audit (audit.yml) still reports every advisory against them.
+# does it. `ignore` holds back version updates only: for a security update,
+# dependabot-core drops every name-only and `update-types` ignore and keeps
+# only an explicit `versions:` range, which nothing below uses (GitHub's docs
+# word this loosely; the source is exact: dependabot-core@198c21e0
+# common/lib/dependabot/config/ignore_condition.rb `ignored_versions`,
+# `return versions if security_updates_only`, called from
+# updater/lib/dependabot/job.rb `ignore_conditions_for`, and its spec "with
+# security_updates_only ... allows all"). So with security updates enabled, a
+# security pull request can still arrive for an ignored name, an MDK-pinned
+# crate or flutter_rust_bridge included, and needs the same human work as the
+# bump its ignore stands for. dependency-audit (audit.yml) reports every
+# advisory either way.
 
 version: 2
 

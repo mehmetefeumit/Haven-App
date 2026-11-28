@@ -17,7 +17,11 @@
 # `pull_request`, not `pull_request_target`: a run Dependabot triggers gets
 # Dependabot secrets and a read-only GITHUB_TOKEN, and that token could not
 # push anyway, nor would its push start CI. The app's credentials are
-# therefore DEPENDABOT secrets, visible to no run a person triggers. A push
+# therefore DEPENDABOT secrets, which reach only runs whose `github.actor` is
+# Dependabot: those its pushes start, and a person's re-run of one, which keeps
+# the original actor. That re-run is harmless: it re-locks the same head
+# commit and commits only onto it, and the PATCH that moves the branch is
+# fast-forward only, so it is refused once the branch has moved on. A push
 # with an app token does start ci.yml, whose concurrency group cancels the run
 # on the stale head. That push's actor is the app, so the `if:` below skips the
 # run it triggers: the sync cannot chain. The commit carries
@@ -122,10 +126,12 @@ jobs:
             exit 1
           fi
 
+      # The base, not the head: the code that holds the write token is code
+      # main reviewed, whatever the branch carries.
       - name: Checkout the script
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
           sparse-checkout: scripts/ci
 
@@ -135,10 +141,11 @@ jobs:
           name: relocked-cargo-lockfiles
           path: ${{ runner.temp }}/relocked
 
-      # Contents write on this repository only, for this job only.
+      # Contents write on this repository only, for this job only. Pinned to
+      # a commit: this step is handed the app's long-lived private key.
       - name: Mint the app token
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           client-id: ${{ secrets.LOCKFILE_SYNC_APP_CLIENT_ID }}
           private-key: ${{ secrets.LOCKFILE_SYNC_APP_PRIVATE_KEY }}
