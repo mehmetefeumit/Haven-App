@@ -26,8 +26,10 @@
 #     CoreLocation tier is never consulted there, and
 #     `geolocator_location_service.dart` documents why.
 #   * What "Always" genuinely buys is the location relaunch after iOS
-#     terminates the app, which resumes sharing after movement (owner-directed
-#     2026-11-26, OD-R1): `HavenSLCHandler.startMonitoring()` refuses to arm
+#     terminates the app, which can resume sharing when iOS next starts Haven
+#     in the background — after movement, or at a background app refresh
+#     (owner-directed 2026-11-26, OD-R1; D4, 2026-11-28):
+#     `HavenSLCHandler.startMonitoring()` refuses to arm
 #     significant-location-change monitoring unless
 #     `authorizationStatus == .authorizedAlways`, and the stream handler starts
 #     a session from a relaunch only under Always. No simulator relaunches a

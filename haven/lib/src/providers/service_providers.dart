@@ -159,7 +159,7 @@ enum IosIndicatorSentence {
 /// indicator is Apple's other way to keep the session running), so the arrow
 /// sentence would name a signal they are not looking at. And NOT
 /// `backgroundActivitySessionHeld`: `CLBackgroundActivitySession` is iOS 17+
-/// and Haven deploys to iOS 15.5, so on iOS 15/16 nothing is ever held while
+/// and Haven deploys to iOS 15.0, so on iOS 15/16 nothing is ever held while
 /// the indicator flag is on and the bar is up. Every remaining bar-showing
 /// cohort also reads `indicatorRequested == true` — When-In-Use (where the bar
 /// is mandatory), a provisional Always (`.authorizedAlways` while the OS still

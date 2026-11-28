@@ -13,10 +13,12 @@
 #     "When In Use", with the blue status-bar indicator. Haven's
 #     `MapShell._onPaused()` relies on exactly that and never consults the
 #     tier. "Always" buys the location relaunch after iOS terminates the
-#     app, which resumes sharing after movement (owner-directed 2026-11-26,
-#     OD-R1; `HavenSLCHandler` refuses to arm without Always, and the stream
-#     handler starts a session from a relaunch only under it). A simulator
-#     cannot relaunch a terminated app, so that half is device-only.
+#     app, which can resume sharing when iOS next starts Haven in the
+#     background — after movement, or at a background app refresh
+#     (owner-directed 2026-11-26, OD-R1; D4, 2026-11-28; `HavenSLCHandler`
+#     refuses to arm without Always, and the stream handler starts a
+#     session from a relaunch only under it). A simulator cannot relaunch a
+#     terminated app, so that half is device-only.
 #   * So the tier changes what the UI may CLAIM, not whether publishing
 #     continues. This lane asserts the honest per-tier copy AND continued
 #     background publishing in BOTH tiers.

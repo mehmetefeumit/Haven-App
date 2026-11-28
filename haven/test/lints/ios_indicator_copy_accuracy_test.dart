@@ -134,7 +134,7 @@ const kIndicatorPredicate =
 ///
 /// The other half of the native decision, and the half that reaches the users
 /// the activity session cannot: `CLBackgroundActivitySession` is iOS 17+ and
-/// Haven deploys to iOS 15.5, so on iOS 15/16 this flag is the ONLY thing
+/// Haven deploys to iOS 15.0, so on iOS 15/16 this flag is the ONLY thing
 /// putting the bar on screen. Exact, because every plausible rewrite — a
 /// constant, `?? false`, a local `!alwaysConfirmed` — drops a reader the copy
 /// still names the bar to.
@@ -413,7 +413,7 @@ void main() {
         body,
         isNot(contains('backgroundActivitySessionHeld')),
         reason: 'CLBackgroundActivitySession is iOS 17+ and Haven deploys to '
-            'iOS 15.5, so this field is false for users who are looking at '
+            'iOS 15.0, so this field is false for users who are looking at '
             'the blue bar — "$body"',
       );
     });

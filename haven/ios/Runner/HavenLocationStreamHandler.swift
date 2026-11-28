@@ -143,9 +143,10 @@ final class HavenLocationStreamHandler: NSObject, CLLocationManagerDelegate, Flu
   /// ends at its expiry, at `onCancel` or at the first foreground.
   private var launchWindow: UIBackgroundTaskIdentifier = .invalid
 
-  /// A background-capable start is made from the background only in a process
-  /// iOS launched for a location event, under Always, for a user who accepted
-  /// the CURRENT background disclosure (OD-R1).
+  /// A background-capable start is made from the background only in a location
+  /// launch (D4: a process iOS started in the background that received a fix
+  /// before any scene came to the front), under Always, for a user who
+  /// accepted the CURRENT background disclosure (OD-R1).
   private var backgroundStartPermitted: Bool {
     launchedForLocation
       && manager.authorizationStatus == .authorizedAlways

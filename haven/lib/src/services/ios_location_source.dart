@@ -203,8 +203,9 @@ class IosLocationStreamStatus {
   /// Whether this process, started in the background, has received a location
   /// event (a significant change — the fix that (re)starting significant-change
   /// monitoring delivers at once included — or a relaunch-region exit) before
-  /// any scene came to the front. Unreadable reads `false`: no relaunch
-  /// routing, no wait for a fix, no session start.
+  /// any scene came to the front, and no scene has come to the front since.
+  /// Unreadable reads `false`: no relaunch routing, no wait for a fix, no
+  /// session start.
   final bool launchedForLocation;
 }
 
@@ -465,8 +466,9 @@ class MethodChannelIosLocationSource implements IosLocationSource {
   /// Creates a [MethodChannelIosLocationSource].
   ///
   /// The handler is registered here, before this source's first [status]
-  /// read: a report sent after that read reaches [locationLaunches], and one
-  /// sent before it finds the flag already set.
+  /// read: a report sent after that read reaches every [locationLaunches]
+  /// listener subscribed when it arrives, and one sent before the read finds
+  /// the flag already set.
   MethodChannelIosLocationSource() {
     methodChannel.setMethodCallHandler(_onNativeCall);
   }

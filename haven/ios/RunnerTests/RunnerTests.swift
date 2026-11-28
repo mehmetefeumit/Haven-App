@@ -4,9 +4,9 @@ import XCTest
 
 // Hosted in the app under test (TEST_HOST = Runner), which the OS launches
 // like a user's tap: these read the live scene, window and engine, not a mock
-// of them. No @testable import, so the bundle also runs against the Release
-// build the iOS launch gate ships; AppDelegate's members are reached through
-// the Objective-C runtime instead.
+// of them. CI runs the bundle against a Debug build; with no @testable import
+// it can also run against a Release one, so AppDelegate's members are reached
+// through the Objective-C runtime instead.
 final class RunnerTests: XCTestCase {
 
   /// The one scene, once UIKit has brought it to the front: a scene-based app
@@ -73,11 +73,13 @@ final class RunnerTests: XCTestCase {
   }
 
   /// The app-switcher blur covers the scene's whole window from resign until
-  /// active again, is gone afterwards, and comes back on the next resign.
+  /// active again, is gone afterwards, and comes back on the next resign. The
+  /// one put on when the scene connected is gone once it is active.
   func testPrivacyBlurCoversTheWindowWhileInactive() throws {
     let scene = try activeScene()
     let delegate = try sceneDelegate(of: scene)
     let window = try sceneWindow(of: scene)
+    XCTAssertFalse(window.subviews.contains { $0 is UIVisualEffectView })
 
     delegate.sceneWillResignActive?(scene)
     let blur = try XCTUnwrap(window.subviews.last as? UIVisualEffectView)
@@ -108,6 +110,25 @@ final class RunnerTests: XCTestCase {
     _ = app.perform(note)
 
     XCTAssertFalse(try appDelegateValue("isLocationLaunch", as: Bool.self))
+  }
+
+  /// The launch rule apart from the process (D4): only the first location
+  /// event before any scene came to the front is a location launch. The test
+  /// above cannot reach the positive half, because its process was opened.
+  func testOnlyTheFirstLocationEventBeforeAnyForegroundIsALocationLaunch() throws {
+    let app = type(of: try XCTUnwrap(UIApplication.shared.delegate as? NSObject))
+    let rule = NSSelectorFromString("startsLocationLaunchWithForegroundSeen:noted:")
+    let method = try XCTUnwrap(class_getClassMethod(app, rule))
+    typealias Rule = @convention(c) (AnyObject, Selector, ObjCBool, ObjCBool) -> ObjCBool
+    let call = unsafeBitCast(method_getImplementation(method), to: Rule.self)
+    func starts(foregroundSeen: Bool, noted: Bool) -> Bool {
+      call(app, rule, ObjCBool(foregroundSeen), ObjCBool(noted)).boolValue
+    }
+
+    XCTAssertTrue(starts(foregroundSeen: false, noted: false))
+    XCTAssertFalse(starts(foregroundSeen: false, noted: true))
+    XCTAssertFalse(starts(foregroundSeen: true, noted: false))
+    XCTAssertFalse(starts(foregroundSeen: true, noted: true))
   }
 
   /// The manifest that makes UIKit deliver scene events at all, naming

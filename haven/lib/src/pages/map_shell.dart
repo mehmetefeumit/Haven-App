@@ -2773,8 +2773,9 @@ class _MapShellState extends ConsumerState<MapShell>
         // is not a publish. The burst IS the repair, at 72-168 s rather than
         // 15 min.
         final pausedAt = DateTime.now();
-        // A process iOS launched for a location event is owed its background
-        // session by its first such pause, whichever path delivered it.
+        // A location launch (a first location event before any scene came to
+        // the front, D4) is owed its background session by its first such
+        // pause, whichever path delivered it.
         final launch = takeLaunchSession();
         final coordinator = _installBurstCoordinator();
         // Start closed rather than open, on BOTH arms: without this the engine

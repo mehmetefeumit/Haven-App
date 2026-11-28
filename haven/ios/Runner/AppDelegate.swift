@@ -179,12 +179,12 @@ private let HAVEN_RUNNER_LOG = OSLog(subsystem: "haven_ios", category: "runner")
     // so they no-op here and are re-armed by sceneDidEnterBackground below
     // once Dart has written the mirror (A3).
     //
-    // Location relaunch: iOS relaunches a terminated Haven into the background
-    // for a significant-change or region event. Monitoring restarts on every
-    // launch, so the OS redelivers the pending event to the SLC delegate
-    // (which triggers the Dart catch-up and noteLocationLaunch), and the
-    // BGTask floor stays scheduled on a relaunch too. Both are no-ops while
-    // either UserDefaults flag is false.
+    // Location launch (D4): iOS starts a terminated Haven in the background
+    // for a significant-change or region event, or for a background refresh.
+    // Monitoring restarts on every launch, so CoreLocation delivers a fix to
+    // the SLC delegate (which triggers the Dart catch-up and
+    // noteLocationLaunch), and the BGTask floor stays scheduled on such a
+    // launch too. Both are no-ops while either UserDefaults flag is false.
     slcHandler.startMonitoring()
     bgTaskHandler.scheduleNextCatchup()
 
@@ -223,7 +223,8 @@ private let HAVEN_RUNNER_LOG = OSLog(subsystem: "haven_ios", category: "runner")
   // sceneWillEnterForeground clears it, and Dart heals at its first lifecycle
   // message. `@objc`: RunnerTests calls it through the runtime.
   @objc func noteLocationLaunch() {
-    guard !foregroundSeen, !locationStreamHandler.launchedForLocation else { return }
+    let noted = locationStreamHandler.launchedForLocation
+    guard Self.startsLocationLaunch(foregroundSeen: foregroundSeen, noted: noted) else { return }
     // The one fact that lets the stream handler start a background-capable
     // session from the background (OD-R1, owner-directed 2026-11-26); its
     // own predicate still needs Always and the current disclosure.
@@ -231,6 +232,13 @@ private let HAVEN_RUNNER_LOG = OSLog(subsystem: "haven_ios", category: "runner")
     locationStreamHandler.beginLaunchWindow()
     // Dart may already have read status() and settled its start-up on it.
     locationStreamHandler.notifyLocationLaunch()
+  }
+
+  // noteLocationLaunch()'s rule apart from the process state it reads, so
+  // RunnerTests can drive the half a process the user opened never reaches.
+  @objc(startsLocationLaunchWithForegroundSeen:noted:)
+  static func startsLocationLaunch(foregroundSeen: Bool, noted: Bool) -> Bool {
+    !foregroundSeen && !noted
   }
 
   // For RunnerTests, which reads it through the runtime.

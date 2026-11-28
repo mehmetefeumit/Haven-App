@@ -44,9 +44,10 @@ enum LaunchSession {
 /// reads `resumed` then, and again after each await of the contact: the
 /// contact is owed to the next resume, which pays it once.
 ///
-/// A process iOS launched into the background for a location event takes a
-/// pause even when it mounted under `inactive` or `detached`, where none may
-/// ever be dispatched, and that pause — whichever path delivers it, and
+/// A process iOS started in the background that takes a location event
+/// before any scene comes to the front (a location launch, D4) takes a pause
+/// even when it mounted under `inactive` or `detached`, where none may ever
+/// be dispatched, and that pause — whichever path delivers it, and
 /// whether it lands before or after the launch's reads resolve — is handed
 /// the [LaunchSession] once ([takeLaunchSession]). The native side marks
 /// such a process at its first location delivery, which can follow the
@@ -81,8 +82,7 @@ mixin ForegroundStartUpGate<T extends StatefulWidget> on State<T> {
   @protected
   Future<void> startUpRelayContact();
 
-  /// Whether iOS launched this process into the background for a location
-  /// event (the native session's read).
+  /// Whether this process is a location launch (the native session's read).
   @protected
   Future<bool> launchedForLocation();
 

@@ -7,7 +7,7 @@ import UIKit
 /// Every override calls `super`, which is what forwards the event to the
 /// plugins.
 class SceneDelegate: FlutterSceneDelegate {
-  // Privacy: a blur overlay shown while the scene is inactive so the
+  // Privacy: a blur overlay shown while the scene is not active so the
   // OS-captured app-switcher snapshot does not reveal member locations or
   // avatars. It is removed once the scene becomes active again. iOS has no
   // FLAG_SECURE equivalent, so this snapshot blur is the available protection
@@ -33,6 +33,11 @@ class SceneDelegate: FlutterSceneDelegate {
     // After the window: super registers its root controller's engine with
     // this scene, which is how plugins receive scene events.
     super.scene(scene, willConnectTo: session, options: connectionOptions)
+    // Covered until sceneDidBecomeActive: a scene reconnected in the
+    // background shows the kept controller's last frame, which iOS can
+    // snapshot before the scene is ever active. Unconditional: at connect a
+    // user's launch and a background one look alike.
+    coverWithPrivacyBlur()
   }
 
   override func sceneWillEnterForeground(_ scene: UIScene) {
@@ -47,17 +52,21 @@ class SceneDelegate: FlutterSceneDelegate {
 
   override func sceneWillResignActive(_ scene: UIScene) {
     super.sceneWillResignActive(scene)
-    guard let window = window, privacyBlurView == nil else { return }
-    let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
-    blur.frame = window.bounds
-    blur.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-    window.addSubview(blur)
-    privacyBlurView = blur
+    coverWithPrivacyBlur()
   }
 
   override func sceneDidBecomeActive(_ scene: UIScene) {
     super.sceneDidBecomeActive(scene)
     privacyBlurView?.removeFromSuperview()
     privacyBlurView = nil
+  }
+
+  private func coverWithPrivacyBlur() {
+    guard let window = window, privacyBlurView == nil else { return }
+    let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
+    blur.frame = window.bounds
+    blur.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    window.addSubview(blur)
+    privacyBlurView = blur
   }
 }

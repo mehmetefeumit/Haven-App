@@ -105,11 +105,11 @@ integration_test/kp_rotation_wire_test.dart|kp_rotation_wire_test drives the And
 #   b7_ios_auth_tier_test.dart  .github/workflows/e2e-ios-auth-tier.yml
 #   ios_bg_mirror_test.dart     .github/workflows/e2e-ios.yml (second step)
 #
-# Both workflows run on macos-latest and drive a booted iOS simulator through
-# `flutter test -d <udid>`, so `Platform.isIOS` holds. Note these two are the
-# lanes where the reporter's `~N` column DOES count a runtime skip (package:test
-# rather than flutter_test's on-device reporter), so they carry the counter
-# signal as well as the reason signal.
+# Both workflows run on the xcode-27 macOS runner and drive a booted iOS
+# simulator through `flutter test -d <udid>`, so `Platform.isIOS` holds. Note
+# these two are the lanes where the reporter's `~N` column DOES count a
+# runtime skip (package:test rather than flutter_test's on-device reporter), so
+# they carry the counter signal as well as the reason signal.
 #
 # b4_ios_real_gps_test.dart is the deliberate counter-example and correctly has
 # no row here: it hard-FAILS on a non-iOS runtime rather than skipping

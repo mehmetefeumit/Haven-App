@@ -1367,7 +1367,7 @@ void main() {
       'blue location bar',
       (tester) async {
         // `CLBackgroundActivitySession` is iOS 17+, and Haven deploys to
-        // iOS 15.5: on iOS 15/16 no session can ever be held, so the handler
+        // iOS 15.0: on iOS 15/16 no session can ever be held, so the handler
         // reports `backgroundActivitySessionHeld: false` while
         // `showsBackgroundLocationIndicator` — which the stream handler sets
         // from `indicatorRequested`, true while Always is unconfirmed — is

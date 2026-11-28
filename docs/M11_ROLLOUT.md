@@ -106,7 +106,7 @@ All added to `e2e_combined.dart` (runs on BOTH e2e-android and e2e-ios), each gu
 
 ### §5 — e2e-ios: EXTEND, don't create
 
-`e2e-ios.yml` exists, wired per-PR (`ci.yml`'s `e2e-ios` job), runs on `macos-latest` (arm64 sim; since 2026-11-28 the `xcode-27` image, booting "iPhone 17"), boots "iPhone 15", provisions a host-native relay on `ws://localhost:7777` (macOS has no Docker), drives `e2e_combined.dart` via `run-ios-sim-scenario.sh` wrapped in `nick-fields/retry` for the ~10 % sim launch flake. **M11 delta:** add `HAVEN_LIVE_SYNC=true` to the iOS build (per-step env, S1). **Documented CI limit (unchanged):** the sim keeps the app alive and the VM-service attached → no real-device background **suspension** → that check stays owner/physical-device.
+`e2e-ios.yml` exists, wired per-PR (`ci.yml`'s `e2e-ios` job), ran on `macos-latest` (arm64 sim) booting "iPhone 15" when this was written; since 2026-11-28 it runs on `xcode-27` and boots "iPhone 17". It provisions a host-native relay on `ws://localhost:7777` (macOS has no Docker), drives `e2e_combined.dart` via `run-ios-sim-scenario.sh` wrapped in `nick-fields/retry` for the ~10 % sim launch flake. **M11 delta:** add `HAVEN_LIVE_SYNC=true` to the iOS build (per-step env, S1). **Documented CI limit (unchanged):** the sim keeps the app alive and the VM-service attached → no real-device background **suspension** → that check stays owner/physical-device.
 
 ### §6 — SECURITY.md exact edits (land in Phase B)
 

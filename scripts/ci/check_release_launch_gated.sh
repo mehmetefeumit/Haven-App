@@ -24,20 +24,28 @@
 #      `draft: true` (a prerelease would otherwise be created published), and
 #      that job publishes it after the upload. v0.1.16's simulator asset was
 #      refused because a second job attached it after the first had published.
-#   G9 the TestFlight job runs check_ios_app_sdk.sh before uploading, and
-#      launch-gate-ios.yml runs it on the candidate before launching it: from
-#      April 2027 App Store Connect refuses a build below the iOS 27 SDK.
+#   G9 the TestFlight job runs check_ios_app_sdk.sh before uploading,
+#      launch-gate-ios.yml runs it on the candidate before launching it, and
+#      every build-check.yml job that builds the iOS app runs it on that build:
+#      from April 2027 App Store Connect refuses a build below the iOS 27 SDK.
 #   G10 every job that builds for iOS or boots a simulator runs on the
 #      TestFlight job's runner and selects its Xcode before building, and that
 #      runner is an `xcode-NN` image with NN at least check_ios_app_sdk.sh's
 #      IOS_SDK_FLOOR: the gate and the lanes test what TestFlight receives, and
 #      the label cannot fall below the floor the archive is held to.
 #   G11 launch-gate-ios.yml runs the app's XCTest bundle (RunnerTests) on the
-#      booted simulator after the legs, and a run in which no test case passed
-#      fails it.
+#      booted simulator in one step, after the legs and before any upload,
+#      under its pinned `if:`, never continue-on-error, under `set -euo
+#      pipefail`; xcodebuild's transcript goes to a file with its rc kept, a
+#      run with a failed case or a non-zero rc and a run in which no case
+#      passed each echo an ::error:: and `exit 1`; and the summary it prints is
+#      scan-logs.sh's sink, scanned before it is printed and not written after.
 #
-# G4 and G9 read a script only from a step's `run:` line, so a comment naming
-# it, or the call commented out, is not a check that runs.
+# G4 and G9 read a script only from a step's `run:` line whose whole command is
+# `bash <script> <args>` (no prefix, and no `||`, `&&`, `;`, pipe, subshell or
+# comment after it) in a step that is neither conditional nor
+# continue-on-error: a comment naming it, the call commented out, echoed, or
+# with its failure swallowed is not a check that runs.
 #
 # Usage:
 #   bash scripts/ci/check_release_launch_gated.sh             # check the tree
@@ -53,11 +61,12 @@ readonly CI_REL='.github/workflows/ci.yml'
 readonly VERDICT_REL='scripts/ci/check_ci_verdict.sh'
 readonly LAUNCH_GATE_IOS_REL='.github/workflows/launch-gate-ios.yml'
 readonly SDK_CHECK_REL='scripts/ci/check_ios_app_sdk.sh'
+readonly BUILD_CHECK_REL='.github/workflows/build-check.yml'
 # What makes a job an Apple-toolchain job (G10): it builds for iOS or boots a
 # simulator. Read from lines that are neither comments nor a --self-test.
 export APPLE_BUILD_ERE='boot-ios-sim\.sh|flutter build (ios|ipa)|build_release\.sh ipa|xcodebuild|aarch64-apple-ios'
 # Pinned, because a mutation that stops running is a deleted check.
-readonly SELF_TEST_MUTATIONS=29
+readonly SELF_TEST_MUTATIONS=56
 
 # The block of one top-level job (`  <key>:` up to the next one).
 job_block() { # <workflow> <job key>
@@ -86,13 +95,59 @@ needs_has() { # <workflow> <job key> <needed>
     | tr ',' '\n' | grep -qx -- "$3"
 }
 
-# Whether a job runs <script> from a step's `run:` line before its `fastlane
-# ios upload` run line.
-runs_before_upload() { # <workflow> <job key> <script ERE>
-  job_block "$1" "$2" | S="$3" awk '
-    /^[[:space:]]*(-[[:space:]]+)?run:[[:space:]]/ && $0 ~ ENVIRON["S"] && !up { checked = 1 }
-    /^[[:space:]]*(-[[:space:]]+)?run:[[:space:]]+bundle exec fastlane ios upload/ { up = 1 }
-    END { exit !(checked && up) }'
+# A `run:` line whose whole command is `bash <script> <args>`; the default
+# <args> refuse `||`, `&&`, `;`, a pipe, a subshell, a redirect and a comment.
+run_line() { # <script path ERE> [<args ERE>]
+  printf '^[[:space:]]*(-[[:space:]]+)?run:[[:space:]]+bash %s %s' "$1" "${2:-[^|;&#\`()<>]+$}"
+}
+
+# Whether a step whose line matches <run ERE> is neither conditional nor
+# continue-on-error and comes before the first line matching <later ERE>, which
+# must exist ('' for no such line). Reads a job block or one-job workflow.
+gated_step() { # <run ERE> <later ERE>
+  E="$1" B="$2" awk '
+    function flush() { if (hit && !soft && !late) ok = 1; hit = 0; soft = 0; late = 0 }
+    /^      - / { flush() }
+    /^      (- |  )(if|continue-on-error):/ { soft = 1 }
+    $0 ~ ENVIRON["E"] { hit = 1; late = later }
+    ENVIRON["B"] != "" && $0 ~ ENVIRON["B"] { later = 1 }
+    END { flush(); exit !(ok && (ENVIRON["B"] == "" || later)) }'
+}
+
+# The steps of a job block or one-job workflow holding an uncommented line that
+# matches <ERE>, each followed by a line holding only \035.
+steps_with() { # <ERE>
+  E="$1" awk '
+    function flush() { if (hit) { for (i = 1; i <= n; i++) print buf[i]; print "\035" } n = 0; hit = 0 }
+    /^      - / { flush(); on = 1 }
+    !on { next }
+    { buf[++n] = $0 }
+    $0 !~ /^[[:space:]]*#/ && $0 ~ ENVIRON["E"] { hit = 1 }
+    END { flush() }'
+}
+
+# A step's `run: |` body as commands: indentation and comments dropped, `\`
+# continuations joined, and an inline `python3 -I -c '…'` program's lines left
+# out (they are Python, not shell).
+run_body() { # a step on stdin
+  awk -v q="'" '
+    /^        run: \|[[:space:]]*$/ { on = 1; next }
+    on && /^        [A-Za-z-]+:/ { on = 0 }
+    !on { next }
+    { l = $0; sub(/^[[:space:]]+/, "", l) }
+    py { if (substr(l, 1, 1) != q) next; py = 0 }
+    l == "" || l ~ /^#/ { next }
+    { if (acc != "") l = acc " " l; acc = "" }
+    l ~ /\\$/ { sub(/[[:space:]]*\\$/, "", l); acc = l; next }
+    { print l }
+    l ~ ("python3 -I -c " q "$") { py = 1 }'
+}
+
+# Whether <body> holds the given lines consecutively.
+has_seq() { # <body> <line>...
+  local body=$'\n'"$1"$'\n' want=$'\n' l; shift
+  for l in "$@"; do want+="${l}"$'\n'; done
+  [[ "${body}" == *"${want}"* ]]
 }
 
 # "<runs-on>\t<xcode-versions, space-joined>\t<1 when setup-xcode precedes the
@@ -109,9 +164,11 @@ toolchain_of() { # <workflow> <job key>
 
 check() { # <root>
   local root="$1" rel="$1/${RELEASE_REL}" ci="$1/${CI_REL}" verdict="$1/${VERDICT_REL}"
-  local lg="$1/${LAUNCH_GATE_IOS_REL}" sdk="$1/${SDK_CHECK_REL}"
-  local f errs=0 key publishers ios_jobs writers
-  for f in "${rel}" "${ci}" "${verdict}" "${lg}" "${sdk}"; do
+  local lg="$1/${LAUNCH_GATE_IOS_REL}" sdk="$1/${SDK_CHECK_REL}" bc="$1/${BUILD_CHECK_REL}"
+  local f errs=0 key publishers ios_jobs writers builders
+  local upload='^[[:space:]]*(-[[:space:]]+)?run:[[:space:]]+bundle exec fastlane ios upload'
+  local drive='^[[:space:]]*command:[[:space:]]+bash tooling/e2e/ci/run-launch-gate-ios\.sh '
+  for f in "${rel}" "${ci}" "${verdict}" "${lg}" "${sdk}" "${bc}"; do
     [[ -r "${f}" ]] || { echo "ERROR: ${f#"${root}"/} not found" >&2; return 2; }
   done
   err() { echo "FAIL $1" >&2; errs=$((errs + 1)); }
@@ -137,16 +194,19 @@ check() { # <root>
   [[ -n "${ios_jobs}" ]] || err "G4: no job uploads to TestFlight (expected ios)"
   for key in ${ios_jobs}; do
     needs_has "${rel}" "${key}" ios-launch-gate || err "G4: ${key} uploads to TestFlight without needing ios-launch-gate"
-    runs_before_upload "${rel}" "${key}" 'check_ios_app_loadable\.sh' \
-      || err "G4: ${key} must run check_ios_app_loadable.sh before fastlane ios upload"
-    runs_before_upload "${rel}" "${key}" 'check_ios_app_sdk\.sh' \
-      || err "G9: ${key} must run check_ios_app_sdk.sh before fastlane ios upload"
+    job_block "${rel}" "${key}" | gated_step "$(run_line '\.\./scripts/ci/check_ios_app_loadable\.sh')" "${upload}" \
+      || err "G4: ${key} must run check_ios_app_loadable.sh before fastlane ios upload, unconditionally and as its step's whole command"
+    job_block "${rel}" "${key}" | gated_step "$(run_line '\.\./scripts/ci/check_ios_app_sdk\.sh')" "${upload}" \
+      || err "G9: ${key} must run check_ios_app_sdk.sh before fastlane ios upload, unconditionally and as its step's whole command"
   done
-  awk '
-    /^[[:space:]]*(-[[:space:]]+)?run:[[:space:]]+bash scripts\/ci\/check_ios_app_sdk\.sh --simulator "\$\{CANDIDATE_APP\}"/ && !drive { checked = 1 }
-    /^[[:space:]]*command:[[:space:]]+bash tooling\/e2e\/ci\/run-launch-gate-ios\.sh / { drive = 1 }
-    END { exit !(checked && drive) }' "${lg}" \
-    || err "G9: launch-gate-ios.yml must run check_ios_app_sdk.sh --simulator on the candidate before launching it"
+  gated_step "$(run_line 'scripts/ci/check_ios_app_sdk\.sh' '--simulator "\$\{CANDIDATE_APP\}"[[:space:]]*$')" "${drive}" <"${lg}" \
+    || err "G9: launch-gate-ios.yml must run check_ios_app_sdk.sh --simulator on the candidate before launching it, unconditionally and as its step's whole command"
+  builders="$(jobs_matching "${bc}" '^[[:space:]]*(-[[:space:]]+)?run:[[:space:]]+flutter build ios ')"
+  [[ -n "${builders}" ]] || err "G9: no build-check.yml job builds the iOS app (expected ios)"
+  for key in ${builders}; do
+    job_block "${bc}" "${key}" | gated_step "$(run_line '\.\./scripts/ci/check_ios_app_sdk\.sh')" '' \
+      || err "G9: build-check.yml ${key} must run check_ios_app_sdk.sh on its iOS build, unconditionally and as its step's whole command"
+  done
 
   local tf tf_runs tf_xc floor wf runs xc sel
   floor="$(sed -n 's/^readonly IOS_SDK_FLOOR=\([0-9][0-9]*\)$/\1/p' "${sdk}")"
@@ -171,13 +231,54 @@ check() { # <root>
     done
   done
 
-  awk '
-    /^[[:space:]]*command:[[:space:]]+bash tooling\/e2e\/ci\/run-launch-gate-ios\.sh / { drive = 1 }
-    drive && /xcodebuild test -workspace Runner\.xcworkspace -scheme Runner/ { xc = 1 }
-    drive && xc && /-only-testing:RunnerTests/ { only = 1 }
-    drive && /echo "::error::RunnerTests ran no test case"/ { refuse = 1 }
-    END { exit !(only && refuse) }' "${lg}" \
-    || err "G11: launch-gate-ios.yml must run RunnerTests (xcodebuild test -only-testing:RunnerTests) after the drive, failing a run in which no test case passed"
+  local rt body n
+  local scan='bash tooling/e2e/ci/scan-logs.sh --manifest-dir /tmp/haven-soak/needles --sink diag="${summary}" --report /tmp/ios-logscan/runner-tests.ndjson'
+  rt="$(steps_with '-only-testing:RunnerTests' <"${lg}")"
+  n="$(grep -c $'^\035$' <<<"${rt}" || true)"
+  if [[ "${n}" != 1 ]]; then
+    err "G11: launch-gate-ios.yml must run RunnerTests (xcodebuild test -only-testing:RunnerTests) in exactly one step (found ${n})"
+  else
+    rt="${rt%$'\n\035'}"
+    body="$(run_body <<<"${rt}")"
+    D="${drive}" awk '
+      $0 ~ ENVIRON["D"] { drive = 1 }
+      /^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+actions\/upload-artifact@/ { up = 1 }
+      !/^[[:space:]]*#/ && /-only-testing:RunnerTests/ && !seen { seen = 1; ok = drive && !up }
+      END { exit !ok }' "${lg}" \
+      || err "G11: the RunnerTests step must come after the drive and before every upload"
+    grep -Fxq "        if: \${{ !cancelled() && steps.sim.outcome == 'success' && steps.drive.outcome != 'skipped' }}" <<<"${rt}" \
+      || err "G11: the RunnerTests step must run whenever the simulator booted and the drive ran (its pinned if:)"
+    ! grep -Eq '^      (- |  )continue-on-error:' <<<"${rt}" \
+      || err "G11: the RunnerTests step must not be continue-on-error"
+    [[ "$(head -n1 <<<"${body}")" == 'set -euo pipefail' ]] \
+      || err "G11: the RunnerTests step must start with set -euo pipefail"
+    grep -Eq '^\(cd haven/ios && xcodebuild test -workspace Runner\.xcworkspace -scheme Runner .*-only-testing:RunnerTests .*\) >"\$\{work\}/xcodebuild\.out" 2>&1 \|\| rc=\$\?$' <<<"${body}" \
+      || err "G11: xcodebuild test must write its transcript to \${work}/xcodebuild.out and keep its rc (2>&1 || rc=\$?)"
+    # shellcheck disable=SC2016 # the workflow's own shell expands these
+    grep -Fxq 'passed="$(grep -cE "^[[:space:]]*Test [Cc]ase '"'.*'"' passed" "${summary}" || true)"' <<<"${body}" \
+      || err "G11: the passed count must be read from the summary's passed test cases"
+    # shellcheck disable=SC2016
+    grep -Fxq 'failed="$(grep -cE "^[[:space:]]*Test [Cc]ase '"'.*'"' failed" "${summary}" || true)"' <<<"${body}" \
+      || err "G11: the failed count must be read from the summary's failed test cases"
+    # shellcheck disable=SC2016
+    has_seq "${body}" 'if (( rc != 0 || failed != 0 )); then' \
+      'echo "::error::RunnerTests failed (xcodebuild rc ${rc}, ${failed} failed)"' 'exit 1' \
+      || err "G11: a non-zero xcodebuild rc or a failed test case must echo its ::error:: and exit 1"
+    has_seq "${body}" 'if (( passed == 0 )); then' 'echo "::error::RunnerTests ran no test case"' 'exit 1' \
+      || err "G11: a run in which no test case passed must echo its ::error:: and exit 1"
+    grep -Fxq -- "${scan}" <<<"${body}" \
+      || err "G11: the RunnerTests summary must be scan-logs.sh's sink, at a command position whose failure fails the step"
+    S="${scan}" awk '
+      $0 == ENVIRON["S"] { s = 1 }
+      /(^|[;&|(]|then |do |else )[[:space:]]*(cat|tail|head|less|more)([[:space:]]|$)/ && !(s && $0 == "cat \"${summary}\"") { bad = 1 }
+      END { exit bad }' <<<"${body}" \
+      || err "G11: the RunnerTests step may print only the scanned summary (cat \"\${summary}\"), after its scan"
+    S="${scan}" awk '
+      s && /summary/ && $0 != "cat \"${summary}\"" { bad = 1 }
+      $0 == ENVIRON["S"] { s = 1 }
+      END { exit bad }' <<<"${body}" \
+      || err "G11: nothing may write or rename the RunnerTests summary after its scan"
+  fi
 
   for key in $(jobs_matching "${rel}" 'app-ios-simulator\.zip' 'softprops/action-gh-release'); do
     needs_has "${rel}" "${key}" ios-launch-gate || err "G5: ${key} attaches the simulator build without needing ios-launch-gate"
@@ -250,6 +351,33 @@ self_test() {
   expect "the SDK floor rises above the runner's Xcode" 1 "${SDK_CHECK_REL}" 's/^readonly IOS_SDK_FLOOR=[0-9]+$/readonly IOS_SDK_FLOOR=28/'
   expect "the gate drops the app's XCTest bundle" 1 "${LAUNCH_GATE_IOS_REL}" '/-only-testing:RunnerTests/d'
   expect "an XCTest run with no test case passes" 1 "${LAUNCH_GATE_IOS_REL}" '/RunnerTests ran no test case/d'
+  expect "the XCTest step is continue-on-error" 1 "${LAUNCH_GATE_IOS_REL}" 's/^(        if: .*steps\.sim\.outcome == .success. && steps\.drive\.outcome != .skipped. \}\})$/\1\n        continue-on-error: true/'
+  expect "the XCTest step never runs" 1 "${LAUNCH_GATE_IOS_REL}" 's/^        if: .*steps\.sim\.outcome == .success. && steps\.drive\.outcome != .skipped. \}\}$/        if: ${{ false }}/'
+  expect "a failed test case exits 0" 1 "${LAUNCH_GATE_IOS_REL}" '/echo "::error::RunnerTests failed /{n;s/exit 1/exit 0/}'
+  expect "a run with no test case exits 0" 1 "${LAUNCH_GATE_IOS_REL}" '/echo "::error::RunnerTests ran no test case"/{n;s/exit 1/exit 0/}'
+  expect "a failed run is never tested for" 1 "${LAUNCH_GATE_IOS_REL}" 's/if \(\( rc != 0 \|\| failed != 0 \)\); then/if false; then/'
+  expect "a run with no passed case is never tested for" 1 "${LAUNCH_GATE_IOS_REL}" 's/if \(\( passed == 0 \)\); then/if false; then/'
+  expect "xcodebuild's failure is swallowed" 1 "${LAUNCH_GATE_IOS_REL}" 's/2>&1 \|\| rc=\$\?$/2>\&1 || true/'
+  expect "the XCTest step runs after an upload" 1 "${LAUNCH_GATE_IOS_REL}" 's/^(      - name: Run the app.s XCTest bundle)$/      - uses: actions\/upload-artifact@v6\n\1/'
+  expect "the passed count is forged" 1 "${LAUNCH_GATE_IOS_REL}" 's/^(          passed=).*/\1"1"/'
+  expect "the failed count is forged" 1 "${LAUNCH_GATE_IOS_REL}" 's/^(          failed=).*/\1"0"/'
+  expect "the XCTest summary is printed unscanned" 1 "${LAUNCH_GATE_IOS_REL}" '/--sink diag="\$\{summary\}"/d; /bash tooling\/e2e\/ci\/scan-logs\.sh --manifest-dir \/tmp\/haven-soak\/needles \\$/d'
+  expect "the XCTest summary is printed before its scan" 1 "${LAUNCH_GATE_IOS_REL}" '/^          cat "\$\{summary\}"$/d; s/^(          bash tooling\/e2e\/ci\/scan-logs\.sh --manifest-dir \/tmp\/haven-soak\/needles \\)$/          cat "${summary}"\n\1/'
+  expect "the XCTest summary's scan cannot fail the step" 1 "${LAUNCH_GATE_IOS_REL}" 's/(--sink diag="\$\{summary\}" --report \/tmp\/ios-logscan\/runner-tests\.ndjson)$/\1 || true/'
+  expect "the XCTest scan reads another file" 1 "${LAUNCH_GATE_IOS_REL}" 's/--sink diag="\$\{summary\}"/--sink diag=\/dev\/null/'
+  expect "the XCTest summary is written after its scan" 1 "${LAUNCH_GATE_IOS_REL}" '/^          printf .RunnerTests: xcodebuild rc/{h;d}; /--report \/tmp\/ios-logscan\/runner-tests\.ndjson$/G'
+  expect "the XCTest step runs without set -e" 1 "${LAUNCH_GATE_IOS_REL}" '/name: Run the app.s XCTest bundle/,/set -euo pipefail/{/set -euo pipefail/d}'
+  expect "the IPA load check only echoes" 1 "${RELEASE_REL}" 's/^(        run: )(bash \.\.\/scripts\/ci\/check_ios_app_loadable\.sh .*)$/\1echo \2/'
+  expect "the IPA load check's failure is ignored" 1 "${RELEASE_REL}" 's/^(        run: bash \.\.\/scripts\/ci\/check_ios_app_loadable\.sh .*)$/\1 || true/'
+  expect "the IPA load check is continue-on-error" 1 "${RELEASE_REL}" 's/^(        run: bash \.\.\/scripts\/ci\/check_ios_app_loadable\.sh .*)$/        continue-on-error: true\n\1/'
+  expect "the IPA SDK check only echoes" 1 "${RELEASE_REL}" 's/^(        run: )(bash \.\.\/scripts\/ci\/check_ios_app_sdk\.sh .*)$/\1echo \2/'
+  expect "the IPA SDK check's failure is ignored" 1 "${RELEASE_REL}" 's/^(        run: bash \.\.\/scripts\/ci\/check_ios_app_sdk\.sh .*)$/\1 || true/'
+  expect "the IPA SDK check is skipped" 1 "${RELEASE_REL}" 's/^(        run: bash \.\.\/scripts\/ci\/check_ios_app_sdk\.sh .*)$/        if: false\n\1/'
+  expect "the gate's SDK check's failure is ignored" 1 "${LAUNCH_GATE_IOS_REL}" 's/^(        run: bash scripts\/ci\/check_ios_app_sdk\.sh .*)$/\1 || true/'
+  expect "the gate's SDK check is continue-on-error" 1 "${LAUNCH_GATE_IOS_REL}" 's/^(        run: bash scripts\/ci\/check_ios_app_sdk\.sh .*)$/        continue-on-error: true\n\1/'
+  expect "build-check drops its SDK check" 1 "${BUILD_CHECK_REL}" '/check_ios_app_sdk\.sh/d'
+  expect "build-check's SDK check's failure is ignored" 1 "${BUILD_CHECK_REL}" 's/^(        run: bash \.\.\/scripts\/ci\/check_ios_app_sdk\.sh .*)$/\1 || true/'
+  expect "build-check's SDK check is skipped" 1 "${BUILD_CHECK_REL}" 's/^(        run: bash \.\.\/scripts\/ci\/check_ios_app_sdk\.sh .*)$/        if: false\n\1/'
   # A mutation whose sed matches nothing leaves rc 0 and fails above; this
   # catches a case that stopped running at all.
   (( ran == SELF_TEST_MUTATIONS )) || { echo "self-test FAIL: ran ${ran} cases, pinned ${SELF_TEST_MUTATIONS}" >&2; return 1; }
