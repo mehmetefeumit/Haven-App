@@ -35,7 +35,7 @@ const double kDropletOnScreenTail = 15;
 
 /// Tail cap while the marker clings at full size to an edge, wide enough that
 /// the tip stays on the point for every on-screen point at the side and bottom
-/// edges (a head held 45 px in needs 31.4 px at the worst).
+/// edges (a head held 45 px in needs 31.3 px at the worst).
 const double kDropletMaxTailOnScreen = 33;
 
 /// Tail cap at the far bead.

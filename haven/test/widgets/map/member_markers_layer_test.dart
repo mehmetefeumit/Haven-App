@@ -915,7 +915,7 @@ void main() {
       expect(moved, greaterThan(0), reason: 'the spread moved a head');
       expect(
         longest,
-        greaterThan(8),
+        greaterThan(kDropletMaxTailFar),
         reason: 'near the edge the on-screen cap applies, not the far one',
       );
     });
