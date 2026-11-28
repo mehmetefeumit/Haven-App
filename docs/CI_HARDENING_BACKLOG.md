@@ -3175,8 +3175,8 @@ Two tiers. **The AI can only fail a build, never pass one.**
   fixtures) pins an 8-link union — hook, real blur material, geometry, z-order,
   unconditional add, removal *and* re-nil, absence of a scene manifest, and the
   promise still being made in all 13 locales. *(Superseded 2026-11-28 by the
-  UIScene migration: the blur is `SceneDelegate.sceneWillResignActive` /
-  `sceneDidBecomeActive`, and the guard's link 7 now REQUIRES the scene manifest
+  UIScene migration: the blur is installed at scene connect and on
+  `SceneDelegate.sceneWillResignActive`, removed on `sceneDidBecomeActive`, and the guard's link 7 now REQUIRES the scene manifest
   naming `SceneDelegate`, link 8 refuses a blur or UI-lifecycle override left on
   `AppDelegate`; see its header for the current links and fixture count.)* The retention constant is now tied
   to the string in `privacy_copy_ties.rs` and pinned to ±1 s in BOTH directions,

@@ -1239,8 +1239,9 @@ suspends a process, or disconnects a scene, so none stands in for a row below.
    gate's second read (sent by `locationLaunch`) is the one that takes it.
 2r. **The app-switcher blur under scenes.** Open Haven on the map with members visible, swipe up into
    the app switcher, and look at Haven's card; return to Haven. **Expected:** the card is blurred
-   (`SceneDelegate.sceneWillResignActive`), the blur is gone once Haven is active again
-   (`sceneDidBecomeActive`), and the same holds after a scene that iOS reconnected (item 2o). In-app
+   (`SceneDelegate.sceneWillResignActive`; also installed when a scene connects), the blur is gone
+   once Haven is active again (`sceneDidBecomeActive`), and the card is blurred after a scene that
+   iOS reconnected in the background (item 2o), with no blurred flash on a normal open. In-app
    screenshots are not blocked (iOS has no `FLAG_SECURE`).
 3. **Opt-out + rollback sanity.** Disable background sharing. **Expected:** `stopSLC` +
    `cancelAllBGTasks` fire; repeat steps 1/2 and confirm nothing runs (no wake, no relay contact).
@@ -1326,7 +1327,7 @@ opt-out remains enforced even on stale builds.
 | BootResumeReceiver resolvable for BOOT_COMPLETED + MY_PACKAGE_REPLACED, plugin RebootReceiver absent | Phase B query-receivers + guard 14c + `check_apk_resume_wiring.sh` (release APK) |
 | A reboot/update resumes the FGS only under the resume rule, else one notice | `e2e-android-resume.yml` legs U1 U2 B1 B2 U3 + `BootResumeTest.kt` + `background_resume_gate_test.dart` |
 | A sticky restart after a kill passes the same gate | lane leg K (with the background grant + battery exemption only) + gate unit tests |
-| An iOS location launch (since 2026-11-28, D4: the first location event in a process no scene has brought to the front) resumes sharing only under Always + the current consent (v3 on iPhone) | host tests (incl. `foreground_start_up_gate_test.dart`'s `locationLaunch` re-read) + `check_ios_background_publish.sh` 4d/6d/9b/9c/20 + `RunnerTests` (no launch after the foreground); device: §6 items 2–2l and 2m–2r (DEFERRED) |
+| An iOS location launch (since 2026-11-28, D4: the first location event in a process no scene has brought to the front) resumes sharing only under Always + the current consent (v3 on iPhone) | host tests (incl. `foreground_start_up_gate_test.dart`'s `locationLaunch` re-read) + `check_ios_background_publish.sh` 4d/6d/9b/9c/20 + `RunnerTests` (the launch rule's truth table, and no launch after the foreground); device: §6 items 2–2l and 2m–2r (DEFERRED) |
 | FGS-vs-worker & authoring-vs-sweep exclusion | Rust tests `write_lock.rs:128` / `manager.rs:9765` + gates 3–4 |
 | iOS mirror true + Swift handlers reachable | D7 sim target + plist assert |
 | iOS BGTask fires on hardware | owner checklist §6 (explicitly out of CI) |
@@ -1808,8 +1809,8 @@ nostr_group_id_hex=?` in the `delete_circle` cascade (`storage.rs:824-877`) = wi
   main storyboard is gone and `Info.plist` carries `UIApplicationSceneManifest` (one scene). The UI
   hooks moved to the scene: the foreground re-arm and the A3 background re-arm are
   `AppDelegate.sceneWillEnterForeground()` / `sceneDidEnterBackground()`, called from
-  `SceneDelegate`, and the app-switcher blur is `SceneDelegate.sceneWillResignActive` /
-  `sceneDidBecomeActive`. UIKit passes a scene-based app no launch options, so `launchOptions[.location]`
+  `SceneDelegate`, and the app-switcher blur is installed at scene connect and on
+  `SceneDelegate.sceneWillResignActive`, removed on `sceneDidBecomeActive`. UIKit passes a scene-based app no launch options, so `launchOptions[.location]`
   is no longer read: under D4 (owner-chosen, consequences accepted) a process no scene has brought to
   the front becomes a location launch at the first location event delivered to `HavenSLCHandler`
   (`onLocationEvent` → `AppDelegate.noteLocationLaunch()`, once per process, cleared by

@@ -100,9 +100,11 @@
 #
 #   iOS app-switcher blur             scripts/ci/check_ios_privacy_blur.sh
 #     The iOS half of the same protection. iPhone cannot block capture, so
-#     what Haven does there is blur the app-switcher preview — six lines of
+#     what Haven does there is blur the app-switcher preview — a few lines of
 #     SceneDelegate.swift that were backed by nothing at all. Delete them and
-#     every other gate stays green. Union: installed on sceneWillResignActive
+#     every other gate stays green. Union: installed when the scene connects
+#     (a scene iOS connects in the background never resigns) and on
+#     sceneWillResignActive
 #     (the switcher card is on screen while the scene is still FOREGROUND, so
 #     didEnterBackground is too late), covering the scene's window with a real
 #     .systemMaterial blur, removed and re-armed only on sceneDidBecomeActive,

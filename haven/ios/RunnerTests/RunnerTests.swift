@@ -122,7 +122,7 @@ final class RunnerTests: XCTestCase {
     typealias Rule = @convention(c) (AnyObject, Selector, ObjCBool, ObjCBool) -> ObjCBool
     let call = unsafeBitCast(method_getImplementation(method), to: Rule.self)
     func starts(foregroundSeen: Bool, noted: Bool) -> Bool {
-      call(app, rule, ObjCBool(foregroundSeen), ObjCBool(noted)).boolValue
+      call(app as AnyObject, rule, ObjCBool(foregroundSeen), ObjCBool(noted)).boolValue
     }
 
     XCTAssertTrue(starts(foregroundSeen: false, noted: false))
