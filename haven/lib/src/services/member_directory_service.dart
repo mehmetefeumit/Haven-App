@@ -26,7 +26,7 @@ import 'package:haven/src/utils/search_fold.dart';
 /// One person the directory can offer, with everything a row needs to be
 /// ordered, matched and identified — and nothing more.
 ///
-/// Deliberately carries no picture BYTES. A roster's worth of 96px thumbnails
+/// Deliberately carries no picture BYTES. A roster's worth of 256px thumbnails
 /// is tens of megabytes held for a list whose visible window is a handful of
 /// rows; a row resolves its own bytes through `memberProfileProvider` when it
 /// scrolls into view. [pictureHash] is enough to know a picture exists and to

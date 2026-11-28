@@ -35,6 +35,7 @@ use zeroize::Zeroizing;
 use super::error::{CircleError, Result};
 use super::manager::CircleManager;
 use super::storage::CircleStorage;
+use crate::avatar::{rederive_thumbnail, thumbnail_is_current};
 use crate::profile::types::{CachedProfile, ProfileMetadata, ProfileState};
 use crate::profile::ProfileRelaySalt;
 use crate::profile::{merge_edits, picture_is_current, uncovered, PICTURE_CACHE_MAX_PEOPLE};
@@ -723,11 +724,65 @@ impl CircleStorage {
 
     /// Returns the cached thumbnail bytes for a pubkey hex, or `None`.
     ///
+    /// A thumbnail an earlier build cached below
+    /// [`AVATAR_THUMB_EDGE_PX`](crate::avatar::AVATAR_THUMB_EDGE_PX) is
+    /// re-derived from the row's canonical bytes on this first read and stored,
+    /// so an upgrade neither re-downloads a picture nor stalls the open. The
+    /// re-encode runs off the database lock, and is stored only while the row
+    /// still holds the picture it was derived from; if it fails, the stored
+    /// thumbnail is returned as it is.
+    ///
     /// # Errors
     ///
     /// As [`Self::upsert_profile`].
     pub fn get_profile_thumbnail(&self, pubkey_hex: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
-        self.get_picture_column(pubkey_hex, "thumbnail")
+        let Some(thumbnail) = self.get_picture_column(pubkey_hex, "thumbnail")? else {
+            return Ok(None);
+        };
+        if thumbnail_is_current(&thumbnail) {
+            return Ok(Some(thumbnail));
+        }
+        let row: Option<(Zeroizing<Vec<u8>>, Vec<u8>, i64)> = {
+            let conn = self.conn().lock().map_err(|e| {
+                CircleError::Storage(format!("Failed to acquire database lock: {e}"))
+            })?;
+            conn.query_row(
+                "SELECT canonical, sha256, updated_at FROM profile_pictures WHERE pubkey = ?1",
+                params![pubkey_hex],
+                |r| Ok((Zeroizing::new(r.get(0)?), r.get(1)?, r.get(2)?)),
+            )
+            .optional()?
+        };
+        let Some((canonical, sha256, updated_at)) = row else {
+            return Ok(Some(thumbnail));
+        };
+        let Ok(fresh) = rederive_thumbnail(&canonical) else {
+            return Ok(Some(thumbnail));
+        };
+        self.store_rederived_thumbnail(pubkey_hex, &fresh, &sha256, updated_at)?;
+        Ok(Some(fresh))
+    }
+
+    /// Stores a re-derived thumbnail only if the row still holds the picture
+    /// (`sha256`, `updated_at`) it was derived from: a picture written while it
+    /// was being re-encoded keeps its own thumbnail.
+    fn store_rederived_thumbnail(
+        &self,
+        pubkey_hex: &str,
+        thumbnail: &[u8],
+        sha256: &[u8],
+        updated_at: i64,
+    ) -> Result<()> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute(
+            "UPDATE profile_pictures SET thumbnail = ?1
+             WHERE pubkey = ?2 AND sha256 = ?3 AND updated_at = ?4",
+            params![thumbnail, pubkey_hex, sha256, updated_at],
+        )?;
+        Ok(())
     }
 
     /// Returns the cached canonical (full-res) bytes for a pubkey hex, or
@@ -1794,6 +1849,139 @@ mod tests {
         assert_eq!(got.metadata.name(), Some("alice"));
         assert_eq!(got.event_created_at, 1_000);
         assert_eq!(got.fetched_at, 9_000, "staleness clock refreshed");
+    }
+
+    /// A real sanitized picture, plus its thumbnail as an earlier build cached
+    /// it at 96 px.
+    fn sanitized_with_legacy_thumbnail() -> (crate::avatar::ProcessedAvatar, Vec<u8>) {
+        let mut img = image::RgbImage::new(300, 200);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            *px = image::Rgb([
+                u8::try_from(x % 256).unwrap(),
+                u8::try_from(y % 256).unwrap(),
+                128,
+            ]);
+        }
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let processed = crate::avatar::process_own_avatar(&png).unwrap();
+        let mut legacy = Vec::new();
+        image::load_from_memory(&processed.canonical)
+            .unwrap()
+            .resize_exact(96, 96, image::imageops::FilterType::Lanczos3)
+            .write_to(
+                &mut std::io::Cursor::new(&mut legacy),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        (processed, legacy)
+    }
+
+    fn stored_thumbnail(storage: &CircleStorage, pubkey_hex: &str) -> Vec<u8> {
+        storage
+            .conn()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT thumbnail FROM profile_pictures WHERE pubkey = ?1",
+                params![pubkey_hex],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn edge(bytes: &[u8]) -> (u32, u32) {
+        image::GenericImageView::dimensions(&image::load_from_memory(bytes).unwrap())
+    }
+
+    #[test]
+    fn a_thumbnail_cached_below_the_current_edge_is_rederived_on_first_read_and_stored() {
+        let edge_px = crate::avatar::AVATAR_THUMB_EDGE_PX;
+        let (processed, legacy) = sanitized_with_legacy_thumbnail();
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .upsert_profile_picture("aa", "u", &[0xAB; 32], &processed.canonical, &legacy, 4_000)
+            .unwrap();
+
+        let first = storage.get_profile_thumbnail("aa").unwrap().unwrap();
+        assert_eq!(edge(&first), (edge_px, edge_px));
+        assert_eq!(
+            stored_thumbnail(&storage, "aa"),
+            *first,
+            "stored, not only returned"
+        );
+        assert_eq!(
+            &*storage.get_profile_picture("aa").unwrap().unwrap(),
+            &*processed.canonical,
+            "the canonical tier is untouched"
+        );
+        assert_eq!(
+            *storage.get_profile_thumbnail("aa").unwrap().unwrap(),
+            *first,
+            "a current thumbnail is served as stored"
+        );
+    }
+
+    #[test]
+    fn a_current_thumbnail_is_returned_byte_for_byte() {
+        let (processed, _) = sanitized_with_legacy_thumbnail();
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .upsert_profile_picture(
+                "aa",
+                "u",
+                &[0xAB; 32],
+                &processed.canonical,
+                &processed.thumbnail,
+                4_000,
+            )
+            .unwrap();
+        assert_eq!(
+            *storage.get_profile_thumbnail("aa").unwrap().unwrap(),
+            *processed.thumbnail
+        );
+    }
+
+    #[test]
+    fn a_legacy_thumbnail_whose_canonical_cannot_be_decoded_is_served_as_stored() {
+        let (_, legacy) = sanitized_with_legacy_thumbnail();
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .upsert_profile_picture("aa", "u", &[0xAB; 32], b"not-an-image", &legacy, 4_000)
+            .unwrap();
+        assert_eq!(
+            *storage.get_profile_thumbnail("aa").unwrap().unwrap(),
+            legacy
+        );
+        assert_eq!(stored_thumbnail(&storage, "aa"), legacy);
+    }
+
+    #[test]
+    fn a_rederived_thumbnail_never_lands_on_a_picture_written_meanwhile() {
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .upsert_profile_picture("aa", "u", &[0xAB; 32], b"old", b"old-thumb", 4_000)
+            .unwrap();
+        // A new picture lands while the old one's thumbnail is being re-encoded.
+        storage
+            .upsert_profile_picture("aa", "u", &[0xCD; 32], b"new", b"new-thumb", 5_000)
+            .unwrap();
+        storage
+            .store_rederived_thumbnail("aa", b"from-old", &[0xAB; 32], 4_000)
+            .unwrap();
+        assert_eq!(stored_thumbnail(&storage, "aa"), b"new-thumb");
+        // A same-picture re-stamp at a later instant is a different row too.
+        storage
+            .store_rederived_thumbnail("aa", b"from-old", &[0xCD; 32], 4_000)
+            .unwrap();
+        assert_eq!(stored_thumbnail(&storage, "aa"), b"new-thumb");
+
+        storage
+            .store_rederived_thumbnail("aa", b"from-new", &[0xCD; 32], 5_000)
+            .unwrap();
+        assert_eq!(stored_thumbnail(&storage, "aa"), b"from-new");
     }
 
     #[test]

@@ -314,6 +314,16 @@ fn encode_jpeg(img: &DynamicImage, quality: u8) -> Result<Zeroizing<Vec<u8>>> {
     Ok(out)
 }
 
+/// Encodes the [`AVATAR_THUMB_EDGE_PX`] thumbnail of a square image.
+fn encode_thumbnail(square: &DynamicImage) -> Result<Zeroizing<Vec<u8>>> {
+    let thumb = square.resize_exact(
+        AVATAR_THUMB_EDGE_PX,
+        AVATAR_THUMB_EDGE_PX,
+        image::imageops::FilterType::Lanczos3,
+    );
+    encode_jpeg(&thumb, AVATAR_THUMB_JPEG_QUALITY)
+}
+
 /// Re-encodes `img` to a canonical JPEG that fits [`AVATAR_CANONICAL_MAX_BYTES`].
 ///
 /// Starts at [`AVATAR_JPEG_QUALITY_START`] and steps quality down toward
@@ -360,12 +370,7 @@ pub fn process_own_avatar(raw: &[u8]) -> Result<ProcessedAvatar> {
 
     // Thumbnail: derive from the already-cropped canonical image so the
     // thumbnail matches the canonical framing exactly.
-    let thumb_img = canonical_img.resize_exact(
-        AVATAR_THUMB_EDGE_PX,
-        AVATAR_THUMB_EDGE_PX,
-        image::imageops::FilterType::Lanczos3,
-    );
-    let thumbnail = encode_jpeg(&thumb_img, AVATAR_THUMB_JPEG_QUALITY)?;
+    let thumbnail = encode_thumbnail(&canonical_img)?;
 
     let content_hash: [u8; 32] = Sha256::digest(&*canonical).into();
 
@@ -401,12 +406,7 @@ pub fn process_inbound_avatar(raw: &[u8]) -> Result<ProcessedAvatar> {
     let canonical_img = crop_square_and_resize(&decoded, AVATAR_TIER_EDGE_PX);
     let canonical = encode_canonical_to_fit(&canonical_img)?;
 
-    let thumb_img = canonical_img.resize_exact(
-        AVATAR_THUMB_EDGE_PX,
-        AVATAR_THUMB_EDGE_PX,
-        image::imageops::FilterType::Lanczos3,
-    );
-    let thumbnail = encode_jpeg(&thumb_img, AVATAR_THUMB_JPEG_QUALITY)?;
+    let thumbnail = encode_thumbnail(&canonical_img)?;
 
     let content_hash: [u8; 32] = Sha256::digest(&*canonical).into();
 
@@ -417,6 +417,31 @@ pub fn process_inbound_avatar(raw: &[u8]) -> Result<ProcessedAvatar> {
         width: AVATAR_TIER_EDGE_PX,
         height: AVATAR_TIER_EDGE_PX,
     })
+}
+
+/// Whether a cached `thumbnail` is at least [`AVATAR_THUMB_EDGE_PX`] on its
+/// short side. Reads the header only; bytes it cannot read are not current.
+#[must_use]
+pub fn thumbnail_is_current(thumbnail: &[u8]) -> bool {
+    ImageReader::new(Cursor::new(thumbnail))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok())
+        .is_some_and(|(w, h)| w.min(h) >= AVATAR_THUMB_EDGE_PX)
+}
+
+/// Re-derives the thumbnail from cached `canonical` bytes, for a thumbnail an
+/// earlier build cached at a smaller [`AVATAR_THUMB_EDGE_PX`].
+///
+/// The canonical bytes are Haven's own square re-encode, but they are read
+/// back from storage, so they are decoded under the strict inbound limits all
+/// the same.
+///
+/// # Errors
+///
+/// As [`process_inbound_avatar`].
+pub fn rederive_thumbnail(canonical: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    encode_thumbnail(&decode_under_limits(canonical, DecodeLimits::inbound())?)
 }
 
 /// Computes the SHA-256 content hash of canonical bytes.
@@ -623,6 +648,36 @@ mod tests {
             thumb.dimensions(),
             (AVATAR_THUMB_EDGE_PX, AVATAR_THUMB_EDGE_PX)
         );
+    }
+
+    #[test]
+    fn rederive_thumbnail_rebuilds_the_current_edge_from_the_canonical() {
+        let processed = process_own_avatar(&synthetic_png(800, 600)).expect("pipeline");
+        let thumb = rederive_thumbnail(&processed.canonical).expect("rederive");
+        assert!(is_jpeg(&thumb), "thumbnail must be JPEG");
+        assert_eq!(
+            image::load_from_memory(&thumb)
+                .expect("decode")
+                .dimensions(),
+            (AVATAR_THUMB_EDGE_PX, AVATAR_THUMB_EDGE_PX)
+        );
+        assert!(rederive_thumbnail(b"not-an-image").is_err());
+    }
+
+    #[test]
+    fn thumbnail_is_current_only_at_the_current_edge() {
+        let processed = process_own_avatar(&synthetic_png(800, 600)).expect("pipeline");
+        assert!(thumbnail_is_current(&processed.thumbnail));
+
+        let below = AVATAR_THUMB_EDGE_PX - 1;
+        let small = image::load_from_memory(&processed.canonical)
+            .expect("decode")
+            .resize_exact(below, below, image::imageops::FilterType::Lanczos3);
+        assert!(!thumbnail_is_current(
+            &encode_jpeg(&small, 70).expect("encode")
+        ));
+        assert!(!thumbnail_is_current(b"not-an-image"));
+        assert!(!thumbnail_is_current(&[]));
     }
 
     #[test]

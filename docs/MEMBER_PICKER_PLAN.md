@@ -60,7 +60,7 @@ No NIP-02 parsing, fetching or storage is in scope.
 | Current co-members | `circlesProvider` → `Circle.members` | |
 | Local petnames | **`CircleMember.displayName` already carries it** (`circle/manager.rs:1169-1173`, inside `get_members`) | **[R]** `getAllContacts` is redundant, has zero Dart callers, and is not on the `CircleService` interface — reaching it needs a downcast and breaks mockability |
 | Cached kind-0 name | `getCachedProfile` — **verified pure local read** (`rust_builder/src/api.rs:5499-5520`) | |
-| Cached 96px thumbnail | `profile_pictures.thumbnail` | |
+| Cached 256px thumbnail | `profile_pictures.thumbnail` | |
 | Name precedence | `resolveEffectiveMemberName` | |
 
 **[R] Three corrections to the "P1 needs zero FFI" claim:**

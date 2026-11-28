@@ -125,7 +125,7 @@ class HavenAvatar extends StatelessWidget {
                 colors: [entry.top, entry.bottom],
               ),
       ),
-      child: _buildContent(context, fontSize, textColor),
+      child: _buildContent(context, resolvedDiameter, fontSize, textColor),
     );
 
     if (showOnlineIndicator) {
@@ -162,14 +162,23 @@ class HavenAvatar extends StatelessWidget {
 
   Widget _buildContent(
     BuildContext context,
+    double resolvedDiameter,
     double fontSize,
     Color textColor,
   ) {
     final bytes = imageBytes;
     if (bytes != null && bytes.isNotEmpty) {
+      // Decoded at the size shown, never the stored one: a 256 px thumbnail
+      // in a 48 dp tile would otherwise hold several times the pixels in the
+      // bounded image cache. Every picture here is square (Haven's sanitizer
+      // output or the square-locked crop), so both edges are safe to set.
+      final decodePx =
+          (resolvedDiameter * MediaQuery.devicePixelRatioOf(context)).ceil();
       return ClipOval(
         child: Image.memory(
           bytes,
+          cacheWidth: decodePx,
+          cacheHeight: decodePx,
           gaplessPlayback: true,
           fit: BoxFit.cover,
           errorBuilder: (context, error, stackTrace) {

@@ -128,7 +128,7 @@ class NostrMemberDirectoryService implements MemberDirectoryService {
 
       // One batch read for the whole directory, carrying no picture bytes: a
       // [MemberCandidate] keeps only the hash, so a per-person read would
-      // decrypt, marshal and drop one 96px thumbnail for every person with a
+      // decrypt, marshal and drop one 256px thumbnail for every person with a
       // picture, serially, before the picker could draw its first row.
       final profiles = await _profileService.getCachedMemberProfiles(
         [for (final entry in entries) entry.pubkeyHex],

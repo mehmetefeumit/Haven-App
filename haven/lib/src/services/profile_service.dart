@@ -417,7 +417,7 @@ abstract class ProfileService {
   /// without resolving picture bytes.
   ///
   /// The read a name-only surface wants: [getMemberProfile] loads each
-  /// person's 96px thumbnail whenever one is cached, so a caller that keeps
+  /// person's 256px thumbnail whenever one is cached, so a caller that keeps
   /// only [Profile.pictureHash] pays a decrypt, an FFI copy and the peak
   /// memory for a thumbnail per person and then drops it. The returned
   /// [Profile]s therefore always have a `null` [Profile.pictureBytes], and
@@ -437,7 +437,7 @@ abstract class ProfileService {
   );
 
   /// The full-resolution copy of [pubkeyHex]'s cached picture, where
-  /// [getMemberProfile] carries only the 96px thumbnail — for viewing the
+  /// [getMemberProfile] carries only the 256px thumbnail — for viewing the
   /// photo full screen.
   ///
   /// A local read only: never touches the network. **Never throws**; `null`

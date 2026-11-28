@@ -3,7 +3,7 @@ import 'package:haven/src/widgets/map/avatar_image_cache.dart';
 
 /// Maximum bytes the global [ImageCache] may hold for decoded images.
 ///
-/// Avatars are small (96 px thumbnails on the hot path), so a tight bound keeps
+/// Avatars are small (decoded at their on-screen size), so a tight bound keeps
 /// decoded pixels from accumulating in memory. This is a privacy bound, not a
 /// performance cache — keep it small.
 const int kHavenImageCacheMaxBytes = 8 * 1024 * 1024; // 8 MiB

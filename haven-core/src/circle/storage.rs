@@ -1446,7 +1446,7 @@ impl CircleStorage {
             -- Cached, re-encoded profile pictures. Keyed by pubkey (hex), again
             -- with NO circle/group column. `url` never crosses the FFI (D2);
             -- `sha256` is the raw-download content-address commitment;
-            -- `canonical` (512px) and `thumbnail` (96px) are the render tiers,
+            -- `canonical` (512px) and `thumbnail` (256px) are the render tiers,
             -- encrypted at rest by SQLCipher like every other page.
             --
             -- A row with an EMPTY `url` is a STAGED own picture: sanitized bytes
