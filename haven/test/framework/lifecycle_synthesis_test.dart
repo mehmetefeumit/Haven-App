@@ -20,7 +20,11 @@
 //
 // Not pinned here, because a host binding has no embedder: that the seed IS
 // `detached` on a device (READ: `FlutterDartProject.mm`,
-// `android_shell_holder.cc` at Flutter 3.41.0).
+// `android_shell_holder.cc` at Flutter 3.41.0), and that on iOS only a view
+// controller in a window sends a lifecycle message, so a process no scene
+// connects to never leaves the seed (READ: `FlutterViewController.mm` at
+// Flutter 3.50.1); what the gate does then is driven in
+// `foreground_start_up_gate_test.dart`.
 @TestOn('vm')
 library;
 

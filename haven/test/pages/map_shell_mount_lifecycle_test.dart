@@ -22,6 +22,7 @@ import 'dart:io';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/pages/foreground_start_up_gate.dart';
+import 'package:haven/src/pages/map_shell.dart';
 
 import 'map_shell_burst_collaborators_test.dart' show methodSource;
 
@@ -227,6 +228,20 @@ void main() {
       );
     });
 
+    test("MapShell hands the gate the location service's launch reports",
+        () {
+      expect(
+        _flat(source),
+        contains(
+          'Stream<void> get locationLaunches => '
+          '_geolocatorService?.locationLaunches ?? '
+          'const Stream<void>.empty();',
+        ),
+        reason: 'a flag the native side sets after the mount read it would '
+            'never be read again in a process no lifecycle message reaches',
+      );
+    });
+
     test('the launch may resume only once the consent has loaded, sharing is '
         'on and the CURRENT disclosure is accepted; then it waits for the '
         'roster, bounded', () {
@@ -319,6 +334,64 @@ void main() {
         'state == AppLifecycleState.resumed) {noteResume(); _lifecycleTurn++;',
       );
       expect(resumed, isNonNegative);
+    });
+  });
+
+  // M1: an iOS process no scene has connected to is dispatched no pause, so
+  // its mount is the only place the location service learns it is away.
+  group('the foreground hint at a mount', () {
+    test('an iOS mount under the detached seed clears it', () {
+      expect(
+        MapShell.foregroundActiveAtMount(
+          lifecycle: AppLifecycleState.detached,
+          isIOS: true,
+        ),
+        isFalse,
+        reason: 'a background read could raise a permission prompt',
+      );
+    });
+
+    test('every other mount leaves it to the lifecycle handlers', () {
+      for (final lifecycle in <AppLifecycleState?>[
+        null,
+        ...AppLifecycleState.values,
+      ]) {
+        for (final isIOS in [true, false]) {
+          if (isIOS && lifecycle == AppLifecycleState.detached) continue;
+          expect(
+            MapShell.foregroundActiveAtMount(
+              lifecycle: lifecycle,
+              isIOS: isIOS,
+            ),
+            isTrue,
+            reason: '$lifecycle, isIOS=$isIOS',
+          );
+        }
+      }
+    });
+
+    test('the mount writes the service alone, from the binding, before the '
+        'gate', () {
+      final init = _flat(
+        methodSource(
+          File('lib/src/pages/map_shell.dart').readAsStringSync(),
+          className: '_MapShellState',
+          method: 'initState',
+        ),
+      );
+      final hint = init.indexOf(
+        'if (!MapShell.foregroundActiveAtMount(lifecycle: '
+        'WidgetsBinding.instance.lifecycleState, isIOS: Platform.isIOS)) '
+        '{_geolocatorService?.foregroundActive = false;}',
+      );
+      expect(hint, isNonNegative);
+      expect(hint, lessThan(init.indexOf('gateMount();')));
+      expect(
+        init,
+        isNot(contains('appForegroundProvider')),
+        reason: 'a provider written in initState is written during a build',
+      );
+      expect(init, isNot(contains('_setForegroundActive(')));
     });
   });
 

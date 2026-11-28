@@ -200,9 +200,10 @@ class IosLocationStreamStatus {
   /// Whether UIKit reports the app as backgrounded.
   final bool backgrounded;
 
-  /// Whether iOS launched this process into the background for a location
-  /// event (a significant-change or region relaunch), and the user has not
-  /// brought it to the front since. Unreadable reads `false`: no relaunch
+  /// Whether this process, started in the background, has received a location
+  /// event (a significant change — the fix that (re)starting significant-change
+  /// monitoring delivers at once included — or a relaunch-region exit) before
+  /// any scene came to the front. Unreadable reads `false`: no relaunch
   /// routing, no wait for a fix, no session start.
   final bool launchedForLocation;
 }

@@ -1,5 +1,5 @@
-/// Host-side proof of the E2E lanes' lifecycle helper, and of where the
-/// device targets use it.
+/// Host-side proof of the E2E lanes' lifecycle helpers, and of where the
+/// device targets use them.
 ///
 /// The lanes themselves cannot run here (no emulator), so what CAN be shown
 /// host-side is: the helper does what it says against a binding in the state
@@ -22,11 +22,13 @@
 @TestOn('vm')
 library;
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:analyzer/dart/analysis/utilities.dart';
 import 'package:analyzer/dart/ast/ast.dart';
 import 'package:analyzer/dart/ast/visitor.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/services/mls_session_handover.dart';
@@ -83,6 +85,16 @@ const _pumpsNoShell = <String, String>{
   'integration_test/circle_service_remove_member_test.dart':
       'pumps the circles sheet alone, over a real circle service',
 };
+
+/// The targets an iOS lane runs that pump the app: each waits, before its
+/// first test, for the platform to put the app in front.
+const _iosTargets = [
+  'integration_test/e2e/e2e_combined.dart',
+  'integration_test/e2e/e2e_profile_sharing.dart',
+  'integration_test/ios_bg_publish_test.dart',
+  'integration_test/b4_ios_real_gps_test.dart',
+  'integration_test/b7_ios_auth_tier_test.dart',
+];
 
 /// The one workflow that names every runner without running an app: it runs
 /// their `--self-test` halves.
@@ -200,6 +212,22 @@ bool _resumesBeforeEachTest(String source) {
     if (body is! BlockFunctionBody) return false;
     return body.block.statements.any(
       (s) => s.toSource() == 'resumeAppBeforeEachTest();',
+    );
+  }
+  return false;
+}
+
+/// Whether `main()` in [source] registers `setUpAll(awaitPlatformResumed)`
+/// as one of its own statements.
+bool _awaitsPlatformResumed(String source) {
+  final unit = parseString(content: source, throwIfDiagnostics: false).unit;
+  for (final declaration in unit.declarations) {
+    if (declaration is! FunctionDeclaration) continue;
+    if (declaration.name.lexeme != 'main') continue;
+    final body = declaration.functionExpression.body;
+    if (body is! BlockFunctionBody) return false;
+    return body.block.statements.any(
+      (s) => s.toSource() == 'setUpAll(awaitPlatformResumed);',
     );
   }
   return false;
@@ -498,4 +526,90 @@ void main() {
       );
     });
   }
+
+  // iOS runs the engine before any scene connects, so the scene's own
+  // `inactive` and `resumed` can land inside a target's first test.
+  group('awaitPlatformResumed', () {
+    Future<void> platformSends(AppLifecycleState state) =>
+        binding.defaultBinaryMessenger.handlePlatformMessage(
+          'flutter/lifecycle',
+          const StringCodec().encodeMessage(state.toString()),
+          (_) {},
+        );
+
+    testWidgets('waits through the resume synthesized on the way out of the '
+        "seed, and returns at the platform's own", (tester) async {
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.detached);
+      var done = false;
+      unawaited(awaitPlatformResumed(isIOS: true).then((_) => done = true));
+
+      await platformSends(AppLifecycleState.inactive);
+      await tester.pump();
+      expect(done, isFalse, reason: 'a synthesized resume released it');
+
+      await platformSends(AppLifecycleState.resumed);
+      await tester.pump();
+      expect(done, isTrue);
+    });
+
+    testWidgets('waits for a scene to give the view a size', (tester) async {
+      final size = tester.view.physicalSize;
+      addTearDown(tester.view.resetPhysicalSize);
+      tester.view.physicalSize = Size.zero;
+      var done = false;
+      unawaited(awaitPlatformResumed(isIOS: true).then((_) => done = true));
+      await tester.pump();
+      expect(done, isFalse, reason: 'a 0x0 view is no window: no scene');
+
+      tester.view.physicalSize = size;
+      await tester.pump();
+      expect(done, isTrue);
+    });
+
+    testWidgets('fails by name when the platform never puts the app in front',
+        (tester) async {
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.detached);
+      Object? failure;
+      unawaited(
+        awaitPlatformResumed(isIOS: true).catchError((Object e) {
+          failure = e;
+        }),
+      );
+      await tester.pump(kPlatformResumedWithin);
+      expect(failure, isA<TestFailure>());
+    });
+
+    testWidgets('returns at once off iOS', (tester) async {
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.detached);
+      var done = false;
+      unawaited(awaitPlatformResumed(isIOS: false).then((_) => done = true));
+      await tester.pump();
+      expect(done, isTrue);
+    });
+
+    test('the checker sees what it must', () {
+      expect(
+        _awaitsPlatformResumed(
+          'void main() { setUpAll(awaitPlatformResumed); }',
+        ),
+        isTrue,
+      );
+      expect(
+        _awaitsPlatformResumed(
+          "void main() { group('g', () { setUpAll(awaitPlatformResumed); }); }",
+        ),
+        isFalse,
+      );
+    });
+
+    for (final path in _iosTargets) {
+      test('$path waits for it before its first test', () {
+        expect(
+          _awaitsPlatformResumed(File(path).readAsStringSync()),
+          isTrue,
+          reason: 'its first test can start before the scene is in front',
+        );
+      });
+    }
+  });
 }

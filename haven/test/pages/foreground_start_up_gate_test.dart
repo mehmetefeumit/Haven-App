@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/pages/foreground_start_up_gate.dart';
+import 'package:haven/src/pages/map_shell.dart';
 
 class _Probe extends StatefulWidget {
   const _Probe({
@@ -19,6 +20,7 @@ class _Probe extends StatefulWidget {
     this.poolOpen,
     this.launched,
     this.mayResume,
+    this.launches,
     this.consentStepShown = true,
   });
 
@@ -37,6 +39,10 @@ class _Probe extends StatefulWidget {
   /// The launch's reads (consent, current disclosure, roster); null answers
   /// true.
   final Future<bool>? mayResume;
+
+  /// The native side's reports that it has just set the launch flag; null
+  /// reports nothing.
+  final Stream<void>? launches;
 
   /// What the consent step answers: false when the app left the front first.
   final bool consentStepShown;
@@ -77,6 +83,13 @@ class _ProbeState extends State<_Probe>
   @override
   Future<bool> launchedForLocation() =>
       widget.launched?.call() ?? Future.value(false);
+
+  @override
+  Stream<void> get locationLaunches =>
+      widget.launches ?? const Stream<void>.empty();
+
+  /// The gate's lifecycle, as MapShell's burst start reads it.
+  AppLifecycleState? get effective => effectiveLifecycle;
 
   @override
   Future<bool> launchMayResume() => widget.mayResume ?? Future.value(true);
@@ -157,6 +170,7 @@ void main() {
     Completer<void>? poolOpen,
     Future<bool> Function()? launched,
     Future<bool>? mayResume,
+    Stream<void>? launches,
     bool consentStepShown = true,
   }) async {
     // Inside the test's own zone, so its completion runs on the test's clock.
@@ -178,6 +192,7 @@ void main() {
         poolOpen: poolOpen,
         launched: launched,
         mayResume: mayResume,
+        launches: launches,
         consentStepShown: consentStepShown,
       ),
     );
@@ -490,6 +505,245 @@ void main() {
         'pause',
         'launch resume',
       ]);
+    });
+  });
+
+  _ProbeState probe(WidgetTester tester) =>
+      tester.state<_ProbeState>(find.byType(_Probe));
+
+  /// What the embedder sends: walked through every state on the way.
+  Future<void> platformSends(
+    WidgetTester tester,
+    AppLifecycleState state,
+  ) async {
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      'flutter/lifecycle',
+      const StringCodec().encodeMessage(state.toString()),
+      (_) {},
+    );
+    await tester.pump();
+  }
+
+  // An iOS process no scene has connected to is sent no lifecycle message:
+  // the binding reads the `detached` seed for as long as it lives, and a
+  // burst that read it there would want no live session.
+  group('a location launch no scene has connected to', () {
+    testWidgets('the pause the gate takes over the seed reads as paused, '
+        'until the platform sends a state', (tester) async {
+      await mountUnder(
+        tester,
+        AppLifecycleState.detached,
+        launched: () => Future.value(true),
+      );
+      consent.complete();
+      await tester.pump();
+      expect(log, ['stamp', 'pause', 'launch resume']);
+      expect(
+        tester.binding.lifecycleState,
+        AppLifecycleState.detached,
+        reason: 'premise: nothing replaced the seed',
+      );
+      expect(probe(tester).effective, AppLifecycleState.paused);
+
+      await platformSends(tester, AppLifecycleState.inactive);
+      expect(
+        probe(tester).effective,
+        AppLifecycleState.inactive,
+        reason: "once the platform speaks, the binding's read is the one",
+      );
+    });
+
+    testWidgets("the burst's start wants the session the seed would refuse",
+        (tester) async {
+      await mountUnder(
+        tester,
+        AppLifecycleState.detached,
+        launched: () => Future.value(true),
+      );
+      await tester.pump();
+      bool wanted(AppLifecycleState? lifecycle) => MapShell.liveSyncWanted(
+        lifecycle: lifecycle,
+        isIOS: true,
+        backgroundSharingEnabled: true,
+      );
+      expect(
+        wanted(tester.binding.lifecycleState),
+        isFalse,
+        reason: 'premise: the raw read wants none',
+      );
+      expect(
+        wanted(probe(tester).effective),
+        isTrue,
+        reason: 'a relaunch with live sync would publish nothing, every tick',
+      );
+    });
+
+    testWidgets('a process that owes no launch reads the seed as it is', (
+      tester,
+    ) async {
+      await mountUnder(tester, AppLifecycleState.detached);
+      consent.complete();
+      await tester.pump();
+      expect(log, ['stamp']);
+      expect(probe(tester).effective, AppLifecycleState.detached);
+    });
+
+    testWidgets("a pause taken under inactive leaves the binding's read", (
+      tester,
+    ) async {
+      await mountUnder(
+        tester,
+        AppLifecycleState.inactive,
+        launched: () => Future.value(true),
+      );
+      await tester.pump();
+      expect(log, ['stamp', 'pause', 'launch resume']);
+      expect(probe(tester).effective, AppLifecycleState.inactive);
+    });
+  });
+
+  // The native side marks a location launch at the process's first location
+  // delivery, which can land after the mount read the flag; it then reports
+  // it once (`locationLaunch`).
+  group('the native report of a location launch', () {
+    late StreamController<void> reports;
+    late bool native;
+    late int reads;
+
+    setUp(() {
+      reports = StreamController<void>.broadcast();
+      native = false;
+      reads = 0;
+    });
+    tearDown(() => reports.close());
+
+    Future<bool> read() {
+      reads++;
+      return Future.value(native);
+    }
+
+    int count(String entry) => log.where((e) => e == entry).length;
+
+    testWidgets('a launch marked after the mount read the flag takes the '
+        'pause at its report', (tester) async {
+      await mountUnder(
+        tester,
+        AppLifecycleState.detached,
+        launched: read,
+        launches: reports.stream,
+      );
+      consent.complete();
+      await tester.pump();
+      expect(log, ['stamp'], reason: 'premise: the mount read it unset');
+
+      native = true;
+      reports.add(null);
+      await tester.pump();
+      expect(log, ['stamp', 'pause', 'launch resume']);
+      expect(probe(tester).effective, AppLifecycleState.paused);
+    });
+
+    testWidgets("a report that lands while the mount's read is in flight is "
+        'read again after it', (tester) async {
+      final mountRead = Completer<bool>();
+      var first = true;
+      await mountUnder(
+        tester,
+        AppLifecycleState.detached,
+        launched: () {
+          if (!first) return read();
+          first = false;
+          return mountRead.future;
+        },
+        launches: reports.stream,
+      );
+      native = true;
+      reports.add(null);
+      await tester.pump();
+      expect(log, ['stamp'], reason: 'premise: the mount is still reading');
+
+      mountRead.complete(false);
+      await tester.pump();
+      expect(log, ['stamp', 'pause', 'launch resume']);
+    });
+
+    testWidgets('a report after a lifecycle change reached the shell takes '
+        'no pause', (tester) async {
+      await mountUnder(
+        tester,
+        AppLifecycleState.detached,
+        launched: read,
+        launches: reports.stream,
+      );
+      consent.complete();
+      await platformSends(tester, AppLifecycleState.inactive);
+      final before = [...log];
+      expect(before, contains('resume'), reason: 'premise: a change landed');
+
+      native = true;
+      reports.add(null);
+      await tester.pump();
+      expect(log, before, reason: 'a report overrode the shell its owner has');
+      expect(count('pause'), 0);
+    });
+
+    testWidgets('a lifecycle change that lands while the report is read '
+        'again wins', (tester) async {
+      final mayResume = Completer<bool>();
+      await mountUnder(
+        tester,
+        AppLifecycleState.detached,
+        launched: read,
+        mayResume: mayResume.future,
+        launches: reports.stream,
+      );
+      await tester.pump();
+      native = true;
+      reports.add(null);
+      await tester.pump();
+      await platformSends(tester, AppLifecycleState.inactive);
+      mayResume.complete(true);
+      await tester.pump();
+      expect(log, isNot(contains('pause')));
+    });
+
+    testWidgets('a report for a launch already taken takes no second pause '
+        'and reads nothing', (tester) async {
+      native = true;
+      await mountUnder(
+        tester,
+        AppLifecycleState.detached,
+        launched: read,
+        launches: reports.stream,
+      );
+      await tester.pump();
+      expect(log, ['stamp', 'pause', 'launch resume']);
+      expect(reads, 1);
+
+      reports.add(null);
+      await tester.pump();
+      expect(count('pause'), 1, reason: 'a second pause cancels the burst');
+      expect(reads, 1);
+    });
+
+    testWidgets('a report for a launch the current disclosure does not cover '
+        'takes no pause, and the next pause is handed it', (tester) async {
+      await mountUnder(
+        tester,
+        AppLifecycleState.detached,
+        launched: read,
+        mayResume: Future.value(false),
+        launches: reports.stream,
+      );
+      await tester.pump();
+      native = true;
+      reports.add(null);
+      await tester.pump();
+      expect(log, ['stamp'], reason: 'an older acceptance took a pause');
+
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      await tester.pump();
+      expect(log, ['stamp', 'pause', 'launch receiveOnly']);
     });
   });
 

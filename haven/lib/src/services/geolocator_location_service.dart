@@ -1005,9 +1005,9 @@ class GeolocatorLocationService implements LocationService {
       // (`INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT`).
       //
       // The lifecycle is read from the NATIVE session, not from
-      // [_foregroundActive]: a background-launched process (an SLC/region
-      // relaunch, which builds this service before any lifecycle callback)
-      // would otherwise look foregrounded and start a one-shot that cannot
+      // [_foregroundActive]: a background-launched process (which builds this
+      // service before any lifecycle callback, and may never get one) would
+      // otherwise look foregrounded and start a one-shot that cannot
       // complete. An unreadable status counts as backgrounded — fail closed.
       if (_isIOS && (await _iosSource.status()).backgrounded) {
         Position? lastPosition;

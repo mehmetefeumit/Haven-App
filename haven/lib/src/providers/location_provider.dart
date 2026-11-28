@@ -128,8 +128,8 @@ final locationStreamProvider = StreamProvider<Position>((ref) {
   // would cancel the kept iOS session on the pause write and rebuild it at
   // the resume frame — the one restart iOS refuses to honour.
   if (!ref.read(appForegroundProvider)) {
-    // Built while not foregrounded: a background launch (an iOS SLC/region
-    // relaunch before the first frame) or a forced flush. Never START a
+    // Built while not foregrounded: a background launch (an iOS process no
+    // scene may ever connect to) or a forced flush. Never START a
     // session here. The resume write rebuilds this provider — this branch is
     // the only place that watches the foreground state.
     ref.watch(appForegroundProvider);

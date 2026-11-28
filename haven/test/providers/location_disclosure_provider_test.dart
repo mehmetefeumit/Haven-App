@@ -114,26 +114,30 @@ void main() {
       },
     );
 
-    testWidgets('fresh state: Not Now returns false and does not persist key', (
-      tester,
-    ) async {
-      SharedPreferences.setMockInitialValues({});
+    testWidgets(
+      'fresh state: Not Now returns false and does not persist key',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
 
-      final result = ValueNotifier<bool?>(null);
-      await tester.pumpWidget(
-        buildHost(includeBackground: false, result: result),
-      );
+        final result = ValueNotifier<bool?>(null);
+        await tester.pumpWidget(
+          buildHost(includeBackground: false, result: result),
+        );
 
-      await tester.tap(find.text('Trigger'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(WidgetKeys.locationDisclosureNotNow));
-      await tester.pumpAndSettle();
+        await tester.tap(find.text('Trigger'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(WidgetKeys.locationDisclosureNotNow));
+        await tester.pumpAndSettle();
 
-      expect(result.value, isFalse);
+        expect(result.value, isFalse);
 
-      final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getBool(kLocationDisclosureAcceptedKey), isNot(isTrue));
-    });
+        final prefs = await SharedPreferences.getInstance();
+        expect(
+          prefs.getBool(kLocationDisclosureAcceptedKey),
+          isNot(isTrue),
+        );
+      },
+    );
 
     testWidgets(
       'short-circuit: foreground already accepted — no dialog shown',
@@ -154,138 +158,151 @@ void main() {
         await tester.pump();
 
         // No dialog should have appeared.
-        expect(find.byKey(WidgetKeys.locationDisclosureAgree), findsNothing);
+        expect(
+          find.byKey(WidgetKeys.locationDisclosureAgree),
+          findsNothing,
+        );
 
         // Future must have resolved to true immediately.
         expect(result.value, isTrue);
       },
     );
 
-    testWidgets('background separation: foreground accepted but background not'
-        ' — dialog is shown for background request', (tester) async {
-      // Only foreground key is set; background key is absent.
-      SharedPreferences.setMockInitialValues({
-        kLocationDisclosureAcceptedKey: true,
-      });
+    testWidgets(
+      'background separation: foreground accepted but background not'
+      ' — dialog is shown for background request',
+      (tester) async {
+        // Only foreground key is set; background key is absent.
+        SharedPreferences.setMockInitialValues({
+          kLocationDisclosureAcceptedKey: true,
+        });
 
-      final result = ValueNotifier<bool?>(null);
-      await tester.pumpWidget(
-        buildHost(includeBackground: true, result: result),
-      );
+        final result = ValueNotifier<bool?>(null);
+        await tester.pumpWidget(
+          buildHost(includeBackground: true, result: result),
+        );
 
-      await tester.tap(find.text('Trigger'));
-      await tester.pumpAndSettle();
+        await tester.tap(find.text('Trigger'));
+        await tester.pumpAndSettle();
 
-      // Dialog must appear because background consent is still needed.
-      expect(find.byKey(WidgetKeys.locationDisclosureAgree), findsOneWidget);
+        // Dialog must appear because background consent is still needed.
+        expect(
+          find.byKey(WidgetKeys.locationDisclosureAgree),
+          findsOneWidget,
+        );
 
-      // Dismiss without confirming to avoid leaking state.
-      await tester.tap(find.byKey(WidgetKeys.locationDisclosureNotNow));
-      await tester.pumpAndSettle();
-      expect(result.value, isFalse);
-    });
+        // Dismiss without confirming to avoid leaking state.
+        await tester.tap(find.byKey(WidgetKeys.locationDisclosureNotNow));
+        await tester.pumpAndSettle();
+        expect(result.value, isFalse);
+      },
+    );
 
-    testWidgets('background accept persists both fg and bg keys', (
-      tester,
-    ) async {
-      SharedPreferences.setMockInitialValues({});
+    testWidgets(
+      'background accept persists both fg and bg keys',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
 
-      final result = ValueNotifier<bool?>(null);
-      await tester.pumpWidget(
-        buildHost(includeBackground: true, result: result),
-      );
+        final result = ValueNotifier<bool?>(null);
+        await tester.pumpWidget(
+          buildHost(includeBackground: true, result: result),
+        );
 
-      await tester.tap(find.text('Trigger'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
-      await tester.pumpAndSettle();
+        await tester.tap(find.text('Trigger'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+        await tester.pumpAndSettle();
 
-      expect(result.value, isTrue);
+        expect(result.value, isTrue);
 
-      final prefs = await SharedPreferences.getInstance();
-      // Background acceptance implies foreground acceptance.
-      expect(prefs.getBool(kLocationDisclosureAcceptedKey), isTrue);
-      expect(prefs.getBool(kLocationDisclosureBackgroundAcceptedKey), isTrue);
-    });
+        final prefs = await SharedPreferences.getInstance();
+        // Background acceptance implies foreground acceptance.
+        expect(prefs.getBool(kLocationDisclosureAcceptedKey), isTrue);
+        expect(
+          prefs.getBool(kLocationDisclosureBackgroundAcceptedKey),
+          isTrue,
+        );
+      },
+    );
 
-    testWidgets('persists the acceptance BEFORE it publishes it in memory', (
-      tester,
-    ) async {
-      // THE ORDERING ANOTHER READER DEPENDS ON.
-      //
-      // `LocationAccessNotifier._disclosureAccepted` gates the whole
-      // location-access banner and consults SharedPreferences and nothing
-      // else. It used to read this controller's in-memory state first, with
-      // a doc claiming that closed a race — but the race cannot happen in
-      // this direction: prefs is written and awaited before `state` is
-      // touched, and the only other write path (`_syncFromPrefs`) derives
-      // memory FROM prefs. So in-memory-true always implied prefs-true, the
-      // extra read was unreachable as load-bearing, and deleting it changed
-      // nothing. It is gone.
-      //
-      // Which makes THIS the invariant to pin. If someone later reorders
-      // `ensureDisclosed` to publish in memory first and persist afterwards,
-      // the deleted read would silently become load-bearing again and a
-      // probe landing in that window would misread a consenting user as
-      // un-disclosed — staying quiet through a real outage. Asserting the
-      // two flags at the end could not catch that; both are true by then.
-      // So the pref is sampled AT the moment the state changes.
-      SharedPreferences.setMockInitialValues({});
-      final prefs = await SharedPreferences.getInstance();
+    testWidgets(
+      'persists the acceptance BEFORE it publishes it in memory',
+      (tester) async {
+        // THE ORDERING ANOTHER READER DEPENDS ON.
+        //
+        // `LocationAccessNotifier._disclosureAccepted` gates the whole
+        // location-access banner and consults SharedPreferences and nothing
+        // else. It used to read this controller's in-memory state first, with
+        // a doc claiming that closed a race — but the race cannot happen in
+        // this direction: prefs is written and awaited before `state` is
+        // touched, and the only other write path (`_syncFromPrefs`) derives
+        // memory FROM prefs. So in-memory-true always implied prefs-true, the
+        // extra read was unreachable as load-bearing, and deleting it changed
+        // nothing. It is gone.
+        //
+        // Which makes THIS the invariant to pin. If someone later reorders
+        // `ensureDisclosed` to publish in memory first and persist afterwards,
+        // the deleted read would silently become load-bearing again and a
+        // probe landing in that window would misread a consenting user as
+        // un-disclosed — staying quiet through a real outage. Asserting the
+        // two flags at the end could not catch that; both are true by then.
+        // So the pref is sampled AT the moment the state changes.
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
 
-      bool? prefAtPublish;
-      final container = ProviderContainer();
-      addTearDown(container.dispose);
-      final controller = container.read(
-        locationDisclosureControllerProvider.notifier,
-      );
-      // Fires synchronously on every `state = ...`, so it observes the
-      // ordering rather than the outcome.
-      controller.addListener((state) {
-        if (state.foregroundAccepted) {
-          prefAtPublish ??= prefs.getBool(kLocationDisclosureAcceptedKey);
-        }
-      });
+        bool? prefAtPublish;
+        final container = ProviderContainer();
+        addTearDown(container.dispose);
+        final controller = container.read(
+          locationDisclosureControllerProvider.notifier,
+        );
+        // Fires synchronously on every `state = ...`, so it observes the
+        // ordering rather than the outcome.
+        controller.addListener((state) {
+          if (state.foregroundAccepted) {
+            prefAtPublish ??= prefs.getBool(kLocationDisclosureAcceptedKey);
+          }
+        });
 
-      final result = ValueNotifier<bool?>(null);
-      await tester.pumpWidget(
-        UncontrolledProviderScope(
-          container: container,
-          child: MaterialApp(
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: Scaffold(
-              body: Consumer(
-                builder: (context, ref, _) => ElevatedButton(
-                  onPressed: () async {
-                    result.value = await ref
-                        .read(locationDisclosureControllerProvider.notifier)
-                        .ensureDisclosed(context, includeBackground: false);
-                  },
-                  child: const Text('Trigger'),
+        final result = ValueNotifier<bool?>(null);
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
+              home: Scaffold(
+                body: Consumer(
+                  builder: (context, ref, _) => ElevatedButton(
+                    onPressed: () async {
+                      result.value = await ref
+                          .read(locationDisclosureControllerProvider.notifier)
+                          .ensureDisclosed(context, includeBackground: false);
+                    },
+                    child: const Text('Trigger'),
+                  ),
                 ),
               ),
             ),
           ),
-        ),
-      );
+        );
 
-      await tester.tap(find.text('Trigger'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
-      await tester.pumpAndSettle();
+        await tester.tap(find.text('Trigger'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
+        await tester.pumpAndSettle();
 
-      expect(result.value, isTrue);
-      expect(
-        prefAtPublish,
-        isTrue,
-        reason:
-            'The persisted flag must already be set the instant the '
-            'in-memory state says accepted. Everything that reads consent '
-            'from prefs alone — the location-access banner\'s gate, the '
-            'publishers — depends on prefs never being behind memory.',
-      );
-    });
+        expect(result.value, isTrue);
+        expect(
+          prefAtPublish,
+          isTrue,
+          reason: 'The persisted flag must already be set the instant the '
+              'in-memory state says accepted. Everything that reads consent '
+              'from prefs alone — the location-access banner\'s gate, the '
+              'publishers — depends on prefs never being behind memory.',
+        );
+      },
+    );
   });
 
   group('versioned background consent (OD-R3)', () {
@@ -319,10 +336,7 @@ void main() {
       // change, so its users are not asked again.
       expect(kAndroidBackgroundDisclosureVersion, 2);
       expect(kBackgroundDisclosureVersion, 3);
-      expect(
-        resumeDisclosureVersion(isIOS: true),
-        kBackgroundDisclosureVersion,
-      );
+      expect(resumeDisclosureVersion(isIOS: true), kBackgroundDisclosureVersion);
       expect(
         resumeDisclosureVersion(isIOS: false),
         kAndroidBackgroundDisclosureVersion,
@@ -420,8 +434,7 @@ void main() {
       expect(
         find.text(en.locationDisclosureBackgroundIos),
         findsOneWidget,
-        reason:
-            'version-2 consent passed for sharing that starts again '
+        reason: 'version-2 consent passed for sharing that starts again '
             'without movement',
       );
       await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
@@ -466,29 +479,30 @@ void main() {
       ValueNotifier<bool?> result, {
       bool force = false,
       bool isIOS = false,
-    }) => ProviderScope(
-      overrides: [
-        locationDisclosureControllerProvider.overrideWith(
-          (_) => LocationDisclosureController(isIOS: isIOS),
-        ),
-      ],
-      child: MaterialApp(
-        localizationsDelegates: AppLocalizations.localizationsDelegates,
-        supportedLocales: AppLocalizations.supportedLocales,
-        home: Scaffold(
-          body: Consumer(
-            builder: (context, ref, _) => ElevatedButton(
-              onPressed: () async {
-                result.value = await ref
-                    .read(locationDisclosureControllerProvider.notifier)
-                    .reconfirmBackgroundIfOwed(context, force: force);
-              },
-              child: const Text('Trigger'),
+    }) =>
+        ProviderScope(
+          overrides: [
+            locationDisclosureControllerProvider.overrideWith(
+              (_) => LocationDisclosureController(isIOS: isIOS),
+            ),
+          ],
+          child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(
+              body: Consumer(
+                builder: (context, ref, _) => ElevatedButton(
+                  onPressed: () async {
+                    result.value = await ref
+                        .read(locationDisclosureControllerProvider.notifier)
+                        .reconfirmBackgroundIfOwed(context, force: force);
+                  },
+                  child: const Text('Trigger'),
+                ),
+              ),
             ),
           ),
-        ),
-      ),
-    );
+        );
 
     Future<void> trigger(WidgetTester tester) async {
       await tester.tap(find.text('Trigger'));
@@ -572,12 +586,11 @@ void main() {
         'version 2 was already shown; Agree records the current version', (
       tester,
     ) async {
-      final v2 = <String, Object>{
+      SharedPreferences.setMockInitialValues({
         ...v1SharingOn,
         kLocationDisclosureBackgroundVersionKey: 2,
         kLocationDisclosureBackgroundPromptedVersionKey: 2,
-      };
-      SharedPreferences.setMockInitialValues(v2);
+      });
       final en = await AppLocalizations.delegate.load(const Locale('en'));
       final result = ValueNotifier<bool?>(null);
       await tester.pumpWidget(host(result, isIOS: true));
@@ -668,10 +681,7 @@ void main() {
         reason: 'an older acceptance is never asked for "all the time"',
       );
       expect(due(version: v2), ForegroundConsentStep.allTime);
-      expect(
-        due(version: v2, allTimePrompted: true),
-        ForegroundConsentStep.none,
-      );
+      expect(due(version: v2, allTimePrompted: true), ForegroundConsentStep.none);
       expect(due(version: v2, allTime: granted), ForegroundConsentStep.none);
       expect(due(sharingOn: false), ForegroundConsentStep.none);
     });
@@ -743,9 +753,8 @@ void main() {
     setUp(() => resumedReads = []);
 
     testWidgets('Android 11+ with an older acceptance: ONE dialog, carrying '
-        'the all-time step; Agree records the current version, then requests', (
-      tester,
-    ) async {
+        'the all-time step; Agree records the current version, then requests',
+        (tester) async {
       SharedPreferences.setMockInitialValues({
         kBackgroundSharingKey: true,
         kLocationDisclosureAcceptedKey: true,
@@ -853,9 +862,8 @@ void main() {
       expect(resumedReads, isEmpty, reason: 'nothing to show, nothing read');
     });
 
-    testWidgets('an app that left the front shows nothing and owes the step', (
-      tester,
-    ) async {
+    testWidgets('an app that left the front shows nothing and owes the step',
+        (tester) async {
       SharedPreferences.setMockInitialValues({
         kBackgroundSharingKey: true,
         kLocationDisclosureAcceptedKey: true,

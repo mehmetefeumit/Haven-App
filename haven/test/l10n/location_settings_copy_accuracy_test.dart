@@ -22,18 +22,25 @@
 //   (b) the ARROW sentence names this locale's arrow term AND its status-bar
 //       term, and neither its "blue" word nor its bar stem; the BAR sentence
 //       and the While-In-Use note name BOTH the bar stem and the colour;
-//   (c) the While-In-Use NOTE names this locale's "Always" term, says the app
-//       is closed and names this locale's unit for metres — what 'Always'
-//       buys since the owner's 2026-11-26 decision (OD-R1) is sharing that
-//       starts again after Haven is closed, ONCE THE USER HAS MOVED — and no
-//       longer carries this locale's words for the retired "catch up on your
-//       circles" clause, which promised a receive-only wake. The localized pin
-//       on INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT.
+//   (c) the While-In-Use NOTE names this locale's "Always" term and says the
+//       app is closed — what 'Always' buys since the owner's 2026-11-26
+//       decision (OD-R1) is sharing that starts again after Haven is closed —
+//       and names NO distance: until 2026-11-28 that needed the user to have
+//       moved a few hundred metres, and since owner decision D4 a background
+//       app refresh resumes it with no movement at all, so a unit of distance
+//       in this note can only be the old, now false, condition. Nor does it
+//       carry this locale's words for the retired "catch up on your circles"
+//       clause, which promised a receive-only wake. The localized pin on
+//       INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT.
 //
 // The "closed" and "metres" entries are short stems (a verb root, a unit
 // noun), so a retranslation that words the sentence differently still
-// satisfies them; the retired-clause entries are the exact words of the old
-// translation, so an untouched one is a red test.
+// matches them, and a translation left at the old condition still carries
+// its unit; the retired-clause entries are the exact words of the old
+// translation, so an untouched one is a red test. That the note says sharing
+// can start again WITHOUT movement is asserted in English by
+// `test/lints/background_claim_accuracy_test.dart`; in the other locales it is
+// the reviewer half of the l10n workflow, as below.
 //
 // Two traps this guard was nearly built with, pulling in opposite directions.
 //
@@ -131,7 +138,8 @@ class _Vocabulary {
   /// survives whichever construction a translation picks.
   final List<String> closesTheApp;
 
-  /// This locale's unit for metres — the movement a resumption needs.
+  /// This locale's unit for metres. Forbidden in the While-In-Use note: the
+  /// distance was the pre-D4 condition for a resumption, which needs none now.
   final List<String> metres;
 
   /// The distinctive words of the OLD, now-false single-sentence card.
@@ -489,8 +497,8 @@ void main() {
         // `INV-L-IOS-RELAUNCH-RESUMES-ONLY-UNDER-ALWAYS-AND-CURRENT-CONSENT`:
         // this note is the one string in every locale that tells the
         // While-Using cohort what "Always" buys them — sharing that starts
-        // again after Haven is closed, once they have moved — and nothing else
-        // asserts that claim in the twelve translations.
+        // again after Haven is closed, even if they have not moved — and
+        // nothing else asserts that claim in the twelve translations.
         const key = 'locationSettingsIosLimitedNote';
         final value = _cardStrings(l).firstWhere((e) => e.$1 == key).$2;
         expect(
@@ -507,9 +515,10 @@ void main() {
         );
         expect(
           violations(value, vocabulary.metres),
-          isNotEmpty,
-          reason: '$code/$key must name the movement a resumption needs, or '
-              'it promises one the user may never get — "$value"',
+          isEmpty,
+          reason: '$code/$key still makes a few hundred metres of movement '
+              'the condition, which owner decision D4 made false: a background '
+              'app refresh resumes sharing with no movement — "$value"',
         );
         expect(
           violations(value, vocabulary.oldNote),

@@ -24,6 +24,20 @@
 #      `draft: true` (a prerelease would otherwise be created published), and
 #      that job publishes it after the upload. v0.1.16's simulator asset was
 #      refused because a second job attached it after the first had published.
+#   G9 the TestFlight job runs check_ios_app_sdk.sh before uploading, and
+#      launch-gate-ios.yml runs it on the candidate before launching it: from
+#      April 2027 App Store Connect refuses a build below the iOS 27 SDK.
+#   G10 every job that builds for iOS or boots a simulator runs on the
+#      TestFlight job's runner and selects its Xcode before building, and that
+#      runner is an `xcode-NN` image with NN at least check_ios_app_sdk.sh's
+#      IOS_SDK_FLOOR: the gate and the lanes test what TestFlight receives, and
+#      the label cannot fall below the floor the archive is held to.
+#   G11 launch-gate-ios.yml runs the app's XCTest bundle (RunnerTests) on the
+#      booted simulator after the legs, and a run in which no test case passed
+#      fails it.
+#
+# G4 and G9 read a script only from a step's `run:` line, so a comment naming
+# it, or the call commented out, is not a check that runs.
 #
 # Usage:
 #   bash scripts/ci/check_release_launch_gated.sh             # check the tree
@@ -37,8 +51,13 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly RELEASE_REL='.github/workflows/release-build.yml'
 readonly CI_REL='.github/workflows/ci.yml'
 readonly VERDICT_REL='scripts/ci/check_ci_verdict.sh'
+readonly LAUNCH_GATE_IOS_REL='.github/workflows/launch-gate-ios.yml'
+readonly SDK_CHECK_REL='scripts/ci/check_ios_app_sdk.sh'
+# What makes a job an Apple-toolchain job (G10): it builds for iOS or boots a
+# simulator. Read from lines that are neither comments nor a --self-test.
+export APPLE_BUILD_ERE='boot-ios-sim\.sh|flutter build (ios|ipa)|build_release\.sh ipa|xcodebuild|aarch64-apple-ios'
 # Pinned, because a mutation that stops running is a deleted check.
-readonly SELF_TEST_MUTATIONS=14
+readonly SELF_TEST_MUTATIONS=29
 
 # The block of one top-level job (`  <key>:` up to the next one).
 job_block() { # <workflow> <job key>
@@ -67,10 +86,32 @@ needs_has() { # <workflow> <job key> <needed>
     | tr ',' '\n' | grep -qx -- "$3"
 }
 
+# Whether a job runs <script> from a step's `run:` line before its `fastlane
+# ios upload` run line.
+runs_before_upload() { # <workflow> <job key> <script ERE>
+  job_block "$1" "$2" | S="$3" awk '
+    /^[[:space:]]*(-[[:space:]]+)?run:[[:space:]]/ && $0 ~ ENVIRON["S"] && !up { checked = 1 }
+    /^[[:space:]]*(-[[:space:]]+)?run:[[:space:]]+bundle exec fastlane ios upload/ { up = 1 }
+    END { exit !(checked && up) }'
+}
+
+# "<runs-on>\t<xcode-versions, space-joined>\t<1 when setup-xcode precedes the
+# first build line, else 0>" for one job.
+toolchain_of() { # <workflow> <job key>
+  job_block "$1" "$2" | awk '
+    /^[[:space:]]*#/ { next }
+    /^    runs-on:/ { r = $0; sub(/^    runs-on:[[:space:]]*/, "", r); sub(/[[:space:]]+#.*$/, "", r) }
+    /^[[:space:]]+uses: maxim-lobanov\/setup-xcode@/ && !built { selected = 1 }
+    /^          xcode-version:/ { v = $0; sub(/^          xcode-version:[[:space:]]*/, "", v); xc = xc (xc == "" ? "" : " ") v }
+    $0 ~ ENVIRON["APPLE_BUILD_ERE"] && $0 !~ /--self-test/ { built = 1 }
+    END { printf "%s\t%s\t%d\n", r, xc, selected }'
+}
+
 check() { # <root>
   local root="$1" rel="$1/${RELEASE_REL}" ci="$1/${CI_REL}" verdict="$1/${VERDICT_REL}"
+  local lg="$1/${LAUNCH_GATE_IOS_REL}" sdk="$1/${SDK_CHECK_REL}"
   local f errs=0 key publishers ios_jobs writers
-  for f in "${rel}" "${ci}" "${verdict}"; do
+  for f in "${rel}" "${ci}" "${verdict}" "${lg}" "${sdk}"; do
     [[ -r "${f}" ]] || { echo "ERROR: ${f#"${root}"/} not found" >&2; return 2; }
   done
   err() { echo "FAIL $1" >&2; errs=$((errs + 1)); }
@@ -96,12 +137,47 @@ check() { # <root>
   [[ -n "${ios_jobs}" ]] || err "G4: no job uploads to TestFlight (expected ios)"
   for key in ${ios_jobs}; do
     needs_has "${rel}" "${key}" ios-launch-gate || err "G4: ${key} uploads to TestFlight without needing ios-launch-gate"
-    job_block "${rel}" "${key}" | awk '
-      /check_ios_app_loadable\.sh/ && !up { checked = 1 }
-      /fastlane ios upload/ { up = 1 }
-      END { exit !(checked && up) }' \
+    runs_before_upload "${rel}" "${key}" 'check_ios_app_loadable\.sh' \
       || err "G4: ${key} must run check_ios_app_loadable.sh before fastlane ios upload"
+    runs_before_upload "${rel}" "${key}" 'check_ios_app_sdk\.sh' \
+      || err "G9: ${key} must run check_ios_app_sdk.sh before fastlane ios upload"
   done
+  awk '
+    /^[[:space:]]*(-[[:space:]]+)?run:[[:space:]]+bash scripts\/ci\/check_ios_app_sdk\.sh --simulator "\$\{CANDIDATE_APP\}"/ && !drive { checked = 1 }
+    /^[[:space:]]*command:[[:space:]]+bash tooling\/e2e\/ci\/run-launch-gate-ios\.sh / { drive = 1 }
+    END { exit !(checked && drive) }' "${lg}" \
+    || err "G9: launch-gate-ios.yml must run check_ios_app_sdk.sh --simulator on the candidate before launching it"
+
+  local tf tf_runs tf_xc floor wf runs xc sel
+  floor="$(sed -n 's/^readonly IOS_SDK_FLOOR=\([0-9][0-9]*\)$/\1/p' "${sdk}")"
+  [[ -n "${floor}" ]] || err "G10: ${SDK_CHECK_REL} declares no IOS_SDK_FLOOR"
+  for key in ${ios_jobs}; do
+    IFS=$'\t' read -r tf_runs tf_xc sel <<<"$(toolchain_of "${rel}" "${key}")"
+    if [[ ! "${tf_runs}" =~ ^xcode-([0-9]+)(-xlarge)?$ ]] || [[ -z "${floor}" ]] || (( BASH_REMATCH[1] < floor )); then
+      err "G10: ${key} must run on an xcode-NN image at or above the iOS SDK floor (${floor:-?}), not '${tf_runs}'"
+    fi
+    [[ -n "${tf_xc}" ]] || err "G10: ${key} selects no Xcode"
+    tf="${key}"
+  done
+  for wf in "${root}"/.github/workflows/*.yml; do
+    for key in $(awk '/^jobs:/ { j = 1; next } j && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { k = $1; sub(/:$/, "", k); print k }' "${wf}"); do
+      # Read to the end: a `grep -q` that stops early can SIGPIPE its writer,
+      # which pipefail would turn into a job skipped unseen.
+      job_block "${wf}" "${key}" | grep -v '^[[:space:]]*#' | grep -v -- '--self-test' \
+        | grep -E -- "${APPLE_BUILD_ERE}" >/dev/null || continue
+      IFS=$'\t' read -r runs xc sel <<<"$(toolchain_of "${wf}" "${key}")"
+      [[ -n "${tf:-}" && "${runs}" == "${tf_runs}" && "${xc}" == "${tf_xc}" && "${sel}" == 1 ]] \
+        || err "G10: ${wf##*/} ${key} must run on ${tf_runs:-?} and select xcode-version ${tf_xc:-?} before it builds, as the TestFlight job does (has '${runs}', '${xc}')"
+    done
+  done
+
+  awk '
+    /^[[:space:]]*command:[[:space:]]+bash tooling\/e2e\/ci\/run-launch-gate-ios\.sh / { drive = 1 }
+    drive && /xcodebuild test -workspace Runner\.xcworkspace -scheme Runner/ { xc = 1 }
+    drive && xc && /-only-testing:RunnerTests/ { only = 1 }
+    drive && /echo "::error::RunnerTests ran no test case"/ { refuse = 1 }
+    END { exit !(only && refuse) }' "${lg}" \
+    || err "G11: launch-gate-ios.yml must run RunnerTests (xcodebuild test -only-testing:RunnerTests) after the drive, failing a run in which no test case passed"
 
   for key in $(jobs_matching "${rel}" 'app-ios-simulator\.zip' 'softprops/action-gh-release'); do
     needs_has "${rel}" "${key}" ios-launch-gate || err "G5: ${key} attaches the simulator build without needing ios-launch-gate"
@@ -126,7 +202,7 @@ check() { # <root>
   fi
 
   (( errs == 0 )) || return 1
-  echo "release launch gates wired (G1-G8)"
+  echo "release launch gates wired (G1-G11)"
 }
 
 self_test() {
@@ -134,9 +210,9 @@ self_test() {
   tmp="$(mktemp -d)"; trap 'rm -rf "${tmp}"' RETURN
   fresh() {
     rm -rf "${tmp}/r"; mkdir -p "${tmp}/r/.github/workflows" "${tmp}/r/scripts/ci"
-    cp "${REPO_ROOT}/${RELEASE_REL}" "${tmp}/r/${RELEASE_REL}"
-    cp "${REPO_ROOT}/${CI_REL}" "${tmp}/r/${CI_REL}"
+    cp "${REPO_ROOT}"/.github/workflows/*.yml "${tmp}/r/.github/workflows/"
     cp "${REPO_ROOT}/${VERDICT_REL}" "${tmp}/r/${VERDICT_REL}"
+    cp "${REPO_ROOT}/${SDK_CHECK_REL}" "${tmp}/r/${SDK_CHECK_REL}"
   }
   expect() { # <label> <want rc> <file rel> <sed program or ''>
     fresh
@@ -159,6 +235,21 @@ self_test() {
   expect "the draft is never published" 1 "${RELEASE_REL}" 's/-F draft=false/-F draft=true/'
   expect "a second job writes the release" 1 "${RELEASE_REL}" 's/^(      - name: Skipped \(no Zapstore secret\))$/      - uses: softprops\/action-gh-release@v2\n\1/'
   expect "the verdict gate drops iOS" 1 "${VERDICT_REL}" 's/ launch-gate-ios\.yml\)/)/'
+  expect "the IPA load check is commented out" 1 "${RELEASE_REL}" 's/^        run: (bash \.\.\/scripts\/ci\/check_ios_app_loadable\.sh .*)$/        # run: \1/'
+  expect "the IPA SDK check is dropped" 1 "${RELEASE_REL}" '/check_ios_app_sdk\.sh/d'
+  expect "the IPA SDK check is commented out" 1 "${RELEASE_REL}" 's/^        run: (bash \.\.\/scripts\/ci\/check_ios_app_sdk\.sh .*)$/        # run: \1/'
+  expect "the IPA SDK check runs after the upload" 1 "${RELEASE_REL}" '/check_ios_app_sdk\.sh/d; s/^(        run: bundle exec fastlane ios upload)$/\1\n      - run: bash ..\/scripts\/ci\/check_ios_app_sdk.sh late/'
+  expect "the gate's SDK check is dropped" 1 "${LAUNCH_GATE_IOS_REL}" '/check_ios_app_sdk\.sh/d'
+  expect "the gate's SDK check is commented out" 1 "${LAUNCH_GATE_IOS_REL}" 's/^        run: (bash scripts\/ci\/check_ios_app_sdk\.sh .*)$/        # run: \1/'
+  expect "the gate runs on another image" 1 "${LAUNCH_GATE_IOS_REL}" 's/^    runs-on: xcode-27$/    runs-on: macos-26/'
+  expect "the gate selects another Xcode" 1 "${LAUNCH_GATE_IOS_REL}" "s/xcode-version: latest-stable/xcode-version: '27.0'/"
+  expect "TestFlight stops selecting Xcode" 1 "${RELEASE_REL}" '/xcode-version: latest-stable/d'
+  expect "an iOS lane runs on another image" 1 ".github/workflows/e2e-ios.yml" 's/^    runs-on: xcode-27 /    runs-on: macos-latest /'
+  expect "an iOS compile check selects no Xcode" 1 ".github/workflows/cross-check.yml" '/maxim-lobanov\/setup-xcode@/d'
+  expect "an iOS compile check builds before it selects Xcode" 1 ".github/workflows/cross-check.yml" 's/^(      - name: Select Xcode)$/      - run: cargo check --target aarch64-apple-ios\n\1/'
+  expect "the SDK floor rises above the runner's Xcode" 1 "${SDK_CHECK_REL}" 's/^readonly IOS_SDK_FLOOR=[0-9]+$/readonly IOS_SDK_FLOOR=28/'
+  expect "the gate drops the app's XCTest bundle" 1 "${LAUNCH_GATE_IOS_REL}" '/-only-testing:RunnerTests/d'
+  expect "an XCTest run with no test case passes" 1 "${LAUNCH_GATE_IOS_REL}" '/RunnerTests ran no test case/d'
   # A mutation whose sed matches nothing leaves rc 0 and fails above; this
   # catches a case that stopped running at all.
   (( ran == SELF_TEST_MUTATIONS )) || { echo "self-test FAIL: ran ${ran} cases, pinned ${SELF_TEST_MUTATIONS}" >&2; return 1; }

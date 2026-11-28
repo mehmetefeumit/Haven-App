@@ -82,9 +82,9 @@ Future<void> awaitPlatformResumed({bool? isIOS}) async {
         kPlatformResumedWithin,
         onTimeout: () => fail(
           'the platform did not put the app in front within '
-          '${kPlatformResumedWithin.inSeconds} s (lifecycle '
-          '${binding.lifecycleState?.name}, view sized: ${sized()}): no scene '
-          'connected, or its view controller never sent `resumed`',
+          '${kPlatformResumedWithin.inSeconds} s (resumed: ${resumed()}, '
+          'view sized: ${sized()}): no scene connected, or its view '
+          'controller never sent `resumed`',
         ),
       );
     }

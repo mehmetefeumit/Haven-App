@@ -250,8 +250,7 @@ void main() {
       expect(
         service.setDisplayNameCalls,
         isEmpty,
-        reason:
-            'the own profile row is the save: a name held only on this '
+        reason: 'the own profile row is the save: a name held only on this '
             'device is one no relay gets',
       );
       expect(
@@ -453,9 +452,7 @@ void main() {
     });
   });
 
-  testWidgets('an edited name is what gets saved and published', (
-    tester,
-  ) async {
+  testWidgets('an edited name is what gets saved and published', (tester) async {
     final profile = MockProfileService();
 
     await pumpLocalized(
@@ -568,34 +565,35 @@ void main() {
     },
   );
 
-  testWidgets('resume with an existing chosen name preserves it (no clobber)', (
-    tester,
-  ) async {
-    final service = _RecordingIdentityService(
-      hasIdentityValue: true,
-      existingDisplayName: 'Alice',
-    );
-    final profile = MockProfileService();
+  testWidgets(
+    'resume with an existing chosen name preserves it (no clobber)',
+    (tester) async {
+      final service = _RecordingIdentityService(
+        hasIdentityValue: true,
+        existingDisplayName: 'Alice',
+      );
+      final profile = MockProfileService();
 
-    await pumpLocalized(
-      tester,
-      const CreateIdentityScreen(),
-      overrides: buildOverrides(service: service, profileService: profile),
-      settle: false,
-    );
-    // Let initState's async restore replace the random pre-fill with "Alice".
-    await tester.pump();
-    await tester.pump();
-    expect(prefilledName(tester), 'Alice');
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(service: service, profileService: profile),
+        settle: false,
+      );
+      // Let initState's async restore replace the random pre-fill with "Alice".
+      await tester.pump();
+      await tester.pump();
+      expect(prefilledName(tester), 'Alice');
 
     await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
     await pumpFrames(tester);
     await tester.tap(find.byKey(WidgetKeys.locationDisclosureAgree));
     await pumpFrames(tester);
 
-    // The existing name is saved as-is — not overwritten by a fresh random.
-    expect(_savedNames(profile), ['Alice']);
-  });
+      // The existing name is saved as-is — not overwritten by a fresh random.
+      expect(_savedNames(profile), ['Alice']);
+    },
+  );
 
   testWidgets(
     'resume after the name was saved restores the one the profile row holds',
