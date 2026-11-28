@@ -329,6 +329,15 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   /// [registrationIsAligned] is the other.
   DateTime? _lastConsumedFixTs;
 
+  /// Fix time of the newest fix this isolate has had in hand, delivered or
+  /// acquired by a cycle.
+  ///
+  /// Read only by the `registration armed` marker: on S+ the platform measures
+  /// a new request's first delivery from its last location, not from the
+  /// registration (`LocationProviderManager` `calculateRequestDelayMillis` and
+  /// the fastest-interval gate), and the B1 cadence oracle needs that anchor.
+  DateTime? _newestFixTs;
+
   /// When the last NEW fix arrived, so the watchdog can tell a silent
   /// registration from a delivering one. A replay is not a delivery.
   DateTime? _lastDeliveryAt;
@@ -784,6 +793,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
     // the watchdog's freshness either.
     if (_lastConsumedFixTs == fix.timestamp) return;
     _lastConsumedFixTs = fix.timestamp;
+    _noteFix(fix);
     _lastDeliveryAt = _clock();
 
     // The registration works, so it earns back the one recovery a later error
@@ -872,8 +882,26 @@ class BackgroundLocationTaskHandler extends TaskHandler {
           },
         );
     _registeredTarget = target;
-    _registeredAt = _clock();
-    debugPrint('[BackgroundTask] registration armed (${interval.inSeconds}s)');
+    final armedAt = _clock();
+    _registeredAt = armedAt;
+    // The fix's offset from this line, never its instant (Rule 15).
+    final fixAt = _newestFixTs;
+    final fixOffset = fixAt == null
+        ? 'none'
+        : '${fixAt.difference(armedAt).inSeconds}s';
+    debugPrint(
+      '[BackgroundTask] registration armed ('
+      '${interval.inSeconds}s, fix $fixOffset)',
+    );
+  }
+
+  /// Advances [_newestFixTs]; never moves it back, because the one-shot
+  /// chain's last-known answer can be older than a fix already in hand.
+  void _noteFix(Position fix) {
+    final newest = _newestFixTs;
+    if (newest == null || fix.timestamp.isAfter(newest)) {
+      _newestFixTs = fix.timestamp;
+    }
   }
 
   /// Runs ONE recovery cycle [streamErrorRearmDelay] after the platform
@@ -1996,6 +2024,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         _locationService!.getCurrentLocation(),
       );
       if (position == null) return;
+      _noteFix(position);
       if (coldCache) debugPrint('[BackgroundTask] cold fix: in hand');
 
       // 8. Encrypt and publish to each DUE circle, one at a time and MORE THAN
