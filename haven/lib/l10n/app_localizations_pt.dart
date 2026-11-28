@@ -580,7 +580,7 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get locationSettingsIntroIos =>
-      'Com a localização definida como \"Sempre\", o compartilhamento volta sozinho depois que o Haven é fechado, assim que você tiver se deslocado algumas centenas de metros e o iOS permitir. Depois que o telefone reinicia, isso só acontece quando você também o desbloquear. É o iOS que decide quando isso acontece, então não é garantido. Com \"Durante o Uso do App\", o compartilhamento é interrompido quando o Haven é fechado e volta quando você abre o app.';
+      'Com a localização definida como \"Sempre\", o compartilhamento pode voltar sozinho depois que o Haven é fechado, mesmo que você não tenha se deslocado; é o iOS que decide quando, então não é garantido. O iOS pode despertar o Haven depois que você se deslocar algumas centenas de metros e também quando atualiza os apps em segundo plano. Depois que o telefone reinicia, isso só acontece quando você também o tiver desbloqueado. Com \"Durante o Uso do App\", o compartilhamento é interrompido quando o Haven é fechado e volta quando você abre o app.';
 
   @override
   String get locationSettingsToggleTitle => 'Compartilhar em segundo plano';
@@ -591,7 +591,7 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'O compartilhamento continua funcionando em segundo plano com sua permissão atual, e enquanto isso o iOS mostra a própria barra azul de localização no topo da tela. Se o Haven for fechado, o compartilhamento é interrompido até você abrir o app de novo. Escolha \"Sempre\" para o Haven nos Ajustes para que o compartilhamento possa voltar sozinho depois que o Haven for fechado, assim que você tiver se deslocado algumas centenas de metros e o iOS permitir. Com \"Sempre\", o iOS pode mostrar a seta de localização na barra de status em vez dessa barra.';
+      'O compartilhamento continua funcionando em segundo plano com sua permissão atual, e enquanto isso o iOS mostra a própria barra azul de localização no topo da tela. Se o Haven for fechado, o compartilhamento é interrompido até você abrir o app de novo. Com o Haven definido como \"Sempre\" nos Ajustes, o compartilhamento pode voltar sozinho depois que o Haven for fechado, mesmo que você não tenha se deslocado; o iOS decide quando. Com \"Sempre\", o iOS pode mostrar a seta de localização na barra de status em vez dessa barra.';
 
   @override
   String get locationSettingsResumeConsentNote =>
@@ -660,7 +660,7 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get locationDisclosureBackgroundIos =>
-      'Este app usa dados de localização para permitir o compartilhamento com seus círculos mesmo quando o Haven está em segundo plano e você não está usando o app. Se a localização estiver definida como \"Sempre\" e o Haven for fechado, mesmo por você, o Haven volta a compartilhar sozinho assim que você tiver se deslocado algumas centenas de metros e o iOS permitir. Depois de uma reinicialização, isso só acontece quando você também tiver desbloqueado o telefone. O iOS decide quando, então não é garantido. Com \"Durante o Uso do App\", o compartilhamento é interrompido quando o Haven é fechado e continua assim até você abrir o app de novo.';
+      'Este app usa dados de localização para permitir o compartilhamento com seus círculos mesmo quando o Haven está em segundo plano e você não está usando o app. Se a localização estiver definida como \"Sempre\", o compartilhamento pode voltar sozinho depois que o Haven for fechado, mesmo por você, e mesmo que você não tenha se deslocado; o iOS decide quando, então não é garantido. O iOS pode despertar o Haven depois que você se deslocar algumas centenas de metros e também quando atualiza os apps em segundo plano. Depois de uma reinicialização, isso só acontece quando você também tiver desbloqueado o telefone. Com \"Durante o Uso do App\", o compartilhamento é interrompido quando o Haven é fechado e continua assim até você abrir o app de novo.';
 
   @override
   String get locationDisclosureManage =>

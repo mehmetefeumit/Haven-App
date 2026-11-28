@@ -583,7 +583,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get locationSettingsIntroIos =>
-      'Con la ubicación en «Siempre», el uso compartido vuelve a empezar por sí solo después de que Haven se cierre, una vez que te hayas movido unos cientos de metros y iOS lo permita. Después de que el teléfono se reinicie, esto solo ocurre cuando también lo hayas desbloqueado. iOS decide cuándo ocurre, así que no está garantizado. Con «Cuando se use la app», el uso compartido se detiene cuando Haven se cierra y vuelve a empezar cuando lo abres.';
+      'Con la ubicación en «Siempre», el uso compartido puede volver a empezar por sí solo después de que Haven se cierre, aunque no te hayas movido; iOS decide cuándo, así que no está garantizado. iOS puede reactivar Haven después de que te hayas movido unos cientos de metros, y también cuando actualiza las apps en segundo plano. Después de que el teléfono se reinicie, esto solo ocurre cuando también lo hayas desbloqueado. Con «Cuando se use la app», el uso compartido se detiene cuando Haven se cierra y vuelve a empezar cuando lo abres.';
 
   @override
   String get locationSettingsToggleTitle => 'Compartir en segundo plano';
@@ -594,7 +594,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'El uso compartido sigue funcionando en segundo plano con tu permiso actual, y mientras lo hace, iOS muestra su barra azul de ubicación en la parte superior de la pantalla. Si Haven se cierra, el uso compartido se detiene hasta que vuelvas a abrirlo. Elige «Siempre» para Haven en Ajustes para que el uso compartido pueda volver a empezar por sí solo después de que Haven se cierre, una vez que te hayas movido unos cientos de metros y iOS lo permita. Con «Siempre», iOS puede mostrar su flecha de ubicación en la barra de estado en lugar de esa barra.';
+      'El uso compartido sigue funcionando en segundo plano con tu permiso actual, y mientras lo hace, iOS muestra su barra azul de ubicación en la parte superior de la pantalla. Si Haven se cierra, el uso compartido se detiene hasta que vuelvas a abrirlo. Con «Siempre» para Haven en Ajustes, el uso compartido puede volver a empezar por sí solo después de que Haven se cierre, aunque no te hayas movido; iOS decide cuándo. Con «Siempre», iOS puede mostrar su flecha de ubicación en la barra de estado en lugar de esa barra.';
 
   @override
   String get locationSettingsResumeConsentNote =>
@@ -664,7 +664,7 @@ class AppLocalizationsEs extends AppLocalizations {
 
   @override
   String get locationDisclosureBackgroundIos =>
-      'Esta app usa datos de ubicación para permitir el uso compartido con tus círculos incluso cuando Haven está en segundo plano y no lo estás usando. Si la ubicación está en «Siempre» y Haven se cierra, incluso si lo cierras tú, Haven vuelve a compartir por sí solo una vez que te hayas movido unos cientos de metros y iOS lo permita. Después de un reinicio, esto solo ocurre cuando también hayas desbloqueado el teléfono. iOS decide cuándo, así que no está garantizado. Con «Cuando se use la app», el uso compartido se detiene cuando Haven se cierra y sigue detenido hasta que vuelvas a abrirlo.';
+      'Esta app usa datos de ubicación para permitir el uso compartido con tus círculos incluso cuando Haven está en segundo plano y no lo estás usando. Si la ubicación está en «Siempre», el uso compartido puede volver a empezar por sí solo después de que Haven se cierre, incluso si lo cierras tú y aunque no te hayas movido; iOS decide cuándo, así que no está garantizado. iOS puede reactivar Haven después de que te hayas movido unos cientos de metros, y también cuando actualiza las apps en segundo plano. Después de un reinicio, esto solo ocurre cuando también hayas desbloqueado el teléfono. Con «Cuando se use la app», el uso compartido se detiene cuando Haven se cierra y sigue detenido hasta que vuelvas a abrirlo.';
 
   @override
   String get locationDisclosureManage =>

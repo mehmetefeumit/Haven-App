@@ -580,7 +580,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get locationSettingsIntroIos =>
-      'Si l\'accès à la position est réglé sur « Toujours », le partage reprend tout seul après la fermeture de Haven, une fois que vous avez parcouru quelques centaines de mètres et si iOS le permet. Après un redémarrage du téléphone, cela ne se produit qu\'une fois que vous l\'avez aussi déverrouillé. C\'est iOS qui décide du moment, ce n\'est donc pas garanti. Avec « Lorsque l\'app est active », le partage s\'arrête quand Haven est fermé et reprend quand vous l\'ouvrez.';
+      'Si l\'accès à la position est réglé sur « Toujours », le partage peut reprendre tout seul après la fermeture de Haven, même si vous n\'avez pas bougé ; c\'est iOS qui décide du moment, ce n\'est donc pas garanti. iOS peut réveiller Haven après un déplacement de quelques centaines de mètres, et aussi pendant l\'actualisation des applications en arrière-plan. Après un redémarrage du téléphone, cela ne se produit qu\'une fois que vous l\'avez aussi déverrouillé. Avec « Lorsque l\'app est active », le partage s\'arrête quand Haven est fermé et reprend quand vous l\'ouvrez.';
 
   @override
   String get locationSettingsToggleTitle => 'Partager en arrière-plan';
@@ -591,7 +591,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'Le partage continue de fonctionner en arrière-plan avec votre autorisation actuelle, et iOS affiche alors sa barre bleue de localisation en haut de l\'écran. Si Haven est fermé, le partage s\'arrête jusqu\'à ce que vous le rouvriez. Choisissez « Toujours » pour Haven dans Réglages afin que le partage puisse reprendre tout seul après la fermeture de Haven, une fois que vous avez parcouru quelques centaines de mètres et si iOS le permet. Avec « Toujours », iOS peut afficher sa flèche de localisation dans la barre d\'état à la place de la barre bleue.';
+      'Le partage continue de fonctionner en arrière-plan avec votre autorisation actuelle, et iOS affiche alors sa barre bleue de localisation en haut de l\'écran. Si Haven est fermé, le partage s\'arrête jusqu\'à ce que vous le rouvriez. Avec l\'autorisation « Toujours » pour Haven dans Réglages, le partage peut reprendre tout seul après la fermeture de Haven, même si vous n\'avez pas bougé ; c\'est iOS qui décide du moment. Avec « Toujours », iOS peut afficher sa flèche de localisation dans la barre d\'état à la place de la barre bleue.';
 
   @override
   String get locationSettingsResumeConsentNote =>
@@ -660,7 +660,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get locationDisclosureBackgroundIos =>
-      'Cette application utilise les données de localisation pour permettre le partage avec vos cercles, même lorsque Haven est en arrière-plan et que vous ne l\'utilisez pas. Si l\'accès à la position est réglé sur « Toujours » et que Haven est fermé, même par vous, Haven relance le partage tout seul une fois que vous avez parcouru quelques centaines de mètres et si iOS le permet. Après un redémarrage, cela ne se produit qu\'une fois que vous avez aussi déverrouillé votre téléphone. C\'est iOS qui décide du moment, ce n\'est donc pas garanti. Avec « Lorsque l\'app est active », le partage s\'arrête quand Haven est fermé et reste arrêté jusqu\'à ce que vous le rouvriez.';
+      'Cette application utilise les données de localisation pour permettre le partage avec vos cercles, même lorsque Haven est en arrière-plan et que vous ne l\'utilisez pas. Si l\'accès à la position est réglé sur « Toujours », le partage peut reprendre tout seul après que Haven a été fermé, même par vous, et même si vous n\'avez pas bougé ; c\'est iOS qui décide du moment, ce n\'est donc pas garanti. iOS peut réveiller Haven après un déplacement de quelques centaines de mètres, et aussi pendant l\'actualisation des applications en arrière-plan. Après un redémarrage, cela ne se produit qu\'une fois que vous avez aussi déverrouillé votre téléphone. Avec « Lorsque l\'app est active », le partage s\'arrête quand Haven est fermé et reste arrêté jusqu\'à ce que vous le rouvriez.';
 
   @override
   String get locationDisclosureManage =>

@@ -572,7 +572,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get locationSettingsIntroIos =>
-      'Konum \"Her Zaman\" olarak ayarlıysa paylaşım, Haven kapatıldıktan sonra da kendiliğinden yeniden başlar; bunun için birkaç yüz metre hareket etmiş olmanız ve iOS\'un izin vermesi gerekir. Telefonunuz yeniden başladıktan sonra bu, ancak telefonunuzun kilidini de açtığınızda gerçekleşir. Bunun ne zaman olacağına iOS karar verir; bu yüzden garanti değildir. \"Uygulamayı Kullanırken\" seçiliyse paylaşım, Haven kapatıldığında durur ve uygulamayı açtığınızda yeniden başlar.';
+      'Konum \"Her Zaman\" olarak ayarlıysa paylaşım, Haven kapatıldıktan sonra hiç hareket etmemiş olsanız bile kendiliğinden yeniden başlayabilir; bunun ne zaman olacağına iOS karar verir, bu yüzden garanti değildir. iOS, siz birkaç yüz metre hareket ettikten sonra ve ayrıca uygulamaları arka planda yenilediğinde Haven\'ı uyandırabilir. Telefonunuz yeniden başladıktan sonra bu, ancak telefonunuzun kilidini de açtığınızda gerçekleşir. \"Uygulamayı Kullanırken\" seçiliyse paylaşım, Haven kapatıldığında durur ve uygulamayı açtığınızda yeniden başlar.';
 
   @override
   String get locationSettingsToggleTitle => 'Arka planda paylaş';
@@ -583,7 +583,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get locationSettingsIosLimitedNote =>
-      'Paylaşım, mevcut izninizle arka planda çalışmaya devam eder ve bu sırada iOS, ekranın üst kısmında kendi mavi konum çubuğunu gösterir. Haven kapatılırsa, siz yeniden açana kadar paylaşım durur. Haven kapatıldıktan sonra paylaşımın kendiliğinden yeniden başlayabilmesi için Ayarlar\'da Haven için \"Her Zaman\" seçeneğini belirleyin; bunun için birkaç yüz metre hareket etmiş olmanız ve iOS\'un izin vermesi gerekir. \"Her Zaman\" seçiliyken iOS, bu çubuk yerine durum çubuğunda kendi konum ok simgesini gösterebilir.';
+      'Paylaşım, mevcut izninizle arka planda çalışmaya devam eder ve bu sırada iOS, ekranın üst kısmında kendi mavi konum çubuğunu gösterir. Haven kapatılırsa, siz yeniden açana kadar paylaşım durur. Ayarlar\'da Haven için \"Her Zaman\" seçiliyse paylaşım, Haven kapatıldıktan sonra hiç hareket etmemiş olsanız bile kendiliğinden yeniden başlayabilir; bunun ne zaman olacağına iOS karar verir. \"Her Zaman\" seçiliyken iOS, bu çubuk yerine durum çubuğunda kendi konum ok simgesini gösterebilir.';
 
   @override
   String get locationSettingsResumeConsentNote =>
@@ -652,7 +652,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get locationDisclosureBackgroundIos =>
-      'Bu uygulama, Haven arka plandayken ve siz onu kullanmıyorken bile çevrelerinizle paylaşımı sağlamak için konum verilerini kullanır. Konum \"Her Zaman\" olarak ayarlıysa ve Haven kapatılırsa (siz kapatsanız bile), birkaç yüz metre hareket ettikten sonra ve iOS izin verdiğinde Haven paylaşımı kendiliğinden yeniden başlatır. Telefonunuz yeniden başladıktan sonra bu, ancak telefonunuzun kilidini de açtığınızda gerçekleşir. Bunun ne zaman olacağına iOS karar verir; bu yüzden garanti değildir. \"Uygulamayı Kullanırken\" seçiliyse paylaşım, Haven kapatıldığında durur ve siz uygulamayı yeniden açana kadar durmuş olarak kalır.';
+      'Bu uygulama, Haven arka plandayken ve siz onu kullanmıyorken bile çevrelerinizle paylaşımı sağlamak için konum verilerini kullanır. Konum \"Her Zaman\" olarak ayarlıysa paylaşım, Haven kapatıldıktan sonra, onu siz kapatmış ve hiç hareket etmemiş olsanız bile kendiliğinden yeniden başlayabilir; bunun ne zaman olacağına iOS karar verir, bu yüzden garanti değildir. iOS, siz birkaç yüz metre hareket ettikten sonra ve ayrıca uygulamaları arka planda yenilediğinde Haven\'ı uyandırabilir. Telefonunuz yeniden başladıktan sonra bu, ancak telefonunuzun kilidini de açtığınızda gerçekleşir. \"Uygulamayı Kullanırken\" seçiliyse paylaşım, Haven kapatıldığında durur ve siz uygulamayı yeniden açana kadar durmuş olarak kalır.';
 
   @override
   String get locationDisclosureManage =>
