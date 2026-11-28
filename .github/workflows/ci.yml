@@ -32,6 +32,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only unless a job asks for more. A run Dependabot triggers is read-only
+# anyway, but the push dependabot-lockfile-sync.yml makes as its app starts a
+# run that is not Dependabot's, and that run compiles the bumped dependencies.
+permissions:
+  contents: read
+
 jobs:
   # ---------------------------------------------------------------------------
   # Stage 1 — code quality

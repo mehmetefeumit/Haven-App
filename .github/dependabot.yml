@@ -12,21 +12,54 @@
 #
 # Major-version PRs are intentionally allowed but grouped separately; humans must
 # read changelogs (especially for crypto/MLS-adjacent crates) before merging.
+#
+# Every pull request runs the whole CI suite (~66 jobs). On 2026-11-22 every
+# ecosystem opened at once — about 45 pull requests in six minutes — and the
+# queue starved for most of a day. So each ecosystem runs on its own weekday,
+# and none holds more than five pull requests open; what must move together is
+# grouped into one pull request, and a bump that needs code Dependabot cannot
+# write (a migration, a regenerated table or bridge) is ignored until a human
+# does it. `ignore` holds back version updates only: for a security update,
+# dependabot-core drops every name-only and `update-types` ignore and keeps
+# only an explicit `versions:` range, which nothing below uses (GitHub's docs
+# word this loosely; the source is exact: dependabot-core@198c21e0
+# common/lib/dependabot/config/ignore_condition.rb `ignored_versions`,
+# `return versions if security_updates_only`, called from
+# updater/lib/dependabot/job.rb `ignore_conditions_for`, and its spec "with
+# security_updates_only ... allows all"). So with security updates enabled, a
+# security pull request can still arrive for an ignored name, an MDK-pinned
+# crate or flutter_rust_bridge included, and needs the same human work as the
+# bump its ignore stands for. dependency-audit (audit.yml) reports every
+# advisory either way.
 
 version: 2
 
 updates:
   # ---------------------------------------------------------------------------
-  # Rust (haven-core)
+  # Rust: every Cargo root, in one entry so a group spans them all.
+  # haven/rust_builder's lockfile is the resolution that SHIPS inside the app;
+  # the tooling crates run on every E2E and soak lane. rust_builder and
+  # tooling/soak path-depend on haven-core, tooling/logscan and
+  # tooling/e2e/local-relay, and Dependabot re-locks only the directories it
+  # bumps: dependabot-lockfile-sync.yml re-locks the rest on the pull request.
+  # The crates check_lockfile_universe.sh holds to haven-core's exact source
+  # (MDK, OpenMLS, SQLCipher, nostr) move only with a deliberate MDK bump in
+  # scripts/ci/mdk_pins.env; auto-PRs would conflict with the pin.
   # ---------------------------------------------------------------------------
   - package-ecosystem: "cargo"
-    directory: "/haven-core"
+    directories:
+      - "/haven-core"
+      - "/haven/rust_builder"
+      - "/tooling/soak"
+      - "/tooling/logscan"
+      - "/tooling/e2e/local-relay"
+      - "/tooling/e2e/local-blossom"
     schedule:
       interval: "weekly"
       day: "monday"
       time: "06:00"
       timezone: "Etc/UTC"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
     cooldown:
       default-days: 7
       semver-major-days: 30
@@ -34,7 +67,38 @@ updates:
       semver-patch-days: 7
       # Security advisories always bypass cooldown — no entry needed; this is
       # Dependabot's documented default behavior for `security-updates`.
+    # A dependency joins the FIRST group it matches, so the groups that must
+    # move as one come before the catch-alls.
     groups:
+      # The credential store: rust_builder installs the platform store that
+      # haven-core's keyring_policy reads through keyring-core, so the stores
+      # and the core move together.
+      keyring-stack:
+        applies-to: version-updates
+        patterns:
+          - "keyring-core"
+          - "*-native-keyring-store"
+          - "zbus-secret-service-keyring-store"
+        update-types: ["minor", "patch"]
+      # RustCrypto's hash traits: sha2, hmac and digest share `digest`'s
+      # major, so one alone does not compile against the others.
+      rustcrypto-hashes:
+        applies-to: version-updates
+        patterns:
+          - "sha2"
+          - "hmac"
+          - "digest"
+        update-types: ["minor", "patch"]
+      # NEVER in a patch group: haven-core's invisible-character table is
+      # enumerated by hand from one Unicode release, and
+      # `the_table_is_re_enumerated_when_the_unicode_data_moves`
+      # (haven-core/src/directory/invisible.rs) fails until a human re-derives
+      # it on this pull request when either crate moves to a new release.
+      unicode-data:
+        applies-to: version-updates
+        patterns:
+          - "unicode-normalization"
+          - "unicode-segmentation"
       # Patch updates can land together — low review burden.
       patch-updates:
         applies-to: version-updates
@@ -53,47 +117,14 @@ updates:
           - "libcrux*"
           - "zeroize*"
           - "subtle"
-          - "sha2"
           - "secp256k1*"
         update-types: ["minor", "patch"]
-    ignore:
-      # MDK pin (93ae324) controls these transitive versions; only update when
-      # we deliberately bump the MDK rev in Cargo.toml. Auto-PRs would conflict.
-      - dependency-name: "rusqlite"
-      - dependency-name: "libsqlite3-sys"
-      - dependency-name: "nostr"
-      - dependency-name: "nostr-sdk"
-
-  # ---------------------------------------------------------------------------
-  # Rust: every other Cargo root. haven/rust_builder's lockfile is the
-  # resolution that SHIPS inside the app; the tooling crates run on every E2E
-  # and soak lane. cargo-audit (audit.yml) already reads all of them for
-  # advisories; this keeps them patched too. The crates
-  # check_lockfile_universe.sh holds to haven-core's exact source (MDK, OpenMLS,
-  # SQLCipher, nostr) move only with a deliberate MDK bump, as above.
-  # ---------------------------------------------------------------------------
-  - package-ecosystem: "cargo"
-    directories:
-      - "/haven/rust_builder"
-      - "/tooling/soak"
-      - "/tooling/logscan"
-      - "/tooling/e2e/local-relay"
-      - "/tooling/e2e/local-blossom"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "06:00"
-      timezone: "Etc/UTC"
-    open-pull-requests-limit: 10
-    cooldown:
-      default-days: 7
-      semver-major-days: 30
-      semver-minor-days: 14
-      semver-patch-days: 7
-    groups:
-      patch-updates:
+      # Whatever no group above takes: one pull request per dependency across
+      # every root that declares it, not one per root (tokio arrived as four
+      # on 2026-11-22).
+      by-dependency:
         applies-to: version-updates
-        update-types: ["patch"]
+        group-by: dependency-name
     ignore:
       - dependency-name: "rusqlite"
       - dependency-name: "libsqlite3-sys"
@@ -102,6 +133,36 @@ updates:
       - dependency-name: "cgka-*"
       - dependency-name: "storage-sqlite"
       - dependency-name: "transport-nostr-*"
+      # Majors that need a code migration Dependabot cannot write: ignored
+      # until a human migrates them. Remove an entry once its migration lands.
+      #   keyring 1.x: the store constructors and CredentialStoreApi changed
+      #     (android `Store::from_ndk_context` is gone; rust_builder/src/api.rs).
+      - dependency-name: "keyring-core"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "*-native-keyring-store"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "zbus-secret-service-keyring-store"
+        update-types: ["version-update:semver-major"]
+      #   sha2 0.11 / hmac 0.13 / digest 0.11: openmls and hkdf still pin
+      #     hmac 0.12, and the new traits need call-site changes.
+      - dependency-name: "sha2"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "hmac"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "digest"
+        update-types: ["version-update:semver-major"]
+      #   rand 0.10: `rand::rngs::OsRng`, which haven-core seeds from, moved.
+      - dependency-name: "rand"
+        update-types: ["version-update:semver-major"]
+      #   k256 0.14: `PublicKey::to_encoded_point` is gone
+      #     (tooling/logscan/src/seed.rs).
+      - dependency-name: "k256"
+        update-types: ["version-update:semver-major"]
+      # The bridge's Rust crate, its Dart package and the generated bindings
+      # (stamped with the version, held by check_generated_bridge_pinned.sh)
+      # move in one commit through ./scripts/regenerate_frb.sh; Dependabot can
+      # bump neither half alone without breaking the build.
+      - dependency-name: "flutter_rust_bridge"
 
   # ---------------------------------------------------------------------------
   # Flutter (haven app)
@@ -110,10 +171,10 @@ updates:
     directory: "/haven"
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "tuesday"
       time: "06:00"
       timezone: "Etc/UTC"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
     cooldown:
       default-days: 7
       semver-major-days: 30
@@ -136,29 +197,40 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "latlong2"
         update-types: ["version-update:semver-major"]
+      # Moves with its Rust crate through ./scripts/regenerate_frb.sh; see the
+      # cargo entry.
+      - dependency-name: "flutter_rust_bridge"
 
   # ---------------------------------------------------------------------------
   # Android (haven/android): the libraries the app module declares itself —
   # CameraX and zxing-cpp for the QR scanner, AppCompat/transition/exif for
-  # uCrop — and the Gradle plugins. Flutter plugins' own Gradle dependencies
-  # move with the plugin's pub release (the "pub" entry above); the vendored
-  # third_party/geolocator_android is held to its latest upstream release by
-  # scripts/ci/check_vendored_current.sh instead.
+  # uCrop — the Gradle plugins and the Gradle wrapper. Flutter plugins' own
+  # Gradle dependencies move with the plugin's pub release (the "pub" entry
+  # above); the vendored third_party/geolocator_android is held to its latest
+  # upstream release by scripts/ci/check_vendored_current.sh instead.
   # ---------------------------------------------------------------------------
   - package-ecosystem: "gradle"
     directory: "/haven/android"
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "wednesday"
       time: "06:00"
       timezone: "Etc/UTC"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
     cooldown:
       default-days: 7
       semver-major-days: 30
       semver-minor-days: 14
       semver-patch-days: 7
     groups:
+      # The Android Gradle plugin names the minimum Gradle it runs on, so a
+      # plugin bump arrives with the wrapper it needs (AGP 9.5 needs Gradle
+      # 9.6 or later). Before patch-updates, so a patch of either rides here.
+      android-build:
+        applies-to: version-updates
+        patterns:
+          - "com.android.*"
+          - "gradle-wrapper"
       patch-updates:
         applies-to: version-updates
         update-types: ["patch"]
@@ -176,7 +248,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "thursday"
       time: "06:00"
       timezone: "Etc/UTC"
     open-pull-requests-limit: 5

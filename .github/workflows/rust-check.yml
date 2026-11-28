@@ -660,6 +660,14 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: bash scripts/ci/check_lockfile_universe.sh
 
+      # What dependabot-lockfile-sync.yml commits to a Dependabot branch: the
+      # re-lock (offline, against a local registry) and the commit (against a
+      # stub API). It needs cargo, so it runs here, beside the guard above
+      # that holds the roots it re-locks to one universe.
+      - name: Lockfile sync self-test
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/ci/sync_cargo_lockfiles.sh --self-test
+
       # `test-utils` MUST NOT reach a shipped build. `rust_builder` names it as
       # a DEV-dependency on purpose (its own tests need the seams), and a bare
       # `cargo tree -e features` therefore always finds it — the edge `no-dev`

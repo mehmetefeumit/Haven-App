@@ -126,9 +126,14 @@ self_test() {
   _case "the repository's files pass" 0 check_static "${tmp}/g.kts" "${tmp}/m.xml"
   sed '/androidx\.transition:transition/d' "${tmp}/g.kts" >"${tmp}/g-no-transition.kts"
   _case "a dropped declaration fails" 1 check_static "${tmp}/g-no-transition.kts" "${tmp}/m.xml"
-  sed 's/appcompat:appcompat:1\.7\.1/appcompat:appcompat:1.6.1/' "${tmp}/g.kts" >"${tmp}/g-low.kts"
+  # Rewrites whatever AppCompat version is declared: a pattern naming one
+  # version matches nothing once it moves, and the copy then passes or fails
+  # as the repository's own file does, whatever the case claims.
+  sed -E 's/(appcompat:appcompat:)[^"]+/\11.6.1/' "${tmp}/g.kts" >"${tmp}/g-low.kts"
+  _case "the lower-version fixture declares 1.6.1" 0 grep -qF 'implementation("androidx.appcompat:appcompat:1.6.1")' "${tmp}/g-low.kts"
   _case "a lower version fails" 1 check_static "${tmp}/g-low.kts" "${tmp}/m.xml"
-  sed 's/appcompat:appcompat:1\.7\.1/appcompat:appcompat:1.10.0/' "${tmp}/g.kts" >"${tmp}/g-high.kts"
+  sed -E 's/(appcompat:appcompat:)[^"]+/\11.10.0/' "${tmp}/g.kts" >"${tmp}/g-high.kts"
+  _case "the higher-version fixture declares 1.10.0" 0 grep -qF 'implementation("androidx.appcompat:appcompat:1.10.0")' "${tmp}/g-high.kts"
   _case "a higher version passes, compared as a version" 0 check_static "${tmp}/g-high.kts" "${tmp}/m.xml"
   sed 's|^\(\s*\)implementation("androidx\.exifinterface|\1// implementation("androidx.exifinterface|' "${tmp}/g.kts" >"${tmp}/g-commented.kts"
   _case "a commented-out declaration fails" 1 check_static "${tmp}/g-commented.kts" "${tmp}/m.xml"
@@ -154,7 +159,7 @@ self_test() {
     echo "uCrop runtime-deps guard: self-test FAILED (${failures})" >&2
     return 1
   fi
-  echo "uCrop runtime-deps guard: self-test OK (11 fixtures)."
+  echo "uCrop runtime-deps guard: self-test OK (13 fixtures)."
 }
 
 # The static check reads a manifest it could not parse as malformed, so a
