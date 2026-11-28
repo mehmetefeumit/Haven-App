@@ -328,21 +328,42 @@ readonly ONE_SHOT_TIMEOUT_SECS PLATFORM_MIN_INTERVAL_SECS
 # recovery a regression.
 readonly MIN_FIX_INTERVAL_SECS=$((PUBLISH_MIN_INTERVAL_SECS - FIX_LEAD_SECS))
 
-# The floor on the spacing between two delivery-driven publishes: 90 % of the
-# registered-interval floor, because the interval is what the platform is ASKED
-# for and a warm provider delivers at `>= interval` minus measurement noise
-# (a restarted one can be ~12 % early; see below). floor(0.9 x 62) = 55; a healthy boundary run lands at ~55.8 s, so 56 would be
+# The floor on the spacing between a registration and the delivery it produces:
+# 90 % of the registered-interval floor. The 90 % is the platform's own
+# tolerance: on S+ `LocationProviderManager` hands a registration no location
+# whose fix is less than `minUpdateInterval - min(10 % x interval, 30 s)` after
+# the last one it delivered to it, and geolocator sets the minimum update
+# interval to the interval itself (docs/POWER_EFFICIENCY_PLAN.md §2.2).
+# floor(0.9 x 62) = 55; a healthy boundary run lands at ~55.8 s, so 56 would be
 # a false-red generator.
 #
-# The 90 % is the rule and 62 s is the interval it is specialised to. For a
-# delivery on a RECOVERY registration the same 90 % applies to the interval THAT
-# registration asked for, read off its own `registration armed (Ns)` line — see
-# `delivery_gaps_after_registration`, which reports the floor per gap — but
-# never above this constant: a recovery is held to what the steady state is
-# held to, lowered only where its shorter ask puts the constant out of reach. A
-# fused provider Play services has just restarted delivers before the interval
-# it was asked for (run 42802266653: 113.6 s into a 129.7 s ask, Haven's the
-# only registration), and a steady-state delivery that early passes too.
+# The interval runs from the LAST FIX, not from the arm. A new registration is
+# handed the platform's cached last location at once (S+ historical delivery —
+# the replay the FGS dedupes), which starts that gate, and its provider request
+# is held back by `interval - age(last location)` when that is 30 s or more
+# (`calculateRequestDelayMillis`). In the steady state the FGS arms within a
+# second of the fix it consumed, so the two anchors coincide and this constant
+# is measured from the arm. A RECOVERY registration (`trigger=stream-error`)
+# arms at least kStreamErrorRearmDelay after the stream died, re-aiming at the
+# SAME target, so its delivery lands up to that fix's age before its own ask
+# runs out: run 46116377002 asked for 53 s ~13 s after its fix and was
+# delivered 43.6 s in, run 42802266653 asked for 129 s ~18 s after its fix and
+# was delivered 113.6 s in — each ~2-3 s past `fix + ask`, a fix's acquisition
+# time. So on a recovery registration the floor is 90 % of the interval THAT
+# registration asked for less the age of the fix it followed, both read off its
+# own `registration armed (Ns, fix -Ms)` line (see
+# `delivery_gaps_after_registration`), and never above this constant: a
+# recovery is held to what the steady state is held to, lowered only where its
+# anchor or its shorter ask puts the constant out of reach.
+#
+# The age is that of the newest fix the FGS itself held. A location the
+# platform obtained for another client, or one a restarted provider reported,
+# can be newer and move the platform's gate later than this floor — the cap at
+# this constant bounds what that admits. Which layer anchored run 46116377002
+# is not proved: the manager drops its cached locations when the provider is
+# disabled, which is what raised the stream error, so either the restarted
+# Play-services provider reported the fix again or it applied the same rule
+# itself; the timing fits `fix + ask + TTFF` either way.
 readonly MIN_DELIVERY_GAP_SECS=$((MIN_FIX_INTERVAL_SECS * 9 / 10))
 
 # Step 8's bound: how long background publishing may go quiet once the platform
@@ -1032,36 +1053,54 @@ successful_publish_count() {
 # is emitted as `NOARM`: unmeasurable, which the caller FAILS rather than skips.
 #
 # Each gap is emitted as `<ms>|<the interval that registration asked for, in
-# ms>|<the trigger of the cycle that armed it>`. The caller needs all three
-# because the constant floor is a property of the STEADY-STATE registration, and
-# only one kind of cycle arms a registration that is not one: a recovery
-# (`trigger=stream-error`) re-aims at a due-time that has not moved, so it asks
-# for the remainder of an interval already spent (see MIN_FIX_INTERVAL_SECS'
-# second paragraph). Attributing by the ARMING CYCLE rather than by the interval
-# alone is what keeps run 34511084722's finding a finding: there a
-# delivery-driven cycle armed 40 s through the overdue-planning defect and the
-# platform delivered at 45 s, and a floor taken of the interval the FGS asked
-# for would have called that healthy. `ASK` replaces the second field when the
-# `(Ns)` suffix cannot be parsed — the caller fails on it, because a floor it
-# cannot compute is not a floor it may skip.
+# ms>|<the trigger of the cycle that armed it>|<the age, in ms, of the newest fix
+# the FGS held when it armed>`. The caller needs all four because the constant
+# floor is a property of the STEADY-STATE registration, and only one kind of
+# cycle arms a registration that is not one: a recovery (`trigger=stream-error`)
+# re-aims at a due-time that has not moved, so it asks for the remainder of an
+# interval already spent (see MIN_FIX_INTERVAL_SECS' second paragraph), from a
+# fix that is no longer seconds old (see MIN_DELIVERY_GAP_SECS). Attributing by
+# the ARMING CYCLE rather than by the interval alone is what keeps run
+# 34511084722's finding a finding: there a delivery-driven cycle armed 40 s
+# through the overdue-planning defect and the platform delivered at 45 s, and a
+# floor taken of the interval the FGS asked for would have called that healthy.
+# `ASK` replaces the second field when the suffix cannot be parsed — the caller
+# fails on it, because a floor it cannot compute is not a floor it may skip. The
+# fourth is `none` when the FGS held no fix and `-` when the line carries no
+# `fix` field at all (an older build).
 #
 # Usage: delivery_gaps_after_registration <window> <capture>
 delivery_gaps_after_registration() {
   local windowfile="$1" logfile="$2" open
   open="$(proof_window_opener "${logfile}")"
   awk -v open="${open}" "${AWK_TS_FN}"'
-    # Seconds out of `registration armed (Ns)` — what the platform was ASKED
-    # for, which is the only thing the 90 % floor can honestly be taken of.
-    # `-1` when the suffix is not the `(<digits>s)` the Dart line prints.
+    # Seconds out of `registration armed (Ns, fix …)` — what the platform was
+    # ASKED for, which is the only thing the 90 % floor can honestly be taken
+    # of. `-1` when the suffix is neither that nor the `(Ns)` older builds
+    # printed.
     function arm_secs(line,   i, rest, j, tok) {
       i = index(line, "registration armed (")
       if (i == 0) return -1
       rest = substr(line, i + 20)
-      j = index(rest, "s)")
+      j = index(rest, "s")
       if (j == 0) return -1
       tok = substr(rest, 1, j - 1)
       if (tok !~ /^[0-9]+$/) return -1
+      if (substr(rest, j + 1) !~ /^(\)|, fix (none|-?[0-9]+s)\))/) return -1
       return tok + 0
+    }
+    # How long before the arm the newest fix the FGS held was taken, in ms,
+    # out of `fix -Ns`: the anchor the platform measures the first delivery
+    # from (MIN_DELIVERY_GAP_SECS). `none` when it held no fix, `0` for a fix
+    # stamped at or after the arm, `-` when the field is absent (an older
+    # build). Only meaningful on a line `arm_secs` accepted.
+    function arm_fix_age(line,   i, tok) {
+      i = index(line, ", fix ")
+      if (i == 0) return "-"
+      tok = substr(line, i + 6)
+      sub(/s?\).*$/, "", tok)
+      if (tok == "none") return tok
+      return (tok + 0 < 0 ? -(tok + 0) * 1000 : 0)
     }
     BEGIN {
       # Day lengths only ever resolve a midnight rollover inside one ~20-minute
@@ -1069,15 +1108,17 @@ delivery_gaps_after_registration() {
       # produced a NEGATIVE gap is reported as one and fails the caller rather
       # than being wrapped into a plausible number.
       split("31 28 31 30 31 30 31 31 30 31 30 31", mlen, " ")
-      armed = -1; armed_ask = -1; armed_by = "none"
+      armed = -1; armed_ask = -1; armed_by = "none"; armed_age = "-"
       pending = -1; pending_arm = -1; pending_ask = -1; pending_by = "none"
+      pending_age = "-"
       cur = "none"
     }
     # The capture contributes its registrations up to the window, nothing else.
     FILENAME == ARGV[1] && index($0, open) { opened = 1 }
     FILENAME == ARGV[1] && opened { next }
     index($0, "[BackgroundTask] onStart") {
-      armed = -1; armed_ask = -1; armed_by = "none"; cur = "none"; next
+      armed = -1; armed_ask = -1; armed_by = "none"; armed_age = "-"
+      cur = "none"; next
     }
     # Both files feed this: the cycle that armed a registration is whichever one
     # announced itself last before it, and for the handoff registration that
@@ -1088,7 +1129,7 @@ delivery_gaps_after_registration() {
       if (FILENAME != ARGV[1]) {
         if (cur == "delivery") {
           pending = ts($1, $2); pending_arm = armed; pending_ask = armed_ask
-          pending_by = armed_by
+          pending_by = armed_by; pending_age = armed_age
         } else {
           pending = -1
         }
@@ -1096,7 +1137,8 @@ delivery_gaps_after_registration() {
       next
     }
     index($0, "[BackgroundTask] registration armed (") {
-      armed = ts($1, $2); armed_ask = arm_secs($0); armed_by = cur; next
+      armed = ts($1, $2); armed_ask = arm_secs($0); armed_by = cur
+      armed_age = arm_fix_age($0); next
     }
     FILENAME == ARGV[1] { next }
     {
@@ -1105,10 +1147,10 @@ delivery_gaps_after_registration() {
       n = substr($0, i + 13); sub(/\/.*$/, "", n)
       if (n + 0 < 1) next
       if (pending_arm < 0) print "NOARM"
-      else if (pending_ask < 0) printf "%d|ASK|%s\n", \
+      else if (pending_ask < 0) printf "%d|ASK|%s|-\n", \
         int((pending - pending_arm) * 1000 + 0.5), pending_by
-      else printf "%d|%d|%s\n", int((pending - pending_arm) * 1000 + 0.5), \
-        pending_ask * 1000, pending_by
+      else printf "%d|%d|%s|%s\n", int((pending - pending_arm) * 1000 + 0.5), \
+        pending_ask * 1000, pending_by, pending_age
       pending = -1
     }
   ' "${logfile}" "${windowfile}" 2>/dev/null || true
@@ -1456,13 +1498,17 @@ what to look at first."
 # a delivery-driven publish in the window and pass every other clause here while
 # running GNSS far harder than the cadence needs.
 #
-# The floor is DERIVED, not chosen: a second recovery may only follow a new
-# delivery (that is what restores the allowance), a delivery comes no more than
-# ~12 % before the interval the previous recovery asked for (run 42802266653's
-# restarted provider), and the re-arm waits kStreamErrorRearmDelay on top — so
-# never under `kMinFixRequestInterval` apart. So two recoveries closer together than that are one
-# of the two failures the bound exists to catch — a loop, or an allowance that
-# is not being spent.
+# The floor is a loop detector, not a platform bound. A second recovery may only
+# follow a new delivery (that is what restores the allowance), which comes no
+# sooner than 90 % of the previous recovery's ask after the fix it followed
+# (MIN_DELIVERY_GAP_SECS), and the re-arm then waits kStreamErrorRearmDelay. A
+# recovery made late in its interval can be delivered within seconds, so two
+# genuine recoveries under `kMinFixRequestInterval` apart need two reaps inside
+# it — and in every capture so far a reap is one cluster of Play-services deaths
+# under 3 s long (runs 42802266653, 46116377002), which the re-arm outlasts, so
+# a cluster spends one recovery. Two recoveries closer together than that are
+# therefore one of the two failures the bound exists to catch — a loop, or an
+# allowance that is not being spent.
 recovery_gaps() {
   awk -v m="${MARK_TRIGGER_ANY}${MARK_TRIGGER_REARM}" "${AWK_TS_FN}"'
     BEGIN {
@@ -1483,7 +1529,8 @@ recovery_gaps() {
 # Oracle step 7 — the cadence is delivery-driven, and spaced.
 # ---------------------------------------------------------------------------
 assert_cadence_oracle() {
-  local windowfile="$1" logfile="$2" rc=0 publishes gap ask by measured=0 floor
+  local windowfile="$1" logfile="$2" rc=0 publishes gap ask by age measured=0
+  local floor
   publishes="$(successful_publish_count "${windowfile}")"
   if (( publishes < 2 )); then
     echo "FAIL: only ${publishes} successful publish(es) in the proof window. The hold \
@@ -1492,7 +1539,7 @@ publish that follows it is not optional — one publish means the platform deliv
 and never again."
     rc=1
   fi
-  while IFS='|' read -r gap ask by; do
+  while IFS='|' read -r gap ask by age; do
     [[ -n "${gap}" ]] || continue
     measured=$((measured + 1))
     if [[ "${gap}" == "NOARM" ]]; then
@@ -1503,24 +1550,26 @@ supposed to space it cannot be read from this capture at all."
       continue
     fi
     # The steady-state floor, unless a RECOVERY cycle armed the registration —
-    # then it is 90 % of what that registration actually asked for where that
-    # is lower, which is the same rule applied to the one registration whose
-    # ask can sit under the constant (see MIN_DELIVERY_GAP_SECS). Attributed by
-    # the arming cycle, never by the interval: run 34511084722's 40 s
-    # registration came from a delivery-driven cycle and its 45 s delivery must
-    # stay a failure.
+    # then it is 90 % of what that registration asked for, measured from the
+    # fix it followed rather than from the arm, where that is lower: the same
+    # rule, applied to the one registration whose ask can sit under the
+    # constant and whose anchor is not the arm (see MIN_DELIVERY_GAP_SECS).
+    # Attributed by the arming cycle, never by the interval: run 34511084722's
+    # 40 s registration came from a delivery-driven cycle and its 45 s delivery
+    # must stay a failure.
     floor=$(( MIN_DELIVERY_GAP_SECS * 1000 ))
     if [[ "${by}" == "${MARK_TRIGGER_REARM}" ]]; then
-      if [[ "${ask}" == "ASK" ]]; then
-        echo "FAIL: a recovery '${MARK_REG_ARMED}' line in the window carries no \
-readable '(<seconds>s)' suffix, so the interval its delivery must clear cannot be \
-computed. The marker's grammar changed; fix the parser and its fixtures, never the \
-floor."
+      if [[ "${ask}" == "ASK" || "${age}" == "-" ]]; then
+        echo "FAIL: a recovery '${MARK_REG_ARMED}' line in the window does not read \
+'(<seconds>s, fix <offset>s|none)', so the interval its delivery must clear, or the \
+fix it is measured from, cannot be computed. The marker's grammar changed; fix the \
+parser and its fixtures, never the floor."
         rc=1
         continue
       fi
-      if (( ask * 9 / 10 < floor )); then
-        floor=$(( ask * 9 / 10 ))
+      [[ "${age}" == "none" ]] && age=0
+      if (( ask * 9 / 10 - age < floor )); then
+        floor=$(( ask * 9 / 10 - age ))
       fi
     fi
     if (( gap < 0 )); then
@@ -1533,8 +1582,8 @@ this capture."
 registration, under the $((floor / 1000)) s floor. In the steady state that floor is \
 ${MIN_DELIVERY_GAP_SECS} s (90 % of ${MIN_FIX_INTERVAL_SECS} s); on a \
 '${MARK_TRIGGER_REARM}' registration it is 90 % of the interval that registration asked \
-for where that is lower. The FGS is being woken by something other than its own \
-registered interval."
+for, less the age of the fix it followed, where that is lower. The FGS is being woken \
+by something other than its own registered interval."
       rc=1
     fi
   done < <(delivery_gaps_after_registration "${windowfile}" "${logfile}")
@@ -1546,9 +1595,10 @@ registered interval."
       echo "FAIL: two '${MARK_TRIGGER_ANY}${MARK_TRIGGER_REARM}' cycles \
 $((rgap / 1000)) s apart, under the ${PLATFORM_MIN_INTERVAL_SECS} s \
 (kMinFixRequestInterval) floor. A second recovery may only follow a NEW delivery — that \
-is what restores the one-per-registration allowance — and a delivery does not arrive \
-much sooner than the interval the previous recovery asked for. So this is either a re-arm \
-loop against a provider that cannot answer, or an allowance that is not being spent."
+is what restores the one-per-registration allowance — and one Play-services reap spends \
+one recovery. So this is either a re-arm loop against a provider that cannot answer, or \
+an allowance that is not being spent (unless the CONTEXT below shows two separate reaps \
+inside that window, which no capture so far has)."
       rc=1
     fi
   done < <(recovery_gaps "${windowfile}")
@@ -2239,7 +2289,7 @@ run_self_test() {
   # Pinned by EQUALITY, never by a floor: the run used to end with a hard-coded
   # "all N fixtures passed" and no counter, so deleting a case left the message
   # — and the exit code — untouched. Mirrors check_android_location_power.sh.
-  local -r SELF_TEST_FIXTURES=143
+  local -r SELF_TEST_FIXTURES=150
   local tmp fail=0 checked=0 got
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -2967,7 +3017,7 @@ the cadence oracle" >&2
   #      18:23:16.091 -> 18:24:55.341.
   _case
   got="$(delivery_gaps_after_registration "${tmp}/real.ok.window" "${tmp}/real.ok.log")"
-  if [[ "${got}" != "99250|98000|paused-signal" ]]; then
+  if [[ "${got}" != "99250|98000|paused-signal|-" ]]; then
     echo "SELF-TEST FAIL (66): run 34511084722's first delivery paired as '${got}', \
 expected 99250 ms after the handoff cycle's registration" >&2
     fail=1
@@ -3025,7 +3075,7 @@ paired as '${got}' instead of failing as NOARM" >&2
   _case
   got="$(delivery_gaps_after_registration "${tmp}/real.floor.window" \
     "${tmp}/real.floor.log")"
-  if [[ "${got}" != "44994|40000|delivery" ]] \
+  if [[ "${got}" != "44994|40000|delivery|-" ]] \
      || assert_cadence_oracle "${tmp}/real.floor.window" "${tmp}/real.floor.log" \
           >/dev/null 2>&1; then
     echo "SELF-TEST FAIL (70): run 34511084722's 45 s delivery-driven publish was \
@@ -3072,10 +3122,12 @@ opened was credited to the proof window" >&2
 
   # The recovery the fix produces, placed where kStreamErrorRearmDelay puts it:
   # 5 s after the error, re-aiming at the SAME due-time (04:03:53.5), so the
-  # remainder it asks for is 39 s. The delivery then lands at the bound, and one
-  # second under it is a wake that beat the interval the FGS registered for.
+  # remainder it asks for is 39 s. In this build's grammar, and with no fix in
+  # hand, so the anchor is the arm itself: the delivery then lands at the bound,
+  # and one second under it is a wake that beat the interval the FGS registered
+  # for.
   local -r G_TRIG_REARM='09-24 04:03:04.201  4158  4158 I flutter : [BackgroundTask] cycle trigger=stream-error'
-  local -r G_ARM_39='09-24 04:03:04.300  4158  4158 I flutter : [BackgroundTask] registration armed (39s)'
+  local -r G_ARM_39='09-24 04:03:04.300  4158  4158 I flutter : [BackgroundTask] registration armed (39s, fix none)'
   local -r G_TRIG_D_OK='09-24 04:03:40.300  4158  4158 I flutter : [BackgroundTask] cycle trigger=delivery'
   local -r G_TRIG_D_TIGHT='09-24 04:03:39.300  4158  4158 I flutter : [BackgroundTask] cycle trigger=delivery'
   local -r G_ARM_NEXT='09-24 04:03:41.000  4158  4158 I flutter : [BackgroundTask] registration armed (97s)'
@@ -3113,7 +3165,7 @@ process death and the stream error that explain it, verbatim. Got: ${got}" >&2
   _case
   got="$(delivery_gaps_after_registration "${tmp}/gms.fixed.window" \
     "${tmp}/gms.fixed.log")"
-  if [[ "${got}" != "36000|39000|${MARK_TRIGGER_REARM}" ]] \
+  if [[ "${got}" != "36000|39000|${MARK_TRIGGER_REARM}|none" ]] \
      || ! assert_cadence_oracle "${tmp}/gms.fixed.window" \
           "${tmp}/gms.fixed.log" >/dev/null; then
     echo "SELF-TEST FAIL (71c): a delivery 36 s after a 39 s RECOVERY registration was \
@@ -3160,10 +3212,9 @@ against its own ask" >&2
   #      side would otherwise notice a 5 s re-arm loop at the platform floor: it
   #      would still leave a delivery-driven publish in the window and pass
   #      every other clause here. A second recovery may only follow a NEW
-  #      delivery, and a delivery comes at most ~12 % before the interval the
-  #      previous recovery asked for, plus the 5 s re-arm — so ${PLATFORM_MIN_INTERVAL_SECS} s apart is the
-  #      derived floor. (No preceding `fix stream error:` is required: `onDone`
-  #      raises none.)
+  #      delivery, and one reap spends one recovery, so ${PLATFORM_MIN_INTERVAL_SECS} s apart is the
+  #      floor (see `recovery_gaps`). (No preceding `fix stream error:` is
+  #      required: `onDone` raises none.)
   local -r G_TRIG_REARM_LOOP='09-24 04:03:09.201  4158  4158 I flutter : [BackgroundTask] cycle trigger=stream-error'
   local -r G_TRIG_REARM_FAR='09-24 04:03:44.301  4158  4158 I flutter : [BackgroundTask] cycle trigger=stream-error'
   _real_capture gms.loop "${G_ONSTART}" "${G_PAUSE}" "${G_TRIG_PAUSED}" \
@@ -3193,13 +3244,14 @@ not per service lifetime" >&2
     fail=1
   fi
 
-  # (71k) Run 42802266653: a recovery that asked for 129 s, and the restarted
-  #      fused provider delivering 113.6 s in — under 90 % of the ask, over the
+  # (71k) Run 42802266653: a recovery that asked for 129 s ~18 s after its fix
+  #      (the handoff's, 11:30:02 -> 11:30:20; the age is the one this build
+  #      would print), delivered 113.6 s in — under 90 % of the ask, over the
   #      ${MIN_DELIVERY_GAP_SECS} s a steady-state registration is held to. A
   #      recovery is held to no more than that.
   # (71l) …and a delivery under the constant after that long recovery ask is
   #      still the finding the constant makes everywhere.
-  local -r G_ARM_129='09-24 04:03:04.300  4158  4158 I flutter : [BackgroundTask] registration armed (129s)'
+  local -r G_ARM_129='09-24 04:03:04.300  4158  4158 I flutter : [BackgroundTask] registration armed (129s, fix -18s)'
   local -r G_TRIG_D_EARLY='09-24 04:04:57.900  4158  4158 I flutter : [BackgroundTask] cycle trigger=delivery'
   local -r G_ARM_EARLY='09-24 04:04:58.600  4158  4158 I flutter : [BackgroundTask] registration armed (97s)'
   local -r G_PUB_D_EARLY='09-24 04:04:59.000  4158  4158 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).'
@@ -3213,7 +3265,7 @@ not per service lifetime" >&2
   _case
   got="$(delivery_gaps_after_registration "${tmp}/gms.early.window" \
     "${tmp}/gms.early.log")"
-  if [[ "${got}" != "113600|129000|${MARK_TRIGGER_REARM}" ]] \
+  if [[ "${got}" != "113600|129000|${MARK_TRIGGER_REARM}|18000" ]] \
      || ! assert_cadence_oracle "${tmp}/gms.early.window" \
           "${tmp}/gms.early.log" >/dev/null; then
     echo "SELF-TEST FAIL (71k): a delivery 113.6 s after a 129 s RECOVERY registration \
@@ -3231,6 +3283,141 @@ ${MIN_DELIVERY_GAP_SECS} s, and a recovery to no more" >&2
        >/dev/null 2>&1; then
     echo "SELF-TEST FAIL (71l): a delivery 54 s after a 129 s recovery registration \
 passed; the ${MIN_DELIVERY_GAP_SECS} s floor still applies to it" >&2
+    fail=1
+  fi
+  # (71r) …and the cap is the constant, not the anchor's 98 s: a delivery 60 s
+  #       in passes, as it would on a steady-state registration of any length.
+  _real_capture gms.cap "${G_ONSTART}" "${G_PAUSE}" "${G_TRIG_PAUSED}" \
+    "${G_ACQUIRED}" "${G_ARM_62}" "${G_HANDOFF}" "${G_PUB_HANDOFF}" \
+    "${G_GMS_DEATH}" "${G_STREAM_ERR}" "${G_TRIG_REARM}" "${G_ARM_129}" \
+    "${G_TRIG_D_FAST/04:03:58.300/04:04:04.300}" \
+    "${G_ARM_FAST/04:03:59.000/04:04:05.000}" \
+    "${G_PUB_D_FAST/04:03:59.400/04:04:05.400}" "${G_HOLD}"
+  _case
+  if ! assert_cadence_oracle "${tmp}/gms.cap.window" "${tmp}/gms.cap.log" \
+       >/dev/null; then
+    echo "SELF-TEST FAIL (71r): a delivery 60 s after a 129 s recovery registration \
+was held above the ${MIN_DELIVERY_GAP_SECS} s a steady-state registration is held to" >&2
+    assert_cadence_oracle "${tmp}/gms.cap.window" "${tmp}/gms.cap.log" >&2 || true
+    fail=1
+  fi
+
+  # --- the recovery's anchor, on run 46116377002's own lines ----------------
+  # Verbatim but for two things: the `fix` field this build adds to each arm,
+  # at the age it would print (the handoff cycle armed before its fix arrived;
+  # the recovery armed ~13 s after that fix; the delivery cycle just after its
+  # own), and the drive's three markers, which that job's log does not carry
+  # with a stamp and are placed where the sequence puts them. Play services
+  # reaped its processes 6.6 s after a 66 s arm, the recovery asked for the
+  # 53 s remainder, and the platform delivered 43.6 s in — at `fix + ask` plus
+  # an acquisition, which the old floor (47 s, measured from the arm) failed.
+  local -r N_ONSTART='11-28 08:09:26.049  4154  4154 I flutter : [BackgroundTask] onStart (starter=TaskStarter.developer)'
+  local -r N_PAUSE='11-28 08:09:37.520  4154  4154 I flutter : [b1] PAUSE_DELIVERED pid=4154'
+  local -r N_TRIG_PAUSED='11-28 08:09:37.612  4154  4154 I flutter : [BackgroundTask] cycle trigger=paused-signal'
+  local -r N_ACQUIRED='11-28 08:09:38.043  4154  4154 I flutter : [BackgroundTask] session acquired'
+  local -r N_ARM_66='11-28 08:09:38.084  4154  4154 I flutter : [BackgroundTask] registration armed (66s, fix none)'
+  local -r N_PUB_HANDOFF='11-28 08:09:38.671  4154  4154 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).'
+  local -r N_HANDOFF='11-28 08:09:38.900  4154  4154 I flutter : [b1] HANDOFF_CONFIRMED'
+  local -r N_GMS_DEATH='11-28 08:09:44.702   515  2453 I ActivityManager: Process com.google.android.gms (pid 1600) has died: fg  BFGS'
+  local -r N_GMS_PERSISTENT_DEATH='11-28 08:09:44.732   515   787 I ActivityManager: Process com.google.android.gms.persistent (pid 1107) has died: fg  BFGS'
+  local -r N_STREAM_ERR='11-28 08:09:45.734  4154  4154 I flutter : [BackgroundTask] fix stream error: LocationServiceDisabledException'
+  local -r N_TRIG_REARM='11-28 08:09:50.738  4154  4154 I flutter : [BackgroundTask] cycle trigger=stream-error'
+  local -r N_ARM_53='11-28 08:09:50.754  4154  4154 I flutter : [BackgroundTask] registration armed (53s, fix -13s)'
+  local -r N_TRIG_D='11-28 08:10:34.313  4154  4154 I flutter : [BackgroundTask] cycle trigger=delivery'
+  local -r N_ARM_146='11-28 08:10:34.329  4154  4154 I flutter : [BackgroundTask] registration armed (146s, fix 0s)'
+  local -r N_PUB_D='11-28 08:10:54.677  4154  4154 I flutter : [BackgroundTask] Published to 1/1 due circle(s) (1 eligible), fetched 1/1 circle(s).'
+  local -r N_HOLD='11-28 08:12:58.000  4154  4154 I flutter : [b1] HOLD_COMPLETE'
+
+  # Writes the run's capture with the recovery arm and the delivery trigger
+  # replaced: _recovery_capture <name> <arm line> <delivery trigger line>.
+  _recovery_capture() {
+    _real_capture "$1" "${N_ONSTART}" "${N_PAUSE}" "${N_TRIG_PAUSED}" \
+      "${N_ACQUIRED}" "${N_ARM_66}" "${N_PUB_HANDOFF}" "${N_HANDOFF}" \
+      "${N_GMS_DEATH}" "${N_GMS_PERSISTENT_DEATH}" "${N_STREAM_ERR}" \
+      "${N_TRIG_REARM}" "$2" "$3" "${N_ARM_146}" "${N_PUB_D}" "${N_HOLD}"
+  }
+
+  # (71m) The run itself passes: 90 % of 53 s from a fix 13 s before the arm is
+  #       34.7 s after it, and the delivery came 43.6 s after it.
+  _recovery_capture anchor.real "${N_ARM_53}" "${N_TRIG_D}"
+  _case
+  got="$(delivery_gaps_after_registration "${tmp}/anchor.real.window" \
+    "${tmp}/anchor.real.log")"
+  if [[ "${got}" != "43559|53000|${MARK_TRIGGER_REARM}|13000" ]] \
+     || ! assert_cadence_oracle "${tmp}/anchor.real.window" \
+          "${tmp}/anchor.real.log" >/dev/null; then
+    echo "SELF-TEST FAIL (71m): run 46116377002's recovery — a 53 s ask armed 13 s \
+after its fix, delivered 43.6 s in — was not credited (paired as '${got}'); the \
+platform measures that ask from the fix, not from the arm" >&2
+    assert_cadence_oracle "${tmp}/anchor.real.window" "${tmp}/anchor.real.log" >&2 || true
+    fail=1
+  fi
+
+  # (71n) The anchor's floor is exact: a delivery at 34.7 s passes, and one a
+  #       second earlier — before the platform's own gate measured from that
+  #       fix — is a wake the registration did not buy.
+  _recovery_capture anchor.floor "${N_ARM_53}" \
+    "${N_TRIG_D/08:10:34.313/08:10:25.454}"
+  _recovery_capture anchor.early "${N_ARM_53}" \
+    "${N_TRIG_D/08:10:34.313/08:10:24.454}"
+  _case
+  if ! assert_cadence_oracle "${tmp}/anchor.floor.window" \
+       "${tmp}/anchor.floor.log" >/dev/null; then
+    echo "SELF-TEST FAIL (71n): a recovery delivery exactly 90 % of its 53 s ask \
+after its fix was rejected" >&2
+    assert_cadence_oracle "${tmp}/anchor.floor.window" "${tmp}/anchor.floor.log" >&2 || true
+    fail=1
+  fi
+  _case
+  if assert_cadence_oracle "${tmp}/anchor.early.window" "${tmp}/anchor.early.log" \
+       >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (71n): a recovery delivery 33.7 s after a 53 s arm, a \
+second under 90 % of the ask measured from its fix 13 s earlier, passed" >&2
+    fail=1
+  fi
+
+  # (71o) The age is what moves the anchor: the same delivery after the same
+  #       ask, with no fix in hand, is measured from the arm and fails.
+  _recovery_capture anchor.nofix "${N_ARM_53/fix -13s/fix none}" "${N_TRIG_D}"
+  _case
+  if assert_cadence_oracle "${tmp}/anchor.nofix.window" "${tmp}/anchor.nofix.log" \
+       >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (71o): a 43.6 s delivery after a 53 s recovery arm that held \
+no fix passed — with no fix the arm is the anchor and the floor is 47.7 s" >&2
+    fail=1
+  fi
+
+  # (71p) A recovery arm without the field cannot be measured from its fix, and
+  #       says so rather than falling back to a floor that is not the
+  #       platform's.
+  _recovery_capture anchor.nofield "${N_ARM_53/, fix -13s/}" "${N_TRIG_D}"
+  _case
+  got="$(assert_cadence_oracle "${tmp}/anchor.nofield.window" \
+    "${tmp}/anchor.nofield.log" || true)"
+  if [[ "${got}" != *"does not read"* ]]; then
+    echo "SELF-TEST FAIL (71p): a recovery arm with no 'fix' field was not failed as \
+a marker-grammar change. Got: ${got}" >&2
+    fail=1
+  fi
+
+  # (71q) THE ANCHOR MUST NOT LEAK. Run 34511084722's 45 s delivery after a 40 s
+  #       delivery-driven arm, in this build's grammar and with a 13 s-old fix
+  #       on the line: only a recovery's ask is measured from its fix, so the
+  #       ${MIN_DELIVERY_GAP_SECS} s floor still fails it.
+  _real_capture real.floor.aged "${R_ONSTART}" "${R_PAUSE}" "${R_TRIG_PAUSED}" \
+    "${R_ACQUIRED}" "${R_ARM_98}" "${R_HANDOFF}" "${R_PUB_HANDOFF}" \
+    "${R_TRIG_WD}" "${R_ARM_31}" "${R_PUB_WD}" "${R_TRIG_D2}" \
+    "${R_ARM_40/(40s)/(40s, fix -13s)}" "${R_TRIG_D3}" "${R_ARM_116}" \
+    "${R_PUB_D3}" "${R_HOLD}"
+  _case
+  got="$(delivery_gaps_after_registration "${tmp}/real.floor.aged.window" \
+    "${tmp}/real.floor.aged.log")"
+  if [[ "${got}" != "44994|40000|delivery|13000" ]] \
+     || assert_cadence_oracle "${tmp}/real.floor.aged.window" \
+          "${tmp}/real.floor.aged.log" >/dev/null 2>&1; then
+    echo "SELF-TEST FAIL (71q): a 45 s delivery after a 40 s DELIVERY-armed \
+registration carrying a fix age passed (paired as '${got}') — the age may move only a \
+'${MARK_TRIGGER_REARM}' registration's anchor" >&2
     fail=1
   fi
 
@@ -3290,7 +3477,7 @@ stream was reported as undisturbed. Got: ${got}" >&2
   got="$(successful_publish_count "${tmp}/race.ok.window")/$(delivery_gaps_after_registration \
     "${tmp}/race.ok.window" "${tmp}/race.ok.log")"
   if [[ "$(head -n 1 "${tmp}/race.ok.window")" != "${F_ACQUIRED}" \
-        || "${got}" != "2/109451|108000|paused-signal" ]] \
+        || "${got}" != "2/109451|108000|paused-signal|-" ]] \
      || ! assert_cadence_oracle "${tmp}/race.ok.window" "${tmp}/race.ok.log" >/dev/null; then
     echo "SELF-TEST FAIL (72): run 34740325027's healthy window was not credited \
 (publishes/gap '${got}') — the FGS's own publish 38 ms before '${MARK_HANDOFF_OK}' is \
@@ -3331,7 +3518,7 @@ counted)" >&2
   got="$(delivery_gaps_after_registration "${tmp}/race.onstart.window" \
     "${tmp}/race.onstart.log")"
   if [[ "$(head -n 1 "${tmp}/race.onstart.window")" != "${R_HANDOFF}" \
-        || "${got}" != "99250|98000|paused-signal" ]] \
+        || "${got}" != "99250|98000|paused-signal|-" ]] \
      || ! assert_cadence_oracle "${tmp}/race.onstart.window" \
           "${tmp}/race.onstart.log" >/dev/null; then
     echo "SELF-TEST FAIL (74): with no '${MARK_SESSION_ACQUIRED}' after the pause the \

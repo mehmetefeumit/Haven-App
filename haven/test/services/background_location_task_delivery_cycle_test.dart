@@ -896,6 +896,106 @@ void main() {
       );
     });
 
+    // The B1 cadence oracle's anchor, pinned in the marker's own text. On S+
+    // the platform measures a new request's first delivery from its last
+    // location, not from the registration, so a recovery armed 13 s after the
+    // fix it follows delivers ~13 s before its own ask runs out (CI run
+    // 46116377002). The oracle reads that age off this line, and only as an
+    // offset: an instant here would be a Rule-15 breach.
+    test('the registration marker carries the age of the newest fix in hand, '
+        'as an offset', () async {
+      final base = DateTime.now();
+      var now = base;
+      final harness = await deliveringHarness();
+      harness.handler.clockForTest = () => now;
+      harness.location.clock = () => now;
+      harness.location.historicalFix = freshFix(at: base);
+      final log = _captureDebugPrint();
+
+      // Armed BEFORE the cycle's first fix arrives: nothing is in hand yet.
+      await harness.tick(base);
+      expect(harness.manager.sealCalls, hasLength(1));
+      expect(
+        log,
+        contains('[BackgroundTask] registration armed (90s, fix none)'),
+      );
+
+      // A delivery with nothing due publishes nothing and re-arms nothing,
+      // but the platform measures the next delivery from it all the same.
+      now = base.add(const Duration(seconds: 5));
+      await harness.deliverFix(freshFix(at: now));
+      expect(harness.manager.sealCalls, hasLength(1));
+      expect(harness.location.capturedProfiles, hasLength(1));
+
+      now = base.add(const Duration(seconds: 18, milliseconds: 400));
+      harness.location.failStream(Exception('provider process died'));
+      await _settleRearm(harness);
+
+      expect(
+        log.last,
+        '[BackgroundTask] registration armed (71s, fix -13s)',
+        reason: 'the recovery re-aims at the same target (71.6 s left) and '
+            'the fix it follows was taken 13.4 s earlier; whole seconds, '
+            'truncated toward zero, so the oracle never over-credits the age',
+      );
+    });
+
+    test('a fix the cycle acquired itself is an anchor too, and an older '
+        'answer never moves the anchor back', () async {
+      final base = DateTime.now();
+      var now = base;
+      final harness = await deliveringHarness();
+      harness.handler.clockForTest = () => now;
+      harness.location.clock = () => now;
+      harness.location.historicalFix = freshFix(at: base);
+      await harness.tick(base);
+      expect(harness.manager.sealCalls, hasLength(1));
+
+      // The circle is overdue and the registration silent past
+      // kStreamPositionMaxAge, so the watchdog re-issues it and the one-shot
+      // chain answers with a last-known position months older than the fix
+      // already in hand — the provider caches what it last produced, and that
+      // older answer is not where it measures from.
+      now = base.add(const Duration(seconds: 200));
+      final log = _captureDebugPrint();
+      await harness.tick(now);
+      expect(harness.location.oneShotRequests, 1);
+      expect(harness.manager.sealCalls, hasLength(2));
+      expect(
+        log,
+        contains('[BackgroundTask] registration armed (90s, fix -200s)'),
+      );
+
+      now = base.add(const Duration(seconds: 210));
+      harness.location.failStream(Exception('provider process died'));
+      await _settleRearm(harness);
+      expect(log.last, '[BackgroundTask] registration armed (80s, fix -210s)');
+    });
+
+    test('a one-shot fix taken with nothing delivered is the anchor', () async {
+      final base = DateTime.now();
+      var now = base;
+      final harness = await BackgroundTaskHarness.start(
+        circles: [circleFixture(seed: 1)],
+        events: FakeLocationEventService(jitteredSecs: 100),
+        location: FakeLocationService(
+          fix: () async =>
+              freshFix(at: base.subtract(const Duration(seconds: 3))),
+        ),
+      );
+      harness.handler.clockForTest = () => now;
+      harness.location.clock = () => now;
+      await harness.tick(base);
+      expect(harness.location.oneShotRequests, 1);
+      expect(harness.manager.sealCalls, hasLength(1));
+
+      final log = _captureDebugPrint();
+      now = base.add(const Duration(seconds: 10));
+      harness.location.failStream(Exception('provider process died'));
+      await _settleRearm(harness);
+      expect(log.last, '[BackgroundTask] registration armed (80s, fix -13s)');
+    });
+
     test('the recovery cycle publishes nothing that is not due', () async {
       final harness = await deliveringHarness();
       await harness.tick(DateTime.now());

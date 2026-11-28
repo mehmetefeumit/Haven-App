@@ -1695,7 +1695,7 @@ closed`; all three are in the CONTEXT block):
 | a disturbance, then `cycle trigger=stream-error` within ~5 s, and still no delivery-driven publish | the recovery ran and the platform still did not deliver — look at the emulator's GNSS feed and at `dumpsys location`, not at the FGS |
 | a disturbance and NO `stream-error` cycle after it | the recovery did not run. Check `_scheduleStreamErrorRearm`'s two callers, the one-per-registration allowance (`_streamErrorRearmSpent`, restored only by a NEW fix) and whether `onDestroy` had already started |
 | two `stream-error` cycles under `kMinFixRequestInterval` apart (step 7 fails on this by itself) | a re-arm loop, or an allowance being restored by something other than a delivery |
-| no disturbance at all (the CONTEXT block says so explicitly) | the provider was up throughout, so this is a cadence defect in the FGS itself — start at the `registration armed (Ns)` lines and the interval they asked for |
+| no disturbance at all (the CONTEXT block says so explicitly) | the provider was up throughout, so this is a cadence defect in the FGS itself — start at the `registration armed (Ns, fix …)` lines and the interval they asked for |
 
 **A recovery registration is legitimately shorter than 62 s**, because it asks for
 the REMAINDER of the interval the platform killed. Steps (5) and (7) attribute that
@@ -1707,9 +1707,19 @@ under later `trigger=delivery` cycles (the red capture's own shape, harmless the
 only because the request was 128 s). Below 62 s is allowed only for a
 `stream-error`-armed request, never below `kMinFixRequestInterval` (31 s), and the
 delivery after such a registration is measured against 90 % of what THAT
-registration asked for. On every other cycle the 62 s / 55 s floors are unchanged —
+registration asked for, counted from the fix it followed rather than from the arm,
+and never above 55 s. On S+ the platform measures a new request's first delivery
+from its last location (`docs/POWER_EFFICIENCY_PLAN.md` §2.2); a steady-state arm
+follows its fix by under a second, but a recovery arms at least
+`kStreamErrorRearmDelay` after the stream died — run 46116377002's recovery asked
+for 53 s, 13 s after its fix, and was delivered, correctly, 43.6 s after the arm, which the
+arm-anchored floor (47 s) failed. The arm line carries that age as `fix -Ns`
+(`none` with no fix in hand, which leaves the arm as the anchor); a recovery arm
+without the field fails step (7) as a grammar change rather than fall back to a
+floor the platform does not apply. On every other cycle the 62 s / 55 s floors are unchanged —
 including the 40 s registration run 34511084722 produced from a delivery-driven
-cycle, which stays a failure (self-test fixtures `(34c)`, `(34e)`, `(70)`, `(71e)`).
+cycle, which stays a failure even with a fix age on its line (self-test fixtures
+`(34c)`, `(34e)`, `(70)`, `(71e)`, `(71q)`; the recovery's anchor is `(71m)`–`(71p)`).
 
 **One shape is deliberately NOT carved out**, so it is not rediscovered as a
 regression: a *watchdog* re-aim on a suspect registration with nothing due asks for
