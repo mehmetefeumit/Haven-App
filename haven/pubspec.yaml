@@ -22,7 +22,7 @@ dependencies:
   flutter_rust_bridge: 2.11.1
   rust_lib_haven:
     path: rust_builder
-  geolocator: ^14.0.0
+  geolocator: ^14.1.2
   flutter_foreground_task: ^9.2.2
   # Pinned to 10.0.x: 10.1.0 (released 2026-05-06) is too fresh for a
   # security-critical secure-storage minor bump per our 14-day soak rule.
